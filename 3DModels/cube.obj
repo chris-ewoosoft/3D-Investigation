@@ -1,0 +1,33 @@
+mtllib cube.mtl
+
+# Mặt trước (màu đỏ)
+v -0.5 -0.5  0.5
+v  0.5 -0.5  0.5
+v  0.5  0.5  0.5
+v -0.5  0.5  0.5
+usemtl red
+f 1 2 3 4
+
+# Mặt sau (màu xanh lá)
+v -0.5 -0.5 -0.5
+v  0.5 -0.5 -0.5
+v  0.5  0.5 -0.5
+v -0.5  0.5 -0.5
+usemtl green
+f 5 6 7 8
+
+# Mặt trên (màu xanh dương)
+usemtl blue
+f 4 3 7 8
+
+# Mặt dưới (màu vàng)
+usemtl yellow
+f 1 2 6 5
+
+# Mặt phải (màu tím)
+usemtl purple
+f 2 3 7 6
+
+# Mặt trái (màu cam)
+usemtl orange
+f 1 4 8 5

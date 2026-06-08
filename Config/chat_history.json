@@ -1,0 +1,12 @@
+[
+    {
+        "content": "Hướng dẫn cài đặt & Biên dịch",
+        "role": "user",
+        "timestamp": "11:25"
+    },
+    {
+        "content": "Theo hướng dẫn trong README.md, đây là các bước chính để cài đặt và biên dịch dự án 3D-Reconstruction:\n\n### 1. Cấu hình CMake\n- Mở dự án trong Qt Creator hoặc VS Code.\n- Đảm bảo các đường dẫn `VTK_DIR`, `OpenCV_DIR`, `PCL_DIR` trong `CMakeLists.txt` đều trỏ đúng vào thư mục cài đặt trên máy bạn.\n\n### 2. Triển khai AI Models\n- Đặt file `yolo11n.onnx` và `yolo11n-seg.onnx` vào thư mục `AITraining/Models`.\n- Khi chạy AI Assistant lần đầu, server sẽ tự động tải model Qwen từ Hugging Face.\n\n### 3. Quy trình Build chi tiết\n- **Bước 1 (Chọn Kit)**: Trong Qt Creator, chọn `Run Reconstruction` và chờ hệ thống xử lý qua luồng riêng (không treo UI).\n\n### 4. Sử dụng AI Assistant\n- Nhấn nút `AI Assistant` trên thanh công cụ.\n- Chọn Model phù hợp với cấu hình RAM/VRAM của máy.\n- Chờ dòng thông báo `Server AI đã sẵn sàng` màu xanh xuất hiện trước khi đặt câu hỏi.\n\n### Liên hệ & Bảo trì\n- Dự án được thiết kế theo hướng module hóa, dễ dàng mở rộng thêm các thuật toán xử lý ảnh y tế hoặc tích hợp thêm các model AI mới.\n\nNếu bạn cần thêm chi tiết về từng bước, hãy liên hệ với nhóm phát triển dự án hoặc tham khảo các tài liệu liên quan.",
+        "role": "assistant",
+        "timestamp": "11:26"
+    }
+]

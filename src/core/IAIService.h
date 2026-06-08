@@ -1,0 +1,51 @@
+#ifndef IAISERVICE_H
+#define IAISERVICE_H
+
+#include <QString>
+
+namespace cv { class Mat; }
+
+/**
+ * @brief Interface trừu tượng cho dịch vụ AI (Detection & Segmentation).
+ *
+ * Plugin sử dụng interface này thay vì phụ thuộc trực tiếp vào AIProcessor.
+ *
+ * Cách dùng trong Plugin:
+ *   auto* ai = ctx->services()->get<IAIService>();
+ *   if (ai && ai->isDetectionReady()) {
+ *       cv::Mat result = ai->runDetection(inputMat);
+ *   }
+ */
+class IAIService {
+public:
+    virtual ~IAIService() = default;
+
+    // --- Model Loading ---
+    /** Tải model detection (ONNX). Trả về true nếu thành công. */
+    virtual bool loadDetectionModel(const QString& modelPath) = 0;
+
+    /** Tải model segmentation (ONNX). Trả về true nếu thành công. */
+    virtual bool loadSegmentationModel(const QString& modelPath) = 0;
+
+    // --- State Query ---
+    /** Kiểm tra detection model đã sẵn sàng chưa. */
+    virtual bool isDetectionReady() const = 0;
+
+    /** Kiểm tra segmentation model đã sẵn sàng chưa. */
+    virtual bool isSegmentationReady() const = 0;
+
+    // --- Inference ---
+    /**
+     * Chạy object detection trên ảnh đầu vào.
+     * @return cv::Mat với bounding boxes đã vẽ, hoặc empty nếu lỗi.
+     */
+    virtual cv::Mat runDetection(const cv::Mat& inputImage) = 0;
+
+    /**
+     * Chạy instance segmentation trên ảnh đầu vào.
+     * @return cv::Mat với masks đã vẽ, hoặc empty nếu lỗi.
+     */
+    virtual cv::Mat runSegmentation(const cv::Mat& inputImage) = 0;
+};
+
+#endif // IAISERVICE_H
