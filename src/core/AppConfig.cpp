@@ -11,9 +11,13 @@ AppConfig& AppConfig::instance() {
 
 void AppConfig::initialize(const QString& appDir) {
     m_appDir = appDir;
-    // Assuming the executable is in build/Desktop-Release/
-    // Project root is two directories up. In a real deployment, this would be different.
-    m_projectRoot = QDir::cleanPath(m_appDir + "/../../");
+    
+    // Find project root by looking for CMakeLists.txt
+    QDir dir(m_appDir);
+    while (!dir.isRoot() && !dir.exists("CMakeLists.txt")) {
+        dir.cdUp();
+    }
+    m_projectRoot = dir.absolutePath();
 
     QFileInfo configInfo(configPath());
     QDir configDir = configInfo.absoluteDir();

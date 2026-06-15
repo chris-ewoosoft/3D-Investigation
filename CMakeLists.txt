@@ -1,8 +1,18 @@
 cmake_minimum_required(VERSION 3.19)
 project(3D-Reconstruction LANGUAGES CXX)
 
+# Fix future timestamps that cause constant rebuilds in MSBuild
+if(WIN32)
+    execute_process(
+        COMMAND powershell -Command "Get-ChildItem -Recurse -File | Where-Object { $_.LastWriteTime -gt (Get-Date) } | ForEach-Object { $_.LastWriteTime = (Get-Date) }"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+endif()
+
 # ─── 1. Qt6 ───────────────────────────────────────────────────────────────────
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets OpenGL Network Concurrent OpenGLWidgets)
+find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets OpenGL Network Concurrent OpenGLWidgets Svg SvgWidgets)
 qt_standard_project_setup()
 
 # ─── 2. VTK ───────────────────────────────────────────────────────────────────
@@ -36,7 +46,7 @@ find_package(PCL REQUIRED COMPONENTS common filters io)
 include(FetchContent)
 set(ONNXRUNTIME_VERSION "1.20.1")
 set(ONNXRUNTIME_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-win-x64-gpu-${ONNXRUNTIME_VERSION}.zip")
-
+# set(ONNXRUNTIME_URL "F:/onnxruntime-win-x64-gpu-1.20.1.zip")
 FetchContent_Declare(onnxruntime URL ${ONNXRUNTIME_URL})
 FetchContent_GetProperties(onnxruntime)
 if(NOT onnxruntime_POPULATED)
@@ -252,11 +262,33 @@ add_custom_command(TARGET 3D-Reconstruction POST_BUILD
 
 # Copy missing PCL, VTK 9.4, and OpenNI2 DLLs required at runtime
 add_custom_command(TARGET 3D-Reconstruction POST_BUILD
-    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\3rdParty\\VTK\\bin\\*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
-    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\bin\\*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
+    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\3rdParty\\VTK\\bin\\vtk*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
+    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\bin\\pcl*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\boost*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\flann*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\qhull*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force -ErrorAction SilentlyContinue"
     COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\OpenNI2\\Tools\\*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
-    COMMENT "Copying all PCL, VTK 9.4, and OpenNI dependencies to output directory using PowerShell"
+    COMMENT "Copying PCL, VTK, and OpenNI dependencies safely (avoiding Qt/vcpkg DLL Hell)"
 )
+
+# ─── Deploy Qt Plugins Manually (Bypassing windeployqt) ────────────────────
+# vcpkg often does not build windeployqt.exe. Falling back to the system's windeployqt
+# causes ABI mismatches (mixing Qt 6.5 and Qt 6.9 DLLs).
+# vcpkg AppLocal already deploys Qt DLLs like Qt6Core.dll. We just manually copy the plugins!
+file(GLOB_RECURSE QWINDOWS_DLL_PATH "${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/x64-windows/*/qwindows.dll")
+if(QWINDOWS_DLL_PATH)
+    list(GET QWINDOWS_DLL_PATH 0 QWINDOWS_DLL_FIRST)
+    get_filename_component(PLATFORMS_DIR "${QWINDOWS_DLL_FIRST}" DIRECTORY)
+    get_filename_component(PLUGINS_ROOT "${PLATFORMS_DIR}" DIRECTORY)
+    
+    add_custom_command(TARGET 3D-Reconstruction POST_BUILD
+        COMMAND powershell -Command "if (Test-Path '${PLATFORMS_DIR}') { Copy-Item -Path '${PLATFORMS_DIR}' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/imageformats') { Copy-Item -Path '${PLUGINS_ROOT}/imageformats' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/iconengines') { Copy-Item -Path '${PLUGINS_ROOT}/iconengines' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/styles') { Copy-Item -Path '${PLUGINS_ROOT}/styles' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMENT "Manually copying Qt plugins from vcpkg (avoiding windeployqt ABI mismatch)"
+    )
+else()
+    message(WARNING "qwindows.dll NOT FOUND in vcpkg_installed! GUI might not start.")
+endif()
+
 
 # Copy translations folder
 add_custom_command(TARGET 3D-Reconstruction POST_BUILD
@@ -266,7 +298,16 @@ add_custom_command(TARGET 3D-Reconstruction POST_BUILD
     COMMENT "Copying translations to output directory"
 )
 
-# ─── 12. Plugins ─────────────────────────────────────────────────────────────
+# ─── 12. Prevent DLL Hell by wiping stale DLLs at Configure time ────────────
+# Because the user previously copied conflicting DLLs (freetype.dll, etc.) into Release,
+# we must forcefully delete them so windeployqt and vcpkg can deploy the correct ones.
+file(GLOB STALE_DLLS "${CMAKE_CURRENT_BINARY_DIR}/Release/*.dll")
+if(STALE_DLLS)
+    file(REMOVE ${STALE_DLLS})
+    message(STATUS "🧹 Wiped stale DLLs from Release directory to prevent DLL Hell conflicts.")
+endif()
+
+# ─── 13. Plugins ─────────────────────────────────────────────────────────────
 add_subdirectory(src/modules)
 
 # ─── 13. Testing ─────────────────────────────────────────────────────────────

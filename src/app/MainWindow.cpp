@@ -272,19 +272,41 @@ void MainWindow::discoverPlugins() {
   QDir pluginsDir(qApp->applicationDirPath());
 
 #if defined(Q_OS_WIN)
-  const QString dirName = pluginsDir.dirName().toLower();
-  if (dirName == "debug" || dirName == "release")
-    pluginsDir.cdUp();
-#endif
-
+  const QString dirName = pluginsDir.dirName();
+  if (dirName.toLower() == "debug" || dirName.toLower() == "release") {
+    // MSBuild puts plugins in build/plugins/Release
+    QDir buildDir = pluginsDir;
+    buildDir.cdUp();
+    if (buildDir.exists("plugins/" + dirName)) {
+      pluginsDir = buildDir;
+      pluginsDir.cd("plugins");
+      pluginsDir.cd(dirName);
+    } else {
+      pluginsDir.cdUp();
+      if (!pluginsDir.cd("plugins")) {
+        qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
+        return;
+      }
+    }
+  } else {
+    if (!pluginsDir.cd("plugins")) {
+      qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
+      return;
+    }
+  }
+#else
   if (!pluginsDir.cd("plugins")) {
-    qWarning() << "Could not find plugins directory:"
-               << pluginsDir.absolutePath();
+    qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
     return;
   }
+#endif
 
   for (const QString &fileName : pluginsDir.entryList(QDir::Files)) {
     if (!QLibrary::isLibrary(fileName))
+      continue;
+
+    // Only load our own plugins to avoid warnings from Qt/vcpkg dependencies
+    if (!fileName.contains("Plugin", Qt::CaseInsensitive))
       continue;
 
     QPluginLoader loader(pluginsDir.absoluteFilePath(fileName));

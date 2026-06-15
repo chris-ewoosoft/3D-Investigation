@@ -46,10 +46,18 @@ if sys.stderr and hasattr(sys.stderr, "reconfigure"):
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", module="keras")
 
 # ─── 1. Stdlib imports ────────────────────────────────────────────────────────
 import re
 import ast
+import base64
 import glob
 import json
 import time
@@ -177,6 +185,14 @@ MODELS = [
         "repo_id":  "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
         "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
         "desc":     "Qwen2.5-coder-7B (Q4_K_M) — Coder",
+    },
+    {
+        "repo_id":       "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF",
+        "filename":      "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+        "desc":          "Qwen2.5-VL-7B (Q4_K_M) — Vision",
+        "is_vision":     True,
+        "mmproj_repo_id":  "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF",
+        "mmproj_filename": "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf",
     },
 ]
 
@@ -709,6 +725,27 @@ knowledge_chunks = []
 bm25_index       = None
 embed_model_ref  = None
 _reranker        = None   # Cross-encoder, load lúc startup nếu USE_RERANKER=True
+is_vision_model  = False  # True khi chạy Qwen2.5-VL (vision model)
+
+
+# ─── 13b. Vision helpers ──────────────────────────────────────────────────────
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+
+
+def _is_image_file(filepath: str) -> bool:
+    """Kiểm tra file có phải ảnh dựa trên extension."""
+    return os.path.splitext(filepath)[1].lower() in _IMAGE_EXTS
+
+
+def _image_to_data_uri(filepath: str) -> str:
+    """Đọc file ảnh và chuyển thành data:image/...;base64,... URI."""
+    ext = os.path.splitext(filepath)[1].lower()
+    mime_map = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png",
+                ".bmp": "bmp", ".gif": "gif", ".webp": "webp"}
+    mime = mime_map.get(ext, "jpeg")
+    with open(filepath, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/{mime};base64,{b64}"
 
 
 def hybrid_retrieve(query: str, k: int = 14, final_k: int = 10) -> list:
@@ -853,6 +890,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 llm = None
+_chat_handler = None  # Qwen25VLChatHandler, chỉ dùng cho vision model
 
 
 def estimate_tokens(text: str) -> int:
@@ -918,6 +956,101 @@ def build_prompt(messages: list, doc_ctx: str, code_ctx: str) -> str:
     return prompt
 
 
+def _build_system_prompt(doc_ctx: str, code_ctx: str) -> str:
+    """Build system prompt chung cho cả text-only và vision model."""
+    system_prompt = (
+        "Bạn là trợ lý AI chuyên nghiệp cho dự án 3D-Reconstruction.\n"
+        "NGUYÊN TẮC TRẢ LỜI:\n"
+        "1. Dựa chủ yếu vào tài liệu và mã nguồn được cung cấp bên dưới để trả lời.\n"
+        "2. Nếu câu hỏi không liên quan đến bất kỳ nội dung nào trong ngữ cảnh, "
+        "   hãy nói ngắn gọn: 'Câu hỏi này nằm ngoài phạm vi tài liệu dự án.' rồi dừng.\n"
+        "3. Không bịa đặt hoặc suy đoán thông tin kỹ thuật không có trong tài liệu.\n"
+        "4. Khi nhắc đến code hoặc tài liệu, hãy ghi rõ số thứ tự nguồn [1], [2]... "
+        "   tương ứng với danh sách ngữ cảnh bên dưới.\n"
+        "5. Ưu tiên trả lời ĐẦY ĐỦ và CHI TIẾT — giải thích từng bước, nêu lý do "
+        "   kỹ thuật, trích dẫn trực tiếp từ tài liệu khi có thể.\n"
+        "6. Cấu trúc câu trả lời: tóm tắt ngắn → giải thích chi tiết → ví dụ/code.\n"
+        "7. Trả lời bằng tiếng Việt trừ khi người dùng hỏi bằng tiếng Anh. Nếu tài liệu "
+        "   nguồn là tiếng Anh, hãy DỊCH và GIẢI THÍCH sang tiếng Việt.\n"
+        "8. LUÔN sử dụng định dạng Markdown (tiêu đề in đậm, bullet points, code blocks "
+        "   có highlight syntax) để trình bày đẹp và dễ đọc.\n"
+        "9. QUAN TRỌNG: Luôn hoàn thành câu cuối cùng trước khi kết thúc. "
+        "   Không bao giờ dừng giữa câu, giữa đoạn code, hoặc giữa danh sách.\n"
+        "10. Nếu người dùng gửi ảnh, hãy phân tích nội dung ảnh chi tiết "
+        "    và liên hệ với tài liệu dự án nếu có thể.\n"
+    )
+    if doc_ctx:
+        system_prompt += f"\n\n{doc_ctx}"
+    if code_ctx:
+        system_prompt += f"\n\n{code_ctx}"
+    if not doc_ctx and not code_ctx:
+        system_prompt += "\n\n[Không tìm thấy ngữ cảnh liên quan. Từ chối theo nguyên tắc số 2.]"
+    return system_prompt
+
+
+def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str) -> list:
+    """
+    Build messages format cho create_chat_completion() — vision model.
+    Ảnh đính kèm được encode thành base64 data URI theo OpenAI multimodal format.
+    Chỉ ảnh ở message cuối cùng được gửi — ảnh cũ trong history bị bỏ qua
+    để tiết kiệm context.
+    """
+    system_prompt = _build_system_prompt(doc_ctx, code_ctx)
+    result = [{"role": "system", "content": system_prompt}]
+
+    # History: chỉ gửi text, bỏ ảnh cũ
+    history = trim_history(list(messages[:-1]), max_tokens=2000)
+    for msg in history:
+        role = "user" if msg.get("role") == "user" else "assistant"
+        content = msg.get("content", "")
+        result.append({"role": role, "content": content})
+
+    # Message cuối: xử lý cả text + ảnh
+    last = messages[-1]
+    content_parts = []
+
+    text_content = last.get("content", "")
+    if text_content:
+        content_parts.append({"type": "text", "text": text_content})
+
+    # Encode ảnh đính kèm thành base64 data URI
+    attachments = last.get("attachments") or []
+    has_images = False
+    for att in attachments:
+        if os.path.isfile(att) and _is_image_file(att):
+            try:
+                data_uri = _image_to_data_uri(att)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_uri}
+                })
+                has_images = True
+                logger.info("Vision: encoded image %s (%d bytes)",
+                           os.path.basename(att), os.path.getsize(att))
+            except Exception as e:
+                logger.error("Failed to encode image %s: %s", att, e)
+                content_parts.append(
+                    {"type": "text", "text": f"[Lỗi đọc ảnh: {os.path.basename(att)}]"}
+                )
+        else:
+            content_parts.append(
+                {"type": "text", "text": f"[File đính kèm: {os.path.basename(att)}]"}
+            )
+
+    # Nếu không có ảnh, thêm hint cho model
+    if attachments and not has_images:
+        content_parts.append(
+            {"type": "text", "text": "[Không có ảnh hợp lệ trong file đính kèm.]"}
+        )
+
+    if not content_parts:
+        content_parts.append({"type": "text", "text": "(trống)"})
+
+    result.append({"role": "user", "content": content_parts})
+    logger.debug("Vision messages: %d parts (has_images=%s)", len(content_parts), has_images)
+    return result
+
+
 # ── Pydantic models ────────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
     role:        str
@@ -947,6 +1080,7 @@ async def lifespan(app: FastAPI):
     print(f"  🌐  http://127.0.0.1:8080")
     print(f"  📋  Log: {os.path.relpath(LOG_FILE_PATH, BASE_DIR)}")
     print(f"  🔍  Reranker: {'ON' if _reranker else 'OFF'}")
+    print(f"  👁️  Vision: {'YES' if is_vision_model else 'no'}")
     print(f"{'═'*54}\n")
     print("[SUCCESS] AI Server started successfully")
     sys.stdout.flush()
@@ -976,38 +1110,76 @@ async def chat_completions(request: ChatRequest, http_req: Request):
     rag_ms            = (time.monotonic() - t_rag) * 1000
 
     messages_raw     = [m.model_dump() for m in request.messages]
-    full_prompt      = build_prompt(messages_raw, doc_ctx, code_ctx)
-    estimated_tokens = estimate_tokens(full_prompt)
 
-    if estimated_tokens >= LLM_N_CTX - 512:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Hội thoại quá dài (~{estimated_tokens} tokens). Vui lòng bắt đầu phiên mới."
-        )
+    # ── Phân luồng: Vision model vs Text-only model ──
+    if is_vision_model:
+        # Vision path: dùng create_chat_completion() với multimodal messages
+        vision_msgs      = build_vision_messages(messages_raw, doc_ctx, code_ctx)
+        estimated_tokens = sum(estimate_tokens(str(m.get("content", ""))) for m in vision_msgs)
 
-    available_tokens = LLM_N_CTX - estimated_tokens - 400  # v2.1 buffer
-    max_tokens       = min(request.max_tokens, max(512, available_tokens))
+        if estimated_tokens >= LLM_N_CTX - 512:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Hội thoại quá dài (~{estimated_tokens} tokens). Vui lòng bắt đầu phiên mới."
+            )
 
-    logger.debug("Token budget: prompt≈%d  available=%d  max_tokens=%d",
-                 estimated_tokens, available_tokens, max_tokens)
+        available_tokens = LLM_N_CTX - estimated_tokens - 400
+        max_tokens       = min(request.max_tokens, max(512, available_tokens))
 
-    t_llm = time.monotonic()
-    try:
-        response = llm(
-            full_prompt,
-            stop           = ["<|im_end|>", "<|im_start|>"],
-            max_tokens     = max_tokens,
-            temperature    = request.temperature,
-            repeat_penalty = 1.1,
-        )
-    except Exception as e:
-        logger.error("LLM error: %s", e)
-        raise HTTPException(status_code=500, detail=f"Lỗi inference: {e}")
+        logger.debug("[Vision] Token budget: prompt≈%d  available=%d  max_tokens=%d",
+                     estimated_tokens, available_tokens, max_tokens)
 
-    llm_ms        = (time.monotonic() - t_llm) * 1000
-    total_ms      = (time.monotonic() - req_start) * 1000
-    answer        = response["choices"][0]["text"].strip()
-    finish_reason = response["choices"][0].get("finish_reason", "")
+        t_llm = time.monotonic()
+        try:
+            response = llm.create_chat_completion(
+                messages       = vision_msgs,
+                max_tokens     = max_tokens,
+                temperature    = request.temperature,
+                repeat_penalty = 1.1,
+            )
+        except Exception as e:
+            logger.error("LLM Vision error: %s", e)
+            raise HTTPException(status_code=500, detail=f"Lỗi inference (vision): {e}")
+
+        llm_ms        = (time.monotonic() - t_llm) * 1000
+        total_ms      = (time.monotonic() - req_start) * 1000
+        answer        = response["choices"][0]["message"]["content"].strip()
+        finish_reason = response["choices"][0].get("finish_reason", "")
+
+    else:
+        # Text-only path: giữ nguyên flow cũ
+        full_prompt      = build_prompt(messages_raw, doc_ctx, code_ctx)
+        estimated_tokens = estimate_tokens(full_prompt)
+
+        if estimated_tokens >= LLM_N_CTX - 512:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Hội thoại quá dài (~{estimated_tokens} tokens). Vui lòng bắt đầu phiên mới."
+            )
+
+        available_tokens = LLM_N_CTX - estimated_tokens - 400  # v2.1 buffer
+        max_tokens       = min(request.max_tokens, max(512, available_tokens))
+
+        logger.debug("Token budget: prompt≈%d  available=%d  max_tokens=%d",
+                     estimated_tokens, available_tokens, max_tokens)
+
+        t_llm = time.monotonic()
+        try:
+            response = llm(
+                full_prompt,
+                stop           = ["<|im_end|>", "<|im_start|>"],
+                max_tokens     = max_tokens,
+                temperature    = request.temperature,
+                repeat_penalty = 1.1,
+            )
+        except Exception as e:
+            logger.error("LLM error: %s", e)
+            raise HTTPException(status_code=500, detail=f"Lỗi inference: {e}")
+
+        llm_ms        = (time.monotonic() - t_llm) * 1000
+        total_ms      = (time.monotonic() - req_start) * 1000
+        answer        = response["choices"][0]["text"].strip()
+        finish_reason = response["choices"][0].get("finish_reason", "")
 
     # [FIX-10] Phát hiện và cảnh báo khi câu trả lời bị cắt do hết max_tokens
     if finish_reason == "length":
@@ -1020,10 +1192,10 @@ async def chat_completions(request: ChatRequest, http_req: Request):
 
     logger.info(
         "Done | rag=%.0fms llm=%.0fms total=%.0fms | "
-        "ctx=%d+%d ans=%d tokens≈%d/%d finish=%s",
+        "ctx=%d+%d ans=%d tokens≈%d/%d finish=%s vision=%s",
         rag_ms, llm_ms, total_ms,
         len(doc_ctx), len(code_ctx), len(answer),
-        estimated_tokens, LLM_N_CTX, finish_reason,
+        estimated_tokens, LLM_N_CTX, finish_reason, is_vision_model,
     )
 
     return {
@@ -1040,6 +1212,7 @@ async def chat_completions(request: ChatRequest, http_req: Request):
             "max_tokens_used":  max_tokens,
             "finish_reason":    finish_reason,
             "reranker_active":  _reranker is not None,
+            "vision_model":     is_vision_model,
         },
     }
 
@@ -1057,6 +1230,7 @@ async def health():
         "chars_per_token": CHARS_PER_TOKEN,
         "max_context":     MAX_CONTEXT_CHARS,
         "model":           MODELS[MODEL_IDX]["desc"],
+        "is_vision":       is_vision_model,
     }
 
 
@@ -1070,11 +1244,13 @@ async def list_models():
 # ─── 15. Main ─────────────────────────────────────────────────────────────────
 def _print_banner():
     desc = MODELS[MODEL_IDX]["desc"]
+    vision_str = "YES" if MODELS[MODEL_IDX].get("is_vision", False) else "no"
     print(f"""
 ╔══════════════════════════════════════════════════════╗
 ║         3D-Reconstruction AI Server v2.2             ║
 ╠══════════════════════════════════════════════════════╣
 ║  Model   : {desc:<42}║
+║  Vision  : {vision_str:<42}║
 ║  Embed   : {EMBED_MODEL_NAME:<42}║
 ║  Reranker: {str(USE_RERANKER)+" ("+RERANKER_MODEL+")" if USE_RERANKER else "disabled":<42}║
 ║  Cache   : {os.path.relpath(CACHE_DIR, BASE_DIR):<42}║
@@ -1147,17 +1323,60 @@ if __name__ == "__main__":
         logger.info("Model cached: %s (%.1fGB)", model_path, size_gb)
         print(f"  ✓  Model found locally: {selected['filename']} ({size_gb:.1f}GB)")
 
+    # Step 5b: Download mmproj (vision model only)
+    if selected.get("is_vision", False):
+        mmproj_path = os.path.join(MODELS_DIR, selected["mmproj_filename"])
+        if not os.path.exists(mmproj_path):
+            with startup_step(f"Downloading mmproj ({selected['mmproj_filename']})"):
+                hf_hub_download(
+                    repo_id=selected["mmproj_repo_id"],
+                    filename=selected["mmproj_filename"],
+                    local_dir=MODELS_DIR,
+                )
+                logger.info("Downloaded mmproj: %s (%.1fMB)",
+                            selected["mmproj_filename"],
+                            os.path.getsize(mmproj_path)/1024**2)
+        else:
+            size_mb = os.path.getsize(mmproj_path)/1024**2
+            logger.info("mmproj cached: %s (%.1fMB)", mmproj_path, size_mb)
+            print(f"  ✓  mmproj found locally: {selected['mmproj_filename']} ({size_mb:.0f}MB)")
+
     # Step 6: Load LLM
-    with startup_step(f"Loading LLM ({selected['desc']})"):
-        llm = Llama(
-            model_path   = model_path,
-            n_gpu_layers = 99,
-            n_ctx        = LLM_N_CTX,
-            n_batch      = 512,
-            verbose      = False,
-            use_mmap     = True,
-            use_mlock    = False,
-        )
+    if selected.get("is_vision", False):
+        # ── Vision model: cần chat handler + mmproj ──
+        with startup_step(f"Loading VL chat handler"):
+            from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+            _chat_handler = Qwen25VLChatHandler(
+                clip_model_path=os.path.join(MODELS_DIR, selected["mmproj_filename"])
+            )
+            logger.info("Qwen25VLChatHandler loaded with %s", selected["mmproj_filename"])
+
+        with startup_step(f"Loading LLM Vision ({selected['desc']})"):
+            llm = Llama(
+                model_path   = model_path,
+                chat_handler = _chat_handler,
+                chat_format  = "qwen2.5-vl",
+                n_gpu_layers = 99,
+                n_ctx        = LLM_N_CTX,
+                n_batch      = 512,
+                verbose      = False,
+                use_mmap     = True,
+                use_mlock    = False,
+            )
+        is_vision_model = True
+        logger.info("Vision model activated: %s", selected["desc"])
+    else:
+        # ── Text-only model: giữ nguyên flow cũ ──
+        with startup_step(f"Loading LLM ({selected['desc']})"):
+            llm = Llama(
+                model_path   = model_path,
+                n_gpu_layers = 99,
+                n_ctx        = LLM_N_CTX,
+                n_batch      = 512,
+                verbose      = False,
+                use_mmap     = True,
+                use_mlock    = False,
+            )
 
     # Start server
     logger.info("Starting uvicorn on 127.0.0.1:8080")

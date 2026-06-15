@@ -147,13 +147,13 @@ void AIAssistantPlugin::onToggleChatbot() {
         m_dockUI->dockWidget()->show();
         if (!m_aiAssistant->isServerRunning()) {
             m_isStartingServer = true;
-            m_aiAssistant->startServer(m_dockUI->modelSelector()->currentIndex());
             if (m_progressDialog) {
                 m_progressDialog->setLabelText(m_ctx->translate("ai.starting_server"));
                 m_progressDialog->setRange(0, 0);
                 m_progressDialog->show();
                 m_progressDialog->centerOnWidget(m_dockUI->dockWidget());
             }
+            m_aiAssistant->startServer(m_dockUI->modelSelector()->currentIndex());
         }
     } else {
         m_dockUI->dockWidget()->hide();
@@ -233,17 +233,18 @@ void AIAssistantPlugin::onSendChatMessage() {
 
 void AIAssistantPlugin::onModelSelected(int index) {
     m_isStartingServer = true;
-    m_aiAssistant->switchModel(index);
-    // Save per-user AI model index
-    if (auto *um = UserManager::instance()) {
-        um->setUserPref(um->currentUsername(), "ai_model_index", QString::number(index));
-    }
-    
     if (m_progressDialog) {
         m_progressDialog->setLabelText(m_ctx->translate("ai.starting_server"));
         m_progressDialog->setRange(0, 0);
         m_progressDialog->show();
         if (m_dockUI) m_progressDialog->centerOnWidget(m_dockUI->dockWidget());
+    }
+
+    m_aiAssistant->switchModel(index);
+
+    // Save per-user AI model index
+    if (auto *um = UserManager::instance()) {
+        um->setUserPref(um->currentUsername(), "ai_model_index", QString::number(index));
     }
 }
 
