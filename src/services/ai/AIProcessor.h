@@ -48,6 +48,10 @@ private:
 
     bool isDetModelLoaded;
     bool isSegModelLoaded;
+
+    // Persists the TRT engine cache path for the lifetime of sessionOptions.
+    // trt_options.trt_engine_cache_path points into this buffer.
+    QByteArray m_trtCachePathBytes;
 };
 
 #endif // AIPROCESSOR_H

@@ -37,6 +37,11 @@ void ViewerService::loadCurrentIndexImage() {
                 isReconMode = true;
             }
         }
+        if (QWidget* aiPanel = mw->findChild<QWidget*>("tabPanel_tab.ai")) {
+            if (aiPanel->isVisible()) {
+                isReconMode = false;
+            }
+        }
     }
     
     if (!isReconMode) {

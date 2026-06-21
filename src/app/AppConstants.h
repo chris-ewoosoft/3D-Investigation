@@ -37,9 +37,7 @@ namespace AppConstants {
         // AI model selector options
         inline QStringList modelNames() {
             return {
-                QStringLiteral("Qwen2.5-3B (Q4_K_M) — Nhanh"),
-                QStringLiteral("Qwen2.5-3B (Q8_0) — Trung Bình"),
-                QStringLiteral("Qwen2.5-7B (Q4_K_M) — Chậm"),
+                QStringLiteral("Qwen2.5-7B (Q4_K_M) — Text"),
                 QStringLiteral("Qwen2.5-coder-7B (Q4_K_M) — Coder"),
                 QStringLiteral("Qwen2.5-VL-7B (Q4_K_M) — Vision 👁️")
             };

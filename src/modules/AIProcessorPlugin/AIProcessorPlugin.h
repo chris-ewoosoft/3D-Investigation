@@ -8,6 +8,7 @@
 #include <QToolButton>
 #include <QGroupBox>
 #include <QFutureWatcher>
+#include <atomic>
 
 #include "IAppContext.h"
 #include "IAIService.h"
@@ -59,6 +60,8 @@ private:
     // Async model loading
     QFutureWatcher<void>* m_modelLoadWatcher = nullptr;
     bool m_modelsLoading = false;
+    std::atomic<bool> m_cancelModelLoad{false};
+    QMetaObject::Connection m_modelLoadStopConn;
 };
 
 #endif // AI_PROCESSOR_PLUGIN_H

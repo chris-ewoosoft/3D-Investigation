@@ -413,7 +413,14 @@ void ReconstructionPlugin::onImageListRowChanged(int row) {
         m_ctx->viewer()->setImageList(filenames, row);
         m_ctx->viewer()->setCurrent2DImagePath(imageList->item(row)->toolTip());
         
-        if (imageList->property("mode").toString() == "view2d") {
+        bool isAITab = false;
+        if (QWidget* mw = m_ctx->mainWindow()) {
+            if (QWidget* aiPanel = mw->findChild<QWidget*>("tabPanel_tab.ai")) {
+                isAITab = aiPanel->isVisible();
+            }
+        }
+        
+        if (imageList->property("mode").toString() == "view2d" || isAITab) {
             m_ctx->viewer()->loadCurrentIndexImage();
         }
     }

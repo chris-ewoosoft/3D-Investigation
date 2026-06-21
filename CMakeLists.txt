@@ -3,11 +3,21 @@ project(3D-Reconstruction LANGUAGES CXX)
 
 # Fix future timestamps that cause constant rebuilds in MSBuild
 if(WIN32)
+    message(STATUS "🔍 Checking for files with future timestamps in source directory...")
     execute_process(
-        COMMAND powershell -Command "Get-ChildItem -Recurse -File | Where-Object { $_.LastWriteTime -gt (Get-Date) } | ForEach-Object { $_.LastWriteTime = (Get-Date) }"
+        COMMAND powershell -Command "
+            $futureFiles = Get-ChildItem -Recurse -File | Where-Object { $_.LastWriteTime -gt (Get-Date) };
+            if ($futureFiles) {
+                Write-Host '⚠️ Found' $futureFiles.Count 'files with future timestamps in source directory. Fixing...';
+                $futureFiles | ForEach-Object { 
+                    Write-Host '  Fixing:' $_.FullName;
+                    $_.LastWriteTime = (Get-Date) 
+                };
+            } else {
+                Write-Host '✅ No files with future timestamps found in source directory.';
+            }
+        "
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_QUIET
-        ERROR_QUIET
     )
 endif()
 
@@ -262,9 +272,9 @@ add_custom_command(TARGET 3D-Reconstruction POST_BUILD
 
 # Copy missing PCL, VTK 9.4, and OpenNI2 DLLs required at runtime
 add_custom_command(TARGET 3D-Reconstruction POST_BUILD
-    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\3rdParty\\VTK\\bin\\vtk*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
-    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\PCL 1.15.1\\bin\\pcl*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\boost*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\flann*.dll', 'C:\\Program Files\\PCL 1.15.1\\bin\\qhull*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force -ErrorAction SilentlyContinue"
-    COMMAND powershell -Command "Copy-Item -Path 'C:\\Program Files\\OpenNI2\\Tools\\*.dll' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Force"
+    COMMAND powershell -Command "$destDir = '$<TARGET_FILE_DIR:3D-Reconstruction>'; Get-ChildItem -Path 'C:\\Program Files\\PCL 1.15.1\\3rdParty\\VTK\\bin' -Filter vtk*.dll | ForEach-Object { $target = Join-Path $destDir $_.Name; if (-not (Test-Path $target) -or (Get-Item $target).Length -ne $_.Length) { Copy-Item $_.FullName -Destination $destDir -Force } }"
+    COMMAND powershell -Command "$destDir = '$<TARGET_FILE_DIR:3D-Reconstruction>'; Get-ChildItem -Path 'C:\\Program Files\\PCL 1.15.1\\bin' | Where-Object { $_.Name -like 'pcl*.dll' -or $_.Name -like 'boost*.dll' -or $_.Name -like 'flann*.dll' -or $_.Name -like 'qhull*.dll' } | ForEach-Object { $target = Join-Path $destDir $_.Name; if (-not (Test-Path $target) -or (Get-Item $target).Length -ne $_.Length) { Copy-Item $_.FullName -Destination $destDir -Force } }"
+    COMMAND powershell -Command "$destDir = '$<TARGET_FILE_DIR:3D-Reconstruction>'; Get-ChildItem -Path 'C:\\Program Files\\OpenNI2\\Tools' -Filter *.dll | ForEach-Object { $target = Join-Path $destDir $_.Name; if (-not (Test-Path $target) -or (Get-Item $target).Length -ne $_.Length) { Copy-Item $_.FullName -Destination $destDir -Force } }"
     COMMENT "Copying PCL, VTK, and OpenNI dependencies safely (avoiding Qt/vcpkg DLL Hell)"
 )
 
@@ -279,10 +289,10 @@ if(QWINDOWS_DLL_PATH)
     get_filename_component(PLUGINS_ROOT "${PLATFORMS_DIR}" DIRECTORY)
     
     add_custom_command(TARGET 3D-Reconstruction POST_BUILD
-        COMMAND powershell -Command "if (Test-Path '${PLATFORMS_DIR}') { Copy-Item -Path '${PLATFORMS_DIR}' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
-        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/imageformats') { Copy-Item -Path '${PLUGINS_ROOT}/imageformats' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
-        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/iconengines') { Copy-Item -Path '${PLUGINS_ROOT}/iconengines' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
-        COMMAND powershell -Command "if (Test-Path '${PLUGINS_ROOT}/styles') { Copy-Item -Path '${PLUGINS_ROOT}/styles' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\platforms')) { Copy-Item -Path '${PLATFORMS_DIR}' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\imageformats')) { Copy-Item -Path '${PLUGINS_ROOT}/imageformats' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\iconengines')) { Copy-Item -Path '${PLUGINS_ROOT}/iconengines' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\styles')) { Copy-Item -Path '${PLUGINS_ROOT}/styles' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
         COMMENT "Manually copying Qt plugins from vcpkg (avoiding windeployqt ABI mismatch)"
     )
 else()

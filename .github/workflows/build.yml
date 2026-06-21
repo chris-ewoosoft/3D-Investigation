@@ -8,8 +8,9 @@ jobs:
   build:
     runs-on: windows-latest
     env:
-      VCPKG_INSTALLED_DIR: "C:/v"
+      VCPKG_INSTALLED_DIR: "D:/v"
       VCPKG_MAX_CONCURRENCY: 2
+      VCPKG_BUILD_TYPE: release
 
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +39,7 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -B build -S . "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake -B build -S . "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" "-DVCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR" "-DVCPKG_INSTALL_OPTIONS=--clean-after-build"
 
       # ── Build Project ──────────────────────────────────────────────────
       - name: Build

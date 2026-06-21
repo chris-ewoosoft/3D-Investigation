@@ -91,8 +91,8 @@ CACHE_METADATA = os.path.join(CACHE_DIR, "metadata.json")
 # ─── 3. Cấu hình RAG — chỉnh tại đây ─────────────────────────────────────────
 # [FIX-8] Đổi sang model đa ngôn ngữ — hỗ trợ tiếng Việt tốt hơn all-MiniLM-L6-v2
 # Kích thước: ~470MB (so với ~80MB), nhưng độ chính xác retrieval tăng rõ rệt.
-# Nếu muốn giữ model cũ (tiết kiệm RAM/disk): đổi lại "all-MiniLM-L6-v2"
-EMBED_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+# Nếu muốn giữ model cũ (tiết kiệm RAM/disk): đổi lại "all-MiniLM-L6-v2" hoặc "paraphrase-multilingual-MiniLM-L12-v2"
+EMBED_MODEL_NAME = "clip-ViT-B-32"
 
 # [FIX-7] Cross-encoder re-ranking — bật/tắt tùy tài nguyên
 # True  = kết quả chính xác hơn, latency tăng ~100-300ms/request
@@ -167,19 +167,9 @@ def startup_step(name: str):
 # ─── 6. Model list ────────────────────────────────────────────────────────────
 MODELS = [
     {
-        "repo_id":  "Qwen/Qwen2.5-3B-Instruct-GGUF",
-        "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
-        "desc":     "Qwen2.5-3B (Q4_K_M) — Nhanh",
-    },
-    {
-        "repo_id":  "Qwen/Qwen2.5-3B-Instruct-GGUF",
-        "filename": "qwen2.5-3b-instruct-q8_0.gguf",
-        "desc":     "Qwen2.5-3B (Q8_0) — Trung Bình",
-    },
-    {
         "repo_id":  "bartowski/Qwen2.5-7B-Instruct-GGUF",
         "filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        "desc":     "Qwen2.5-7B (Q4_K_M) — Chậm",
+        "desc":     "Qwen2.5-7B (Q4_K_M) — Text",
     },
     {
         "repo_id":  "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
@@ -240,7 +230,41 @@ class ChunkResult:
     text:        str
     source_path: str
     loader_type: str
+    is_image:    bool = False
+    image_b64:   Optional[str] = None
     metadata:    dict = field(default_factory=dict)
+
+# ─── 8b. Vision helpers ──────────────────────────────────────────────────────
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+
+def _is_image_file(filepath: str) -> bool:
+    return os.path.splitext(filepath)[1].lower() in _IMAGE_EXTS
+
+def _image_to_data_uri(filepath: str, max_dim: int = 512) -> str:
+    from PIL import Image
+    import io
+    ext = os.path.splitext(filepath)[1].lower()
+    mime_map = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png",
+                ".bmp": "bmp", ".gif": "gif", ".webp": "webp"}
+    mime = mime_map.get(ext, "jpeg")
+    try:
+        img = Image.open(filepath)
+        w, h = img.size
+        if max(w, h) > max_dim:
+            ratio = max_dim / max(w, h)
+            new_w = int(w * ratio)
+            new_h = int(h * ratio)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+        if mime == "jpeg" and img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        save_fmt = "JPEG" if mime == "jpeg" else mime.upper()
+        img.save(buf, format=save_fmt, quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        with open(filepath, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/{mime};base64,{b64}"
 
 # ─── 9. Document Loaders ─────────────────────────────────────────────────────
 class BaseDocumentLoader(ABC):
@@ -481,6 +505,26 @@ class CppHeaderLoader(BaseDocumentLoader):
         return results or self._sliding_window_chunks(content, fp, label="Source")
 
 
+class ImageLoader(BaseDocumentLoader):
+    def can_handle(self, fp: str) -> bool:
+        return _is_image_file(fp)
+
+    def load(self, fp: str) -> list:
+        try:
+            b64 = _image_to_data_uri(fp)
+            rel = os.path.relpath(fp, PROJECT_DIR)
+            return [ChunkResult(
+                text=f"[Image: {rel}]",
+                source_path=fp,
+                loader_type="image",
+                is_image=True,
+                image_b64=b64
+            )]
+        except Exception as e:
+            logger.error("Error loading image %s: %s", fp, e)
+            return []
+
+
 # ─── 10. Loader Registry ──────────────────────────────────────────────────────
 class DocumentLoaderRegistry:
     def __init__(self): self._loaders: list = []
@@ -515,6 +559,7 @@ def build_registry() -> DocumentLoaderRegistry:
         .register(TxtLoader())
         .register(MarkdownLoader())
         .register(CppHeaderLoader())
+        .register(ImageLoader())
     )
 
 
@@ -523,8 +568,8 @@ EXCLUDED_DIRS  = {
     ".git", "build", "__pycache__", ".qtcreator", ".cache", "Cache",
     "runs", "Dicom", "Predict", "3DModels", "Dataset", "logs",
 }
-SCANNABLE_EXTS = {".cpp", ".h", ".py", ".md", ".cmake"}
-DOC_EXTS_GLOB  = ("*.docx", "*.pdf", "*.txt")
+SCANNABLE_EXTS = {".cpp", ".h", ".py", ".md", ".cmake", ".jpg", ".jpeg", ".png", ".webp"}
+DOC_EXTS_GLOB  = ("*.docx", "*.pdf", "*.txt", "*.jpg", "*.jpeg", "*.png", "*.webp")
 
 
 def load_documents() -> list:
@@ -541,7 +586,7 @@ def load_documents() -> list:
                     stats["errors"] += 1
                     continue
                 for r in results:
-                    all_chunks.append(r.text)
+                    all_chunks.append(r)
                     ext = os.path.splitext(fp)[1].lower().lstrip(".")
                     if ext in stats:
                         stats[ext] += 1
@@ -557,7 +602,7 @@ def load_documents() -> list:
             fp = os.path.join(root, filename)
             stats["files"] += 1
             for r in registry.load_file(fp):
-                all_chunks.append(r.text)
+                all_chunks.append(r)
                 stats["md" if r.loader_type == "md" else "source"] += 1
 
     logger.info(
@@ -669,16 +714,45 @@ def build_index_from_scratch(chunks: list, embed_model):
     import faiss as _faiss
     import numpy as np
     from rank_bm25 import BM25Okapi
+    from PIL import Image
 
     t = time.monotonic()
     logger.info("Building index: %d chunks", len(chunks))
 
-    print(f"\n       Encoding {len(chunks)} chunks", end="", flush=True)
     t_enc = time.monotonic()
-    embeddings = embed_model.encode(
-        chunks, show_progress_bar=False, normalize_embeddings=True, batch_size=64
-    )
-    print(f" ✓  ({time.monotonic()-t_enc:.1f}s)")
+    text_indices = []
+    texts = []
+    image_indices = []
+    images = []
+
+    for i, c in enumerate(chunks):
+        if getattr(c, "is_image", False):
+            try:
+                images.append(Image.open(c.source_path).convert("RGB"))
+                image_indices.append(i)
+            except Exception:
+                texts.append(getattr(c, "text", str(c)))
+                text_indices.append(i)
+        else:
+            texts.append(getattr(c, "text", str(c)))
+            text_indices.append(i)
+
+    final_embeddings = [None] * len(chunks)
+    
+    if texts:
+        print(f"\n       Encoding {len(texts)} text chunks", end="", flush=True)
+        text_embs = embed_model.encode(texts, show_progress_bar=False, normalize_embeddings=True, batch_size=64)
+        for idx, emb in zip(text_indices, text_embs):
+            final_embeddings[idx] = emb
+            
+    if images:
+        print(f"\n       Encoding {len(images)} image chunks", end="", flush=True)
+        img_embs = embed_model.encode(images, show_progress_bar=False, normalize_embeddings=True, batch_size=64)
+        for idx, emb in zip(image_indices, img_embs):
+            final_embeddings[idx] = emb
+
+    embeddings = final_embeddings
+    print(f"\n ✓ Encoding complete ({time.monotonic()-t_enc:.1f}s)")
 
     emb  = np.array(embeddings, dtype="float32")
     dim, n = emb.shape[1], len(emb)
@@ -699,7 +773,7 @@ def build_index_from_scratch(chunks: list, embed_model):
     logger.info("FAISS built: ntotal=%d dim=%d", index.ntotal, dim)
 
     # [FIX-6] Dùng _tokenize_vn thay vì r"[a-z0-9_]+" để BM25 xử lý được tiếng Việt
-    tokenized = [_tokenize_vn(c) for c in chunks]
+    tokenized = [_tokenize_vn(getattr(c, "text", str(c))) for c in chunks]
     bm25      = BM25Okapi(tokenized)
 
     save_cache(index, chunks, bm25)
@@ -728,63 +802,9 @@ _reranker        = None   # Cross-encoder, load lúc startup nếu USE_RERANKER=
 is_vision_model  = False  # True khi chạy Qwen2.5-VL (vision model)
 
 
-# ─── 13b. Vision helpers ──────────────────────────────────────────────────────
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
-
-
-def _is_image_file(filepath: str) -> bool:
-    """Kiểm tra file có phải ảnh dựa trên extension."""
-    return os.path.splitext(filepath)[1].lower() in _IMAGE_EXTS
-
-
-def _image_to_data_uri(filepath: str, max_dim: int = 512) -> str:
+def hybrid_retrieve(query: str, query_image_b64: str = None, k: int = 14, final_k: int = 10) -> list:
     """
-    Đọc file ảnh, resize nếu cần (giữ aspect ratio), rồi chuyển thành
-    data:image/...;base64,... URI.
-    
-    max_dim: chiều dài tối đa (width hoặc height). Giảm kích thước ảnh
-    giúp inference nhanh hơn đáng kể (từ 2-3 phút → 10-30 giây).
-    """
-    from PIL import Image
-    import io
-
-    ext = os.path.splitext(filepath)[1].lower()
-    mime_map = {".jpg": "jpeg", ".jpeg": "jpeg", ".png": "png",
-                ".bmp": "bmp", ".gif": "gif", ".webp": "webp"}
-    mime = mime_map.get(ext, "jpeg")
-
-    try:
-        img = Image.open(filepath)
-        # Resize nếu ảnh quá lớn
-        w, h = img.size
-        if max(w, h) > max_dim:
-            ratio = max_dim / max(w, h)
-            new_w = int(w * ratio)
-            new_h = int(h * ratio)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-            logger.info("Vision: resized image %s from %dx%d → %dx%d",
-                       os.path.basename(filepath), w, h, new_w, new_h)
-        
-        # Convert RGBA to RGB for JPEG
-        if mime == "jpeg" and img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-        
-        buf = io.BytesIO()
-        save_fmt = "JPEG" if mime == "jpeg" else mime.upper()
-        img.save(buf, format=save_fmt, quality=85)
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-    except Exception as e:
-        logger.warning("PIL resize failed for %s: %s — falling back to raw read", filepath, e)
-        with open(filepath, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    return f"data:image/{mime};base64,{b64}"
-
-
-def hybrid_retrieve(query: str, k: int = 14, final_k: int = 10) -> list:
-    """
-    Hybrid semantic + BM25 retrieval.
-    final_k tăng lên 10 (từ 8) để cross-encoder có nhiều candidate hơn.
+    Hybrid semantic (text/image) + BM25 (text only) retrieval.
     """
     import numpy as np
 
@@ -793,8 +813,16 @@ def hybrid_retrieve(query: str, k: int = 14, final_k: int = 10) -> list:
 
     n = min(k, len(knowledge_chunks))
 
-    # Semantic
-    qv = embed_model_ref.encode([query], normalize_embeddings=True)
+    # Semantic search with query text or query image
+    if query_image_b64:
+        from PIL import Image
+        import io
+        img_data = base64.b64decode(query_image_b64.split(",")[1])
+        qv_input = [Image.open(io.BytesIO(img_data)).convert("RGB")]
+    else:
+        qv_input = [query]
+
+    qv = embed_model_ref.encode(qv_input, normalize_embeddings=True)
     sem_raw, sem_idx = knowledge_index.search(np.array(qv, dtype="float32"), n)
     sem_raw = sem_raw[0]
     sem_idx = sem_idx[0]
@@ -804,24 +832,26 @@ def hybrid_retrieve(query: str, k: int = 14, final_k: int = 10) -> list:
     sem_norm  = {int(i): (s-sem_min)/sem_range for i, s in zip(sem_idx, sem_raw) if i >= 0}
 
     # [FIX-6] BM25 với Vietnamese tokenizer
-    bm25_raw     = np.array(bm25_index.get_scores(_tokenize_vn(query)))
-    bm25_top_idx = np.argsort(bm25_raw)[::-1][:n]
-    b_scores     = bm25_raw[bm25_top_idx]
-    b_min, b_max = b_scores.min(), b_scores.max()
-    b_range      = b_max - b_min if b_max != b_min else 1.0
-    bm25_norm    = {int(i): (s-b_min)/b_range for i, s in zip(bm25_top_idx, b_scores)}
+    if query_image_b64:
+        # BM25 is not used for image queries
+        combined = [(cid, float(sem_raw[list(sem_idx).index(cid)])) for cid in sem_idx if cid >= 0]
+    else:
+        bm25_raw     = np.array(bm25_index.get_scores(_tokenize_vn(query)))
+        bm25_top_idx = np.argsort(bm25_raw)[::-1][:n]
+        b_scores     = bm25_raw[bm25_top_idx]
+        b_min, b_max = b_scores.min(), b_scores.max()
+        b_range      = b_max - b_min if b_max != b_min else 1.0
+        bm25_norm    = {int(i): (s-b_min)/b_range for i, s in zip(bm25_top_idx, b_scores)}
 
-    # Fusion
-    sem_idx_list = list(sem_idx)
-    combined = []
-    for cid in set(sem_norm) | set(bm25_norm):
-        s = sem_norm.get(cid, 0.0)
-        b = bm25_norm.get(cid, 0.0)
-        raw_cos = float(sem_raw[sem_idx_list.index(cid)]) if cid in sem_norm else 0.0
-        if raw_cos < SIMILARITY_THRESHOLD and b < 0.3:
-            continue
-        # Tăng trọng số BM25 lên 0.45 để keyword tiếng Việt match chuẩn hơn
-        combined.append((cid, 0.55*s + 0.45*b))
+        sem_idx_list = list(sem_idx)
+        combined = []
+        for cid in set(sem_norm) | set(bm25_norm):
+            s = sem_norm.get(cid, 0.0)
+            b = bm25_norm.get(cid, 0.0)
+            raw_cos = float(sem_raw[sem_idx_list.index(cid)]) if cid in sem_norm else 0.0
+            if raw_cos < SIMILARITY_THRESHOLD and b < 0.3:
+                continue
+            combined.append((cid, 0.55*s + 0.45*b))
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [knowledge_chunks[cid] for cid, _ in combined[:final_k]]
@@ -829,17 +859,11 @@ def hybrid_retrieve(query: str, k: int = 14, final_k: int = 10) -> list:
 
 # [FIX-7] Cross-encoder re-ranking
 def _rerank(query: str, chunks: list) -> list:
-    """
-    Re-rank candidates bằng cross-encoder — tăng precision đáng kể.
-    Cross-encoder đọc (query, chunk) cùng lúc nên nắm ngữ nghĩa tốt hơn
-    bi-encoder (semantic search). Latency: ~100-300ms cho 10 candidates.
-    Fallback về danh sách gốc nếu reranker chưa load hoặc bị lỗi.
-    """
     if _reranker is None or not chunks:
         return chunks
     try:
-        # Giới hạn độ dài để reranker nhanh hơn
-        pairs  = [(query, c[:600]) for c in chunks]
+        # Giới hạn độ dài để reranker nhanh hơn. Reranker chỉ chạy trên text.
+        pairs  = [(query, getattr(c, "text", str(c))[:600]) for c in chunks]
         scores = _reranker.predict(pairs, show_progress_bar=False)
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
         logger.debug("Rerank scores: %s", [f"{s:.3f}" for s, _ in ranked])
@@ -850,14 +874,11 @@ def _rerank(query: str, chunks: list) -> list:
 
 
 # Source deduplication (v2.1)
-_SRC_RE = re.compile(r"^\[.*?:\s*(.*?)\]", re.MULTILINE)
-
 def _dedup_by_source(chunks: list, max_per_source: int = 2) -> list:
     seen: dict = {}
     result: list = []
     for chunk in chunks:
-        m   = _SRC_RE.match(chunk)
-        src = m.group(1).strip() if m else chunk[:80]
+        src = getattr(chunk, "source_path", str(chunk)[:80])
         if seen.get(src, 0) < max_per_source:
             result.append(chunk)
             seen[src] = seen.get(src, 0) + 1
@@ -867,54 +888,62 @@ def _dedup_by_source(chunks: list, max_per_source: int = 2) -> list:
 
 # [FIX-11] Context formatting với số thứ tự — model cite nguồn chính xác hơn
 def _format_context_block(chunks: list, section_title: str) -> str:
-    """
-    Format context với nhãn đánh số [1], [2], ...
-    Model dễ dàng nhận ra 'theo [2]' hay 'tại file X' hơn là dùng separator ---
-    """
     if not chunks:
         return ""
     lines = [f"=== {section_title} ==="]
     for i, chunk in enumerate(chunks, 1):
-        # Trích tên file từ prefix để làm nhãn ngắn gọn
-        m    = _SRC_RE.match(chunk)
-        src  = os.path.basename(m.group(1).strip()) if m else f"nguồn {i}"
-        body = chunk.split("\n", 1)[-1].strip()  # Bỏ dòng prefix [...]
+        src  = os.path.basename(getattr(chunk, "source_path", "nguồn"))
+        text = getattr(chunk, "text", str(chunk))
+        body = text.split("\n", 1)[-1].strip()  # Bỏ dòng prefix [...]
         lines.append(f"\n[{i}] {src}\n{body}")
     return "\n".join(lines)
 
 
-def get_context(query: str) -> tuple:
-    # Bước 1: Hybrid retrieve (semantic + BM25-Việt)
-    candidates = hybrid_retrieve(query, k=14, final_k=10)
+def get_context(query: str, query_image_b64: str = None) -> tuple:
+    # Bước 1: Hybrid retrieve
+    candidates = hybrid_retrieve(query, query_image_b64=query_image_b64, k=14, final_k=10)
 
-    # Bước 2: Cross-encoder re-rank [FIX-7]
-    if USE_RERANKER:
+    # Bước 2: Cross-encoder re-rank
+    if USE_RERANKER and query:
         candidates = _rerank(query, candidates)
         candidates = candidates[:RERANKER_TOP_K]
 
-    # Bước 3: Source dedup [v2.1]
+    # Bước 3: Source dedup
     candidates = _dedup_by_source(candidates, max_per_source=2)
 
     # Bước 4: Phân loại + cắt theo ngân sách context
-    doc_chunks  = []
-    code_chunks = []
-    total       = 0
+    doc_chunks   = []
+    code_chunks  = []
+    image_chunks = []
+    total        = 0
 
     for chunk in candidates:
+        if getattr(chunk, "is_image", False):
+            if chunk.image_b64:
+                image_chunks.append(chunk.image_b64)
+            continue
+
+        text_content = getattr(chunk, "text", str(chunk))
         remaining = MAX_CONTEXT_CHARS - total
         if remaining < 150:
             break
-        trimmed = chunk[:remaining] if len(chunk) > remaining else chunk
-        if chunk.startswith("[Tai lieu"):
-            doc_chunks.append(trimmed)
-        else:
-            code_chunks.append(trimmed)
-        total += len(trimmed)
+        trimmed_text = text_content[:remaining] if len(text_content) > remaining else text_content
+        
+        # Tạo bản sao chunk với text đã cắt gọn
+        from copy import copy
+        trimmed_chunk = copy(chunk) if hasattr(chunk, "text") else chunk
+        if hasattr(trimmed_chunk, "text"):
+            trimmed_chunk.text = trimmed_text
 
-    # [FIX-11] Format có đánh số thay vì separator "---"
+        if text_content.startswith("[Tai lieu"):
+            doc_chunks.append(trimmed_chunk)
+        else:
+            code_chunks.append(trimmed_chunk)
+        total += len(trimmed_text)
+
     doc_ctx  = _format_context_block(doc_chunks,  "TÀI LIỆU THAM KHẢO")
     code_ctx = _format_context_block(code_chunks, "MÃ NGUỒN LIÊN QUAN")
-    return doc_ctx, code_ctx
+    return doc_ctx, code_ctx, image_chunks
 
 
 # ─── 14. FastAPI + LLM ────────────────────────────────────────────────────────
@@ -1021,7 +1050,7 @@ def _build_system_prompt(doc_ctx: str, code_ctx: str) -> str:
     return system_prompt
 
 
-def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str) -> list:
+def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str, image_chunks: list = None) -> list:
     """
     Build messages format cho create_chat_completion() — vision model.
     Ảnh đính kèm được encode thành base64 data URI theo OpenAI multimodal format.
@@ -1069,6 +1098,14 @@ def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str) -> list:
             content_parts.append(
                 {"type": "text", "text": f"[File đính kèm: {os.path.basename(att)}]"}
             )
+
+    if image_chunks:
+        for b64 in image_chunks:
+            content_parts.append(
+                {"type": "image_url", "image_url": {"url": b64}}
+            )
+            has_images = True
+            logger.info("Vision: added retrieved image chunk to context")
 
     # Nếu không có ảnh, thêm hint cho model
     if attachments and not has_images:
@@ -1135,11 +1172,21 @@ async def chat_completions(request: ChatRequest, http_req: Request):
 
     req_start  = time.monotonic()
     user_query = request.messages[-1].content
+    attachments = request.messages[-1].attachments or []
+    query_image_b64 = None
+    for att in attachments:
+        if _is_image_file(att):
+            try:
+                query_image_b64 = _image_to_data_uri(att)
+                break
+            except Exception as e:
+                logger.error("Failed to read attachment for retrieval: %s", e)
+
     logger.info("Query from %s: %s…", http_req.client.host,
                 user_query[:60].replace("\n", " "))
 
     t_rag             = time.monotonic()
-    doc_ctx, code_ctx = get_context(user_query)
+    doc_ctx, code_ctx, image_chunks = get_context(user_query, query_image_b64=query_image_b64)
     rag_ms            = (time.monotonic() - t_rag) * 1000
 
     messages_raw     = [m.model_dump() for m in request.messages]
@@ -1147,7 +1194,7 @@ async def chat_completions(request: ChatRequest, http_req: Request):
     # ── Phân luồng: Vision model vs Text-only model ──
     if is_vision_model:
         # Vision path: dùng create_chat_completion() với multimodal messages
-        vision_msgs      = build_vision_messages(messages_raw, doc_ctx, code_ctx)
+        vision_msgs      = build_vision_messages(messages_raw, doc_ctx, code_ctx, image_chunks)
         estimated_tokens = 0
         for m in vision_msgs:
             content = m.get("content", "")

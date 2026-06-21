@@ -30,7 +30,9 @@ void AIProcessor::tryInitGPUProvider() {
         // Use absolute path to avoid issues with relative paths in TRT cache
         QString cacheDir = QDir::currentPath() + "/models/cache";
         QDir().mkpath(cacheDir);
-        QByteArray cacheDirBytes = cacheDir.toLocal8Bit();
+        // Store in class member so the pointer outlives this function —
+        // trt_options.trt_engine_cache_path will reference this buffer.
+        m_trtCachePathBytes = cacheDir.toLocal8Bit();
 
         // CRITICAL: Zero-initialize the struct! Without this, unset const char*
         // fields contain garbage values causing read access violations inside TRT.
@@ -40,7 +42,7 @@ void AIProcessor::tryInitGPUProvider() {
         trt_options.trt_min_subgraph_size = 1;
         trt_options.trt_max_workspace_size = 1ULL << 30; // 1 GB
         trt_options.trt_engine_cache_enable = 1;
-        trt_options.trt_engine_cache_path = cacheDirBytes.constData();
+        trt_options.trt_engine_cache_path = m_trtCachePathBytes.constData();
         trt_options.trt_fp16_enable = 1; // Enable FP16 for better performance
         sessionOptions->AppendExecutionProvider_TensorRT(trt_options);
         qDebug() << "ONNX Runtime: Using TensorRT Execution Provider (High Performance)";

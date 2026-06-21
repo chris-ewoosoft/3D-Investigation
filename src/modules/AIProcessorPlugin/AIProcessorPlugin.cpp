@@ -61,6 +61,7 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
 
       if (detExists || segExists) {
           m_modelsLoading = true;
+          m_cancelModelLoad.store(false);
 
           // Set actions to "Loading" state immediately
           if (m_runDetAct) m_runDetAct->setEnabled(false);
@@ -71,15 +72,34 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
           connect(m_modelLoadWatcher, &QFutureWatcher<void>::finished, this, [this]() {
               m_modelsLoading = false;
               if (m_progressDialog) m_progressDialog->hide();
-              qDebug() << "[AIProcessorPlugin] Background model loading completed.";
-              if (m_aiSvc && m_aiSvc->isDetectionReady())
-                  emit m_ctx->signalBus()->aiModelLoaded("detection");
-              if (m_aiSvc && m_aiSvc->isSegmentationReady())
-                  emit m_ctx->signalBus()->aiModelLoaded("segmentation");
+              // Disconnect stop handler for model loading so it doesn't
+              // interfere with other uses of the same dialog (e.g. TensorBoard).
+              if (m_modelLoadStopConn) {
+                  disconnect(m_modelLoadStopConn);
+                  m_modelLoadStopConn = {};
+              }
+              if (m_cancelModelLoad.load()) {
+                  qDebug() << "[AIProcessorPlugin] Model loading was cancelled by user.";
+              } else {
+                  qDebug() << "[AIProcessorPlugin] Background model loading completed.";
+                  if (m_aiSvc && m_aiSvc->isDetectionReady())
+                      emit m_ctx->signalBus()->aiModelLoaded("detection");
+                  if (m_aiSvc && m_aiSvc->isSegmentationReady())
+                      emit m_ctx->signalBus()->aiModelLoaded("segmentation");
+              }
               updateActions(); // Re-enable buttons
           });
 
           if (m_progressDialog) {
+              // Connect Stop button to cancel model loading
+              m_modelLoadStopConn = connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, [this]() {
+                  m_cancelModelLoad.store(true);
+                  m_modelsLoading = false;
+                  if (m_progressDialog) m_progressDialog->hide();
+                  qDebug() << "[AIProcessorPlugin] User requested stop — model loading cancelled.";
+                  updateActions();
+              });
+
               // Show which model loads first
               QString firstLabel;
               if (detExists && segExists)
@@ -101,15 +121,16 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
           }
 
           // Run on thread pool — does NOT block main thread
-          IAIService* svc  = m_aiSvc;
-          auto *dlg        = m_progressDialog;
-          auto *ctx        = m_ctx;
-          bool _detExists  = detExists;
-          bool _segExists  = segExists;
+          IAIService* svc   = m_aiSvc;
+          auto *dlg         = m_progressDialog;
+          auto *ctx         = m_ctx;
+          bool _detExists   = detExists;
+          bool _segExists   = segExists;
+          auto *cancelFlag  = &m_cancelModelLoad;
 
           QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath,
-                                                    _detExists, _segExists]() {
-              if (_detExists) {
+                                                    _detExists, _segExists, cancelFlag]() {
+              if (_detExists && !cancelFlag->load()) {
                   // Update label to Detection on main thread
                   QString detMsg = ctx->translate("aiproc.loading_det");
                   if (detMsg.isEmpty()) detMsg = "Loading model Detection...";
@@ -118,7 +139,7 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
                   }, Qt::QueuedConnection);
                   svc->loadDetectionModel(detPath);
               }
-              if (_segExists) {
+              if (_segExists && !cancelFlag->load()) {
                   // Update label to Segmentation on main thread
                   QString segMsg = ctx->translate("aiproc.loading_seg");
                   if (segMsg.isEmpty()) segMsg = "Loading model Segmentation...";
