@@ -19,8 +19,8 @@ public:
     void onPrevImage() override;
     void onAutoNext() override;
     void onAutoPrev() override;
-    AIMode getCurrentAIMode() const override;
-    void setAIMode(AIMode mode) override;
+    QString getCurrentAIMode() const override;
+    void setAIMode(const QString& mode) override;
 
 private slots:
     void onAutoTimerTimeout();
@@ -30,7 +30,7 @@ private:
     QString current2DImagePath;
     QStringList imageFileList;
     int currentImageIndex;
-    AIMode currentAIMode;
+    QString currentAIMode;
     QTimer *autoTimer;
     bool isAutoNext;
 };

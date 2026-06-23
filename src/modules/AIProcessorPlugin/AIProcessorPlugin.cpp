@@ -40,171 +40,134 @@
 void AIProcessorPlugin::initialize(IAppContext *context) {
   m_ctx = context;
 
-  // Look up IAIService từ ServiceRegistry — không dùng concrete AIProcessor
+  // Look up IAIService
   m_aiSvc = m_ctx->services()->get<IAIService>();
   if (!m_aiSvc) {
       qWarning() << "[AIProcessorPlugin] IAIService not found in ServiceRegistry!";
   }
 
   m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
-
+  
+  // Setup Dock Widget
   m_trainDock = new AITrainDockWidget(m_ctx, m_ctx->mainWindow());
+  m_ctx->mainWindow()->addDockWidget(Qt::RightDockWidgetArea, m_trainDock);
 
-  // Load models in background thread to avoid blocking the UI.
-  // TRT engine compilation on first run can take 5-20 minutes.
-  if (m_aiSvc) {
-      QString modelsPath = AppConfig::instance().modelsDir();
-      QString detPath = modelsPath + "/yolo11n.onnx";
-      QString segPath = modelsPath + "/yolo11n-seg.onnx";
-      bool detExists = QFile::exists(detPath);
-      bool segExists = QFile::exists(segPath);
+  loadModelsInBackground();
+  setupMenus();
+  setupRibbonUI();
+  setupConnections();
 
-      if (detExists || segExists) {
-          m_modelsLoading = true;
-          m_cancelModelLoad.store(false);
+  updateActions();
+}
 
-          // Set actions to "Loading" state immediately
-          if (m_runDetAct) m_runDetAct->setEnabled(false);
-          if (m_runSegAct) m_runSegAct->setEnabled(false);
+void AIProcessorPlugin::loadModelsInBackground() {
+  if (!m_aiSvc) return;
+  QString modelsPath = AppConfig::instance().modelsDir();
+  QString detPath = modelsPath + "/yolo11n.onnx";
+  QString segPath = modelsPath + "/yolo11n-seg.onnx";
+  bool detExists = QFile::exists(detPath);
+  bool segExists = QFile::exists(segPath);
 
-          // Setup watcher — finished() fires on main thread
-          m_modelLoadWatcher = new QFutureWatcher<void>(this);
-          connect(m_modelLoadWatcher, &QFutureWatcher<void>::finished, this, [this]() {
+  if (detExists || segExists) {
+      m_modelsLoading = true;
+      m_cancelModelLoad.store(false);
+
+      if (m_runDetAct) m_runDetAct->setEnabled(false);
+      if (m_runSegAct) m_runSegAct->setEnabled(false);
+
+      m_modelLoadWatcher = new QFutureWatcher<void>(this);
+      connect(m_modelLoadWatcher, &QFutureWatcher<void>::finished, this, [this]() {
+          m_modelsLoading = false;
+          if (m_progressDialog) m_progressDialog->hide();
+          if (m_modelLoadStopConn) {
+              disconnect(m_modelLoadStopConn);
+              m_modelLoadStopConn = {};
+          }
+          if (m_cancelModelLoad.load()) {
+              qDebug() << "[AIProcessorPlugin] Model loading cancelled.";
+          } else {
+              qDebug() << "[AIProcessorPlugin] Background model loading completed.";
+              if (m_aiSvc && m_aiSvc->isDetectionReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("detection");
+              if (m_aiSvc && m_aiSvc->isSegmentationReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("segmentation");
+          }
+          updateActions(); 
+      });
+
+      if (m_progressDialog) {
+          m_modelLoadStopConn = connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, [this]() {
+              m_cancelModelLoad.store(true);
               m_modelsLoading = false;
               if (m_progressDialog) m_progressDialog->hide();
-              // Disconnect stop handler for model loading so it doesn't
-              // interfere with other uses of the same dialog (e.g. TensorBoard).
-              if (m_modelLoadStopConn) {
-                  disconnect(m_modelLoadStopConn);
-                  m_modelLoadStopConn = {};
-              }
-              if (m_cancelModelLoad.load()) {
-                  qDebug() << "[AIProcessorPlugin] Model loading was cancelled by user.";
-              } else {
-                  qDebug() << "[AIProcessorPlugin] Background model loading completed.";
-                  if (m_aiSvc && m_aiSvc->isDetectionReady())
-                      emit m_ctx->signalBus()->aiModelLoaded("detection");
-                  if (m_aiSvc && m_aiSvc->isSegmentationReady())
-                      emit m_ctx->signalBus()->aiModelLoaded("segmentation");
-              }
-              updateActions(); // Re-enable buttons
+              updateActions();
           });
 
-          if (m_progressDialog) {
-              // Connect Stop button to cancel model loading
-              m_modelLoadStopConn = connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, [this]() {
-                  m_cancelModelLoad.store(true);
-                  m_modelsLoading = false;
-                  if (m_progressDialog) m_progressDialog->hide();
-                  qDebug() << "[AIProcessorPlugin] User requested stop — model loading cancelled.";
-                  updateActions();
-              });
-
-              // Show which model loads first
-              QString firstLabel;
-              if (detExists && segExists)
-                  firstLabel = m_ctx->translate("aiproc.loading_det").isEmpty()
-                               ? tr("Loading model Detection...")
-                               : m_ctx->translate("aiproc.loading_det");
-              else if (detExists)
-                  firstLabel = m_ctx->translate("aiproc.loading_det").isEmpty()
-                               ? tr("Loading model Detection...")
-                               : m_ctx->translate("aiproc.loading_det");
-              else
-                  firstLabel = m_ctx->translate("aiproc.loading_seg").isEmpty()
-                               ? tr("Loading model Segmentation...")
-                               : m_ctx->translate("aiproc.loading_seg");
-              m_progressDialog->setLabelText(firstLabel);
-              m_progressDialog->setRange(0, 0);   // indeterminate / marquee
-              m_progressDialog->show();
-              m_progressDialog->centerOnWidget(m_ctx->mainWindow());
-          }
-
-          // Run on thread pool — does NOT block main thread
-          IAIService* svc   = m_aiSvc;
-          auto *dlg         = m_progressDialog;
-          auto *ctx         = m_ctx;
-          bool _detExists   = detExists;
-          bool _segExists   = segExists;
-          auto *cancelFlag  = &m_cancelModelLoad;
-
-          QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath,
-                                                    _detExists, _segExists, cancelFlag]() {
-              if (_detExists && !cancelFlag->load()) {
-                  // Update label to Detection on main thread
-                  QString detMsg = ctx->translate("aiproc.loading_det");
-                  if (detMsg.isEmpty()) detMsg = "Loading model Detection...";
-                  QMetaObject::invokeMethod(dlg, [dlg, detMsg]() {
-                      if (dlg) dlg->setLabelText(detMsg);
-                  }, Qt::QueuedConnection);
-                  svc->loadDetectionModel(detPath);
-              }
-              if (_segExists && !cancelFlag->load()) {
-                  // Update label to Segmentation on main thread
-                  QString segMsg = ctx->translate("aiproc.loading_seg");
-                  if (segMsg.isEmpty()) segMsg = "Loading model Segmentation...";
-                  QMetaObject::invokeMethod(dlg, [dlg, segMsg]() {
-                      if (dlg) dlg->setLabelText(segMsg);
-                  }, Qt::QueuedConnection);
-                  svc->loadSegmentationModel(segPath);
-              }
-          });
-          m_modelLoadWatcher->setFuture(future);
+          QString firstLabel = (detExists) ? m_ctx->translate("aiproc.loading_det") : m_ctx->translate("aiproc.loading_seg");
+          if (firstLabel.isEmpty()) firstLabel = (detExists) ? "Loading Detection..." : "Loading Segmentation...";
+          m_progressDialog->setLabelText(firstLabel);
+          m_progressDialog->setRange(0, 0);
+          m_progressDialog->show();
+          m_progressDialog->centerOnWidget(m_ctx->mainWindow());
       }
-  }
 
+      IAIService* svc   = m_aiSvc;
+      auto *dlg         = m_progressDialog;
+      auto *ctx         = m_ctx;
+      bool _detExists   = detExists;
+      bool _segExists   = segExists;
+      auto *cancelFlag  = &m_cancelModelLoad;
+
+      QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath, _detExists, _segExists, cancelFlag]() {
+          if (_detExists && !cancelFlag->load()) {
+              QString detMsg = ctx->translate("aiproc.loading_det");
+              if (detMsg.isEmpty()) detMsg = "Loading Detection...";
+              QMetaObject::invokeMethod(dlg, [dlg, detMsg]() { if (dlg) dlg->setLabelText(detMsg); }, Qt::QueuedConnection);
+              svc->loadDetectionModel(detPath);
+          }
+          if (_segExists && !cancelFlag->load()) {
+              QString segMsg = ctx->translate("aiproc.loading_seg");
+              if (segMsg.isEmpty()) segMsg = "Loading Segmentation...";
+              QMetaObject::invokeMethod(dlg, [dlg, segMsg]() { if (dlg) dlg->setLabelText(segMsg); }, Qt::QueuedConnection);
+              svc->loadSegmentationModel(segPath);
+          }
+      });
+      m_modelLoadWatcher->setFuture(future);
+  }
+}
+
+void AIProcessorPlugin::setupMenus() {
   QMenu *aiMenu = m_ctx->getMenu("ai_menu");
   aiMenu->clear();
 
-  // Detection sub-menu with icons
-  QMenu *detMenu = aiMenu->addMenu(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")),
-                                   "Object Detection");
-  m_runDetAct = detMenu->addAction(
-      IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")),
-      m_ctx->translate("ai.run_detection"), this, &AIProcessorPlugin::onObjectDetection);
-  m_hideDetAct = detMenu->addAction(
-      IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")),
-      m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
+  QMenu *detMenu = aiMenu->addMenu(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), "Object Detection");
+  m_runDetAct = detMenu->addAction(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), m_ctx->translate("ai.run_detection"), this, &AIProcessorPlugin::onObjectDetection);
+  m_hideDetAct = detMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
 
-  // Segmentation sub-menu with icons
-  QMenu *segMenu = aiMenu->addMenu(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")),
-                                   "Segmentation");
-  m_runSegAct = segMenu->addAction(
-      IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")),
-      m_ctx->translate("ai.run_segmentation"), this, &AIProcessorPlugin::onSegmentation);
-  m_hideSegAct = segMenu->addAction(
-      IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")),
-      m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
+  QMenu *segMenu = aiMenu->addMenu(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), "Segmentation");
+  m_runSegAct = segMenu->addAction(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), m_ctx->translate("ai.run_segmentation"), this, &AIProcessorPlugin::onSegmentation);
+  m_hideSegAct = segMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
 
   aiMenu->addSeparator();
-  aiMenu->addAction(
-      IconFactory::createModern("⚙️", QColor("#8b5cf6"), QColor("#7c3aed")),
-      m_ctx->translate("ai.training"), this, &AIProcessorPlugin::onTrainModel);
-  aiMenu->addAction(
-      IconFactory::createModern("📊", QColor("#06b6d4"), QColor("#0891b2")),
-      m_ctx->translate("ai.charts"), this, &AIProcessorPlugin::onViewCharts);
+  aiMenu->addAction(IconFactory::createModern("⚙️", QColor("#8b5cf6"), QColor("#7c3aed")), m_ctx->translate("ai.training"), this, &AIProcessorPlugin::onTrainModel);
+  aiMenu->addAction(IconFactory::createModern("📊", QColor("#06b6d4"), QColor("#0891b2")), m_ctx->translate("ai.charts"), this, &AIProcessorPlugin::onViewCharts);
+}
 
+void AIProcessorPlugin::setupRibbonUI() {
   if (QWidget* panel = m_ctx->getTabPanel("tab.ai")) {
       m_ribbonUI = new AIProcessorRibbonUI(m_ctx, panel, this);
-      
       connect(m_ribbonUI->btnDet(), &QToolButton::clicked, this, &AIProcessorPlugin::onObjectDetection);
       connect(m_ribbonUI->btnSeg(), &QToolButton::clicked, this, &AIProcessorPlugin::onSegmentation);
       connect(m_ribbonUI->btnHide(), &QToolButton::clicked, this, &AIProcessorPlugin::onHideAIResults);
       connect(m_ribbonUI->btnTrain(), &QToolButton::clicked, this, &AIProcessorPlugin::onTrainModel);
       connect(m_ribbonUI->btnChart(), &QToolButton::clicked, this, &AIProcessorPlugin::onViewCharts);
   }
+}
 
-  connect(m_ctx->signalBus(), &SignalBus::stateChanged, this,
-          &AIProcessorPlugin::updateActions);
-  connect(m_ctx->signalBus(), &SignalBus::languageChanged, this,
-          &AIProcessorPlugin::updateActions);
-  connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this,
-          &AIProcessorPlugin::onImageChanged);
-  
-  m_trainDock = new AITrainDockWidget(m_ctx);
-  m_ctx->mainWindow()->addDockWidget(Qt::RightDockWidgetArea, m_trainDock);
-  
-  updateActions();
+void AIProcessorPlugin::setupConnections() {
+  connect(m_ctx->signalBus(), &SignalBus::stateChanged, this, &AIProcessorPlugin::updateActions);
+  connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &AIProcessorPlugin::updateActions);
+  connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this, &AIProcessorPlugin::onImageChanged);
 }
 
 void AIProcessorPlugin::cleanup() {}
@@ -234,21 +197,22 @@ void AIProcessorPlugin::onObjectDetection() {
   emit m_ctx->signalBus()->aiInferenceStarted("detection");
   cv::Mat res = m_aiSvc->runDetection(cv::imread(currentImg.toStdString()));
   emit m_ctx->signalBus()->aiInferenceFinished("detection");
-  QString tp = QApplication::applicationDirPath() + "/temp_ai_result.png";
-  cv::imwrite(tp.toStdString(), res);
 
   m_ctx->viewer()->setAIMode(AIMode::Detection);
-  m_ctx->scene()->setTextureActor(Image2DLoader::load(tp));
+  m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(res));
+  m_ctx->scene()->vtkWidget()->renderWindow()->Render();
+  m_ctx->updateMenuStates();
 
-  // Log prediction image
+  // Log prediction image asynchronously
   QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
   QString predictDir = AppConfig::instance().predictDir("detection") + "/" + currentDate;
   QDir().mkpath(predictDir);
   QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
-  cv::imwrite(logPath.toStdString(), res);
-
-  m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-  m_ctx->updateMenuStates();
+  
+  cv::Mat resClone = res.clone();
+  QtConcurrent::run([logPath, resClone]() {
+      cv::imwrite(logPath.toStdString(), resClone);
+  });
 }
 
 void AIProcessorPlugin::onSegmentation() {
@@ -270,21 +234,22 @@ void AIProcessorPlugin::onSegmentation() {
   emit m_ctx->signalBus()->aiInferenceStarted("segmentation");
   cv::Mat res = m_aiSvc->runSegmentation(cv::imread(currentImg.toStdString()));
   emit m_ctx->signalBus()->aiInferenceFinished("segmentation");
-  QString tp = QApplication::applicationDirPath() + "/temp_ai_result.png";
-  cv::imwrite(tp.toStdString(), res);
 
   m_ctx->viewer()->setAIMode(AIMode::Segmentation);
-  m_ctx->scene()->setTextureActor(Image2DLoader::load(tp));
+  m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(res));
+  m_ctx->scene()->vtkWidget()->renderWindow()->Render();
+  m_ctx->updateMenuStates();
 
-  // Log prediction image
+  // Log prediction image asynchronously
   QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
   QString predictDir = AppConfig::instance().predictDir("segmentation") + "/" + currentDate;
   QDir().mkpath(predictDir);
   QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
-  cv::imwrite(logPath.toStdString(), res);
-
-  m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-  m_ctx->updateMenuStates();
+  
+  cv::Mat resClone = res.clone();
+  QtConcurrent::run([logPath, resClone]() {
+      cv::imwrite(logPath.toStdString(), resClone);
+  });
 }
 
 void AIProcessorPlugin::onHideAIResults() {
@@ -363,7 +328,7 @@ void AIProcessorPlugin::onViewCharts() {
 }
 
 void AIProcessorPlugin::onImageChanged(int index, int total) {
-    AIMode mode = m_ctx->viewer()->getCurrentAIMode();
+    QString mode = m_ctx->viewer()->getCurrentAIMode();
     if (mode == AIMode::Detection) {
         onObjectDetection();
     } else if (mode == AIMode::Segmentation) {
@@ -377,7 +342,7 @@ void AIProcessorPlugin::updateActions() {
         aiMenu->setTitle(m_ctx->translate("ai.menu"));
     }
     if (!m_ctx->mainWindow() || !m_runDetAct) return;
-  AIMode mode = m_ctx->viewer()->getCurrentAIMode();
+  QString mode = m_ctx->viewer()->getCurrentAIMode();
   bool has2D = !m_ctx->viewer()->getCurrent2DImagePath().isEmpty();
 
   bool detReady = m_aiSvc && m_aiSvc->isDetectionReady();

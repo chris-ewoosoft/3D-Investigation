@@ -86,11 +86,11 @@ void ViewerService::onAutoPrev() {
     emit m_ctx->signalBus()->autoNavigationChanged(autoTimer->isActive(), isAutoNext);
 }
 
-AIMode ViewerService::getCurrentAIMode() const { 
+QString ViewerService::getCurrentAIMode() const { 
     return currentAIMode; 
 }
 
-void ViewerService::setAIMode(AIMode mode) { 
+void ViewerService::setAIMode(const QString& mode) { 
     currentAIMode = mode; 
 }
 

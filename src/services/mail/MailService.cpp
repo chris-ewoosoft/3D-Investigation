@@ -391,6 +391,15 @@ QString MailService::imapHost() const
 
 bool MailService::openImap(QString &errorMsg, QSslSocket &sock) const
 {
+    // Check SSL availability first (OpenSSL DLLs must be present at runtime)
+    if (!QSslSocket::supportsSsl()) {
+        errorMsg = QString("TLS is not available. SSL library build: %1, runtime: %2. "
+                           "Please ensure OpenSSL DLLs (libssl, libcrypto) are in the application directory or PATH.")
+                       .arg(QSslSocket::sslLibraryBuildVersionString(),
+                            QSslSocket::sslLibraryVersionString());
+        return false;
+    }
+
     sock.setPeerVerifyMode(QSslSocket::VerifyNone);
 
     // Resolve host and prefer IPv4
@@ -404,19 +413,14 @@ bool MailService::openImap(QString &errorMsg, QSslSocket &sock) const
         }
     }
 
-    // Connect using IPv4 if available, then upgrade to TLS
+    // Port 993 uses implicit SSL/TLS — must use connectToHostEncrypted()
+    // (connectToHost + startClientEncryption is for STARTTLS on port 143)
     if (!ipv4Address.isNull()) {
-        sock.connectToHost(ipv4Address, 993);
+        sock.connectToHostEncrypted(ipv4Address.toString(), 993, host);
     } else {
-        sock.connectToHost(host, 993);
+        sock.connectToHostEncrypted(host, 993);
     }
 
-    if (!sock.waitForConnected(ImapTimeoutMs)) {
-        errorMsg = "Cannot connect to IMAP server: " + sock.errorString();
-        return false;
-    }
-
-    sock.startClientEncryption();
     if (!sock.waitForEncrypted(ImapTimeoutMs)) {
         errorMsg = "Cannot establish TLS with IMAP server: " + sock.errorString();
         return false;

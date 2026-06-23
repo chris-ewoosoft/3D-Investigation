@@ -40,6 +40,11 @@ private slots:
     void onImageChanged(int index, int total);
 
 private:
+    void loadModelsInBackground();
+    void setupMenus();
+    void setupRibbonUI();
+    void setupConnections();
+
     IAppContext*   m_ctx         = nullptr;
     IAIService*    m_aiSvc       = nullptr;  ///< Looked up from ServiceRegistry
     CustomProgressDialog *m_progressDialog = nullptr;

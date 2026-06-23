@@ -293,6 +293,7 @@ if(QWINDOWS_DLL_PATH)
         COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\imageformats')) { Copy-Item -Path '${PLUGINS_ROOT}/imageformats' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
         COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\iconengines')) { Copy-Item -Path '${PLUGINS_ROOT}/iconengines' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
         COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\styles')) { Copy-Item -Path '${PLUGINS_ROOT}/styles' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
+        COMMAND powershell -Command "if (-not (Test-Path '$<TARGET_FILE_DIR:3D-Reconstruction>\\tls')) { Copy-Item -Path '${PLUGINS_ROOT}/tls' -Destination '$<TARGET_FILE_DIR:3D-Reconstruction>' -Recurse -Force }"
         COMMENT "Manually copying Qt plugins from vcpkg (avoiding windeployqt ABI mismatch)"
     )
 else()

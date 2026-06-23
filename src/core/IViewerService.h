@@ -16,8 +16,8 @@ public:
     virtual void    onPrevImage() = 0;
     virtual void    onAutoNext() = 0;
     virtual void    onAutoPrev() = 0;
-    virtual AIMode  getCurrentAIMode() const = 0;
-    virtual void    setAIMode(AIMode mode) = 0;
+    virtual QString  getCurrentAIMode() const = 0;
+    virtual void    setAIMode(const QString& mode) = 0;
 };
 
 #endif // IVIEWERSERVICE_H

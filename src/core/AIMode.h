@@ -1,10 +1,12 @@
 #ifndef AIMODE_H
 #define AIMODE_H
 
-enum class AIMode {
-    None,
-    Detection,
-    Segmentation
-};
+#include <QString>
+
+namespace AIMode {
+    const QString None = "";
+    const QString Detection = "Detection";
+    const QString Segmentation = "Segmentation";
+}
 
 #endif // AIMODE_H

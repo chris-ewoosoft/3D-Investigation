@@ -14,9 +14,12 @@
 #include <vtkProperty.h>
 
 #include "Global.h"
+#include <opencv2/core.hpp>
+
 class APP_EXPORT Image2DLoader {
 public:
     static vtkSmartPointer<vtkActor> load(const QString& fileName);
+    static vtkSmartPointer<vtkActor> loadFromMat(const cv::Mat& image);
 };
 
 #endif // IMAGE2DLOADER_H

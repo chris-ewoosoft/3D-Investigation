@@ -8,6 +8,7 @@
       "features": ["qt"]
     },
     "pcl",
-    "opencv4"
+    "opencv4",
+    "openssl"
   ]
 }
