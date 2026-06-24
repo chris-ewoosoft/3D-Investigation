@@ -9,11 +9,13 @@
 #include "AITrainDockWidget.h"
 #include "AIProcessorRibbonUI.h"
 #include "LanguageManager.h"
+#include "VideoTrackerThread.h"
 #include "IconFactory.h"
 #include "ModernMessageBox.h"
 #include <QDesktopServices>
 #include <QDir>
 #include <QFileInfo>
+#include <QFileDialog>
 #include <QMenu>
 #include <QProcess>
 #include <QUrl>
@@ -30,6 +32,7 @@
 #include <QVTKOpenGLNativeWidget.h>
 #include <QTimer>
 #include <QtConcurrent>
+#include <QThreadPool>
 #include <QGroupBox>
 #include <QStyle>
 #include "AppConfig.h"
@@ -65,10 +68,12 @@ void AIProcessorPlugin::loadModelsInBackground() {
   QString modelsPath = AppConfig::instance().modelsDir();
   QString detPath = modelsPath + "/yolo11n.onnx";
   QString segPath = modelsPath + "/yolo11n-seg.onnx";
+  QString trackPath = modelsPath + "/yolo11x-tracking.onnx";
   bool detExists = QFile::exists(detPath);
   bool segExists = QFile::exists(segPath);
+  bool trackExists = QFile::exists(trackPath);
 
-  if (detExists || segExists) {
+  if (detExists || segExists || trackExists) {
       m_modelsLoading = true;
       m_cancelModelLoad.store(false);
 
@@ -91,6 +96,8 @@ void AIProcessorPlugin::loadModelsInBackground() {
                   emit m_ctx->signalBus()->aiModelLoaded("detection");
               if (m_aiSvc && m_aiSvc->isSegmentationReady())
                   emit m_ctx->signalBus()->aiModelLoaded("segmentation");
+              if (m_aiSvc && m_aiSvc->isTrackingReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("tracking");
           }
           updateActions(); 
       });
@@ -116,9 +123,10 @@ void AIProcessorPlugin::loadModelsInBackground() {
       auto *ctx         = m_ctx;
       bool _detExists   = detExists;
       bool _segExists   = segExists;
+      bool _trackExists = trackExists;
       auto *cancelFlag  = &m_cancelModelLoad;
 
-      QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath, _detExists, _segExists, cancelFlag]() {
+      QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath, trackPath, _detExists, _segExists, _trackExists, cancelFlag]() {
           if (_detExists && !cancelFlag->load()) {
               QString detMsg = ctx->translate("aiproc.loading_det");
               if (detMsg.isEmpty()) detMsg = "Loading Detection...";
@@ -130,6 +138,12 @@ void AIProcessorPlugin::loadModelsInBackground() {
               if (segMsg.isEmpty()) segMsg = "Loading Segmentation...";
               QMetaObject::invokeMethod(dlg, [dlg, segMsg]() { if (dlg) dlg->setLabelText(segMsg); }, Qt::QueuedConnection);
               svc->loadSegmentationModel(segPath);
+          }
+          if (_trackExists && !cancelFlag->load()) {
+              QString trackMsg = ctx->translate("aiproc.loading_track");
+              if (trackMsg.isEmpty()) trackMsg = "Loading Tracking...";
+              QMetaObject::invokeMethod(dlg, [dlg, trackMsg]() { if (dlg) dlg->setLabelText(trackMsg); }, Qt::QueuedConnection);
+              svc->loadTrackingModel(trackPath);
           }
       });
       m_modelLoadWatcher->setFuture(future);
@@ -148,6 +162,11 @@ void AIProcessorPlugin::setupMenus() {
   m_runSegAct = segMenu->addAction(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), m_ctx->translate("ai.run_segmentation"), this, &AIProcessorPlugin::onSegmentation);
   m_hideSegAct = segMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
 
+  QMenu *trackMenu = aiMenu->addMenu(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), "Video Tracking");
+  m_runTrackingAct = trackMenu->addAction(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), "Run Video Tracking", this, &AIProcessorPlugin::onObjectTracking);
+  m_pauseTrackingAct = trackMenu->addAction(IconFactory::createModern("⏸️", QColor("#f59e0b"), QColor("#d97706")), "Pause/Resume", this, &AIProcessorPlugin::onPauseResumeTracking);
+  m_stopTrackingAct = trackMenu->addAction(IconFactory::createModern("⏹️", QColor("#ef4444"), QColor("#b91c1c")), "Stop Tracking", this, &AIProcessorPlugin::onStopTracking);
+
   aiMenu->addSeparator();
   aiMenu->addAction(IconFactory::createModern("⚙️", QColor("#8b5cf6"), QColor("#7c3aed")), m_ctx->translate("ai.training"), this, &AIProcessorPlugin::onTrainModel);
   aiMenu->addAction(IconFactory::createModern("📊", QColor("#06b6d4"), QColor("#0891b2")), m_ctx->translate("ai.charts"), this, &AIProcessorPlugin::onViewCharts);
@@ -158,6 +177,9 @@ void AIProcessorPlugin::setupRibbonUI() {
       m_ribbonUI = new AIProcessorRibbonUI(m_ctx, panel, this);
       connect(m_ribbonUI->btnDet(), &QToolButton::clicked, this, &AIProcessorPlugin::onObjectDetection);
       connect(m_ribbonUI->btnSeg(), &QToolButton::clicked, this, &AIProcessorPlugin::onSegmentation);
+      connect(m_ribbonUI->btnTrack(), &QToolButton::clicked, this, &AIProcessorPlugin::onObjectTracking);
+      connect(m_ribbonUI->btnPauseTrack(), &QToolButton::clicked, this, &AIProcessorPlugin::onPauseResumeTracking);
+      connect(m_ribbonUI->btnStopTrack(), &QToolButton::clicked, this, &AIProcessorPlugin::onStopTracking);
       connect(m_ribbonUI->btnHide(), &QToolButton::clicked, this, &AIProcessorPlugin::onHideAIResults);
       connect(m_ribbonUI->btnTrain(), &QToolButton::clicked, this, &AIProcessorPlugin::onTrainModel);
       connect(m_ribbonUI->btnChart(), &QToolButton::clicked, this, &AIProcessorPlugin::onViewCharts);
@@ -170,7 +192,14 @@ void AIProcessorPlugin::setupConnections() {
   connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this, &AIProcessorPlugin::onImageChanged);
 }
 
-void AIProcessorPlugin::cleanup() {}
+void AIProcessorPlugin::cleanup() {
+    if (m_trackerThread) {
+        m_trackerThread->stop();
+        m_trackerThread->wait();
+        delete m_trackerThread;
+        m_trackerThread = nullptr;
+    }
+}
 
 void AIProcessorPlugin::onTrainModel() {
     if (m_trainDock) {
@@ -210,7 +239,7 @@ void AIProcessorPlugin::onObjectDetection() {
   QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
   
   cv::Mat resClone = res.clone();
-  QtConcurrent::run([logPath, resClone]() {
+  QThreadPool::globalInstance()->start([logPath, resClone]() {
       cv::imwrite(logPath.toStdString(), resClone);
   });
 }
@@ -247,7 +276,7 @@ void AIProcessorPlugin::onSegmentation() {
   QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
   
   cv::Mat resClone = res.clone();
-  QtConcurrent::run([logPath, resClone]() {
+  QThreadPool::globalInstance()->start([logPath, resClone]() {
       cv::imwrite(logPath.toStdString(), resClone);
   });
 }
@@ -336,6 +365,84 @@ void AIProcessorPlugin::onImageChanged(int index, int total) {
     }
 }
 
+void AIProcessorPlugin::onObjectTracking() {
+    if (!m_aiSvc || !m_aiSvc->isTrackingReady()) {
+        ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("common.error"), m_ctx->translate("aiproc.model_not_loaded_warn"));
+        return;
+    }
+
+    QString videoPath = QFileDialog::getOpenFileName(m_ctx->mainWindow(), "Select Video for Tracking", "", "Video Files (*.mp4 *.avi *.mkv)");
+    if (videoPath.isEmpty()) return;
+
+    // Clear current state
+    m_ctx->scene()->clear3DModel();
+    m_ctx->scene()->clearPointCloud();
+    m_ctx->scene()->resetToSingleRenderer();
+    m_ctx->viewer()->setAIMode(AIMode::Tracking);
+    
+    // Stop existing tracking if any
+    if (m_trackerThread) {
+        m_trackerThread->stop();
+        m_trackerThread->wait();
+        delete m_trackerThread;
+        m_trackerThread = nullptr;
+    }
+
+    m_aiSvc->resetTrackingState();
+
+    m_trackerThread = new VideoTrackerThread(m_aiSvc, videoPath, this);
+    connect(m_trackerThread, &VideoTrackerThread::frameProcessed, this, &AIProcessorPlugin::onTrackingFrameReceived);
+    connect(m_trackerThread, &VideoTrackerThread::finishedTracking, this, &AIProcessorPlugin::onTrackingFinished);
+    
+    m_trackingPaused = false;
+    m_trackerThread->start();
+
+    updateActions();
+}
+
+void AIProcessorPlugin::onPauseResumeTracking() {
+    if (!m_trackerThread) return;
+    
+    m_trackingPaused = !m_trackingPaused;
+    if (m_trackingPaused) {
+        m_trackerThread->pause();
+        if (m_pauseTrackingAct) m_pauseTrackingAct->setText("Resume");
+        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText("Resume");
+    } else {
+        m_trackerThread->resume();
+        if (m_pauseTrackingAct) m_pauseTrackingAct->setText("Pause");
+        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText("Pause");
+    }
+}
+
+void AIProcessorPlugin::onStopTracking() {
+    if (m_trackerThread) {
+        m_trackerThread->stop();
+        m_trackerThread->wait();
+        delete m_trackerThread;
+        m_trackerThread = nullptr;
+    }
+    m_ctx->viewer()->setAIMode(AIMode::None);
+    updateActions();
+}
+
+void AIProcessorPlugin::onTrackingFrameReceived(const cv::Mat& frame) {
+    if (m_ctx->viewer()->getCurrentAIMode() != AIMode::Tracking) return;
+    m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(frame));
+    m_ctx->scene()->vtkWidget()->renderWindow()->Render();
+}
+
+void AIProcessorPlugin::onTrackingFinished() {
+    if (m_trackerThread) {
+        m_trackerThread->wait();
+        delete m_trackerThread;
+        m_trackerThread = nullptr;
+    }
+    m_ctx->viewer()->setAIMode(AIMode::None);
+    ModernMessageBox::information(m_ctx->mainWindow(), "Tracking Finished", "Video tracking completed.");
+    updateActions();
+}
+
 void AIProcessorPlugin::updateActions() {
     QMenu *aiMenu = m_ctx->getMenu("ai_menu");
     if (aiMenu) {
@@ -347,24 +454,47 @@ void AIProcessorPlugin::updateActions() {
 
   bool detReady = m_aiSvc && m_aiSvc->isDetectionReady();
   bool segReady = m_aiSvc && m_aiSvc->isSegmentationReady();
+  bool trackReady = m_aiSvc && m_aiSvc->isTrackingReady();
+  bool isTrackingMode = (mode == AIMode::Tracking);
 
   if (m_modelsLoading) {
       m_runDetAct->setEnabled(false);
       m_runSegAct->setEnabled(false);
+      m_runTrackingAct->setEnabled(false);
+      m_pauseTrackingAct->setEnabled(false);
+      m_stopTrackingAct->setEnabled(false);
       if (m_ribbonUI) {
           m_ribbonUI->btnDet()->setText(m_ctx->translate("ai.run_detection"));
           m_ribbonUI->btnDet()->setEnabled(false);
           m_ribbonUI->btnSeg()->setText(m_ctx->translate("ai.run_segmentation"));
           m_ribbonUI->btnSeg()->setEnabled(false);
+          m_ribbonUI->btnTrack()->setEnabled(false);
+          m_ribbonUI->btnPauseTrack()->setEnabled(false);
+          m_ribbonUI->btnStopTrack()->setEnabled(false);
+          m_ribbonUI->btnPauseTrack()->setVisible(false);
+          m_ribbonUI->btnStopTrack()->setVisible(false);
+          m_ribbonUI->btnTrack()->setVisible(true);
       }
   } else {
-      m_runDetAct->setEnabled(mode != AIMode::Detection && has2D && detReady);
-      m_runSegAct->setEnabled(mode != AIMode::Segmentation && has2D && segReady);
+      m_runDetAct->setEnabled(!isTrackingMode && mode != AIMode::Detection && has2D && detReady);
+      m_runSegAct->setEnabled(!isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
+      m_runTrackingAct->setEnabled(!isTrackingMode && trackReady);
+      m_pauseTrackingAct->setEnabled(isTrackingMode);
+      m_stopTrackingAct->setEnabled(isTrackingMode);
+      
       if (m_ribbonUI) {
           m_ribbonUI->btnDet()->setText(m_ctx->translate("ai.run_detection"));
-          m_ribbonUI->btnDet()->setEnabled(mode != AIMode::Detection && has2D && detReady);
+          m_ribbonUI->btnDet()->setEnabled(!isTrackingMode && mode != AIMode::Detection && has2D && detReady);
           m_ribbonUI->btnSeg()->setText(m_ctx->translate("ai.run_segmentation"));
-          m_ribbonUI->btnSeg()->setEnabled(mode != AIMode::Segmentation && has2D && segReady);
+          m_ribbonUI->btnSeg()->setEnabled(!isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
+          m_ribbonUI->btnTrack()->setEnabled(!isTrackingMode && trackReady);
+          
+          m_ribbonUI->btnPauseTrack()->setEnabled(isTrackingMode);
+          m_ribbonUI->btnStopTrack()->setEnabled(isTrackingMode);
+          
+          m_ribbonUI->btnTrack()->setVisible(!isTrackingMode);
+          m_ribbonUI->btnPauseTrack()->setVisible(isTrackingMode);
+          m_ribbonUI->btnStopTrack()->setVisible(isTrackingMode);
       }
   }
 
@@ -374,6 +504,7 @@ void AIProcessorPlugin::updateActions() {
   if (m_ribbonUI) {
       m_ribbonUI->btnHide()->setText(m_ctx->translate("ai.hide_results"));
       m_ribbonUI->btnHide()->setEnabled(mode != AIMode::None);
+      m_ribbonUI->btnTrack()->setText(m_ctx->translate("ai.run_tracking"));
       m_ribbonUI->btnTrain()->setText(m_ctx->translate("ai.training"));
       m_ribbonUI->btnChart()->setText(m_ctx->translate("ai.charts"));
       

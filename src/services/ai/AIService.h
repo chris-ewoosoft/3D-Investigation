@@ -23,10 +23,16 @@ public:
     // IAIService
     bool loadDetectionModel(const QString& modelPath) override;
     bool loadSegmentationModel(const QString& modelPath) override;
+    bool loadTrackingModel(const QString& modelPath) override;
+    
     bool isDetectionReady() const override;
     bool isSegmentationReady() const override;
+    bool isTrackingReady() const override;
+    
     cv::Mat runDetection(const cv::Mat& inputImage) override;
     cv::Mat runSegmentation(const cv::Mat& inputImage) override;
+    cv::Mat runTracking(const cv::Mat& inputImage) override;
+    void resetTrackingState() override;
 
     /**
      * Truy cập processor nội bộ (chỉ dùng trong app layer).

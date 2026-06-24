@@ -43,8 +43,31 @@ AIProcessorRibbonUI::AIProcessorRibbonUI(IAppContext* ctx, QWidget* panel, QObje
     m_btnHide->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
     m_btnHide->setMinimumWidth(80);
 
+    m_btnTrack = new QToolButton(m_groupAI);
+    m_btnTrack->setText(m_ctx->translate("ai.run_tracking"));
+    m_btnTrack->setIcon(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")));
+    m_btnTrack->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    m_btnTrack->setMinimumWidth(80);
+
+    m_btnPauseTrack = new QToolButton(m_groupAI);
+    m_btnPauseTrack->setText("Pause");
+    m_btnPauseTrack->setIcon(IconFactory::createModern("⏸️", QColor("#f59e0b"), QColor("#d97706")));
+    m_btnPauseTrack->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    m_btnPauseTrack->setMinimumWidth(80);
+    m_btnPauseTrack->setVisible(false);
+
+    m_btnStopTrack = new QToolButton(m_groupAI);
+    m_btnStopTrack->setText("Stop");
+    m_btnStopTrack->setIcon(IconFactory::createModern("⏹️", QColor("#ef4444"), QColor("#b91c1c")));
+    m_btnStopTrack->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    m_btnStopTrack->setMinimumWidth(80);
+    m_btnStopTrack->setVisible(false);
+
     gLayout->addWidget(m_btnDet);
     gLayout->addWidget(m_btnSeg);
+    gLayout->addWidget(m_btnTrack);
+    gLayout->addWidget(m_btnPauseTrack);
+    gLayout->addWidget(m_btnStopTrack);
     gLayout->addWidget(m_btnHide);
     vbox1->addLayout(gLayout);
     vbox1->addStretch();

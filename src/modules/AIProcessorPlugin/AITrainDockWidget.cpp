@@ -8,6 +8,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QScrollBar>
+#include <QDialog>
+#include <QCheckBox>
+#include <QDialogButtonBox>
 
 AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     : QDockWidget("🚀 AI Training", parent), m_ctx(ctx) 
@@ -92,8 +95,37 @@ void AITrainDockWidget::startTraining() {
     if (trainProcess->state() == QProcess::NotRunning) {
         QString scriptPath = AppConfig::instance().aiTrainingDir() + "/TrainModel.py";
         QString modelsPath = AppConfig::instance().modelsDir();
-        bool modelExists = QFile::exists(modelsPath + "/yolo11n.onnx") || QFile::exists(modelsPath + "/yolo11n-seg.onnx");
+        bool modelExists = QFile::exists(modelsPath + "/yolo11n.onnx") || QFile::exists(modelsPath + "/yolo11n-seg.onnx") || QFile::exists(modelsPath + "/yolo11n-tracking.onnx");
         
+        QDialog dialog(m_ctx->mainWindow());
+        dialog.setWindowTitle(m_ctx->translate("ai.training"));
+        dialog.setStyleSheet("QDialog { background-color: #1a1a1f; color: white; } QCheckBox { color: white; font-size: 14px; margin: 5px; }");
+        
+        QVBoxLayout *layout = new QVBoxLayout(&dialog);
+        QLabel* lbl = new QLabel("Select models to train:", &dialog);
+        lbl->setStyleSheet("color: white; font-size: 14px; font-weight: bold;");
+        layout->addWidget(lbl);
+        
+        QCheckBox *chkDet = new QCheckBox("Detection (yolo11n)", &dialog);
+        QCheckBox *chkSeg = new QCheckBox("Segmentation (yolo11n-seg)", &dialog);
+        QCheckBox *chkTrack = new QCheckBox("Tracking (yolo11x-tracking)", &dialog);
+        
+        chkDet->setChecked(true);
+        
+        layout->addWidget(chkDet);
+        layout->addWidget(chkSeg);
+        layout->addWidget(chkTrack);
+        
+        QDialogButtonBox *btnBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        btnBox->setStyleSheet("QPushButton { background-color: #3b82f6; color: white; padding: 5px 15px; border-radius: 4px; } QPushButton:hover { background-color: #2563eb; }");
+        connect(btnBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(btnBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        layout->addWidget(btnBox);
+        
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+
         if (modelExists) {
             if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
                 return;
@@ -112,7 +144,13 @@ void AITrainDockWidget::startTraining() {
         env.insert("PYTHONIOENCODING", "utf-8");
         trainProcess->setProcessEnvironment(env);
         
-        trainProcess->start("python", QStringList() << scriptPath << "--yes");
+        QStringList args;
+        args << scriptPath << "--yes";
+        if (chkDet->isChecked()) args << "--det";
+        if (chkSeg->isChecked()) args << "--seg";
+        if (chkTrack->isChecked()) args << "--track";
+
+        trainProcess->start("python", args);
     }
 }
 

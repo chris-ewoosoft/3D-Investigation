@@ -27,12 +27,18 @@ public:
     /** Tải model segmentation (ONNX). Trả về true nếu thành công. */
     virtual bool loadSegmentationModel(const QString& modelPath) = 0;
 
+    /** Tải model tracking (ONNX). Trả về true nếu thành công. */
+    virtual bool loadTrackingModel(const QString& modelPath) = 0;
+
     // --- State Query ---
     /** Kiểm tra detection model đã sẵn sàng chưa. */
     virtual bool isDetectionReady() const = 0;
 
     /** Kiểm tra segmentation model đã sẵn sàng chưa. */
     virtual bool isSegmentationReady() const = 0;
+
+    /** Kiểm tra tracking model đã sẵn sàng chưa. */
+    virtual bool isTrackingReady() const = 0;
 
     // --- Inference ---
     /**
@@ -46,6 +52,17 @@ public:
      * @return cv::Mat với masks đã vẽ, hoặc empty nếu lỗi.
      */
     virtual cv::Mat runSegmentation(const cv::Mat& inputImage) = 0;
+
+    /**
+     * Chạy object tracking trên frame đầu vào (có lưu trạng thái).
+     * @return cv::Mat với bounding boxes và tracking IDs đã vẽ.
+     */
+    virtual cv::Mat runTracking(const cv::Mat& inputImage) = 0;
+
+    /**
+     * Reset trạng thái tracking (ví dụ khi chuyển video mới).
+     */
+    virtual void resetTrackingState() = 0;
 };
 
 #endif // IAISERVICE_H

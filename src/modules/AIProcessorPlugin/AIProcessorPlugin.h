@@ -18,6 +18,7 @@
 
 class AITrainDockWidget;
 class AIProcessorRibbonUI;
+class VideoTrackerThread;
 
 class AIProcessorPlugin : public QObject, public IPlugin {
     Q_OBJECT
@@ -35,6 +36,11 @@ private slots:
     void onObjectDetection();
     void onSegmentation();
     void onHideAIResults();
+    void onObjectTracking();
+    void onPauseResumeTracking();
+    void onStopTracking();
+    void onTrackingFrameReceived(const cv::Mat& frame);
+    void onTrackingFinished();
     void onViewCharts();
     void updateActions();
     void onImageChanged(int index, int total);
@@ -55,6 +61,9 @@ private:
     QAction *m_hideDetAct = nullptr;
     QAction *m_runSegAct = nullptr;
     QAction *m_hideSegAct = nullptr;
+    QAction *m_runTrackingAct = nullptr;
+    QAction *m_pauseTrackingAct = nullptr;
+    QAction *m_stopTrackingAct = nullptr;
 
     // Train AI UI
     AITrainDockWidget* m_trainDock = nullptr;
@@ -67,6 +76,9 @@ private:
     bool m_modelsLoading = false;
     std::atomic<bool> m_cancelModelLoad{false};
     QMetaObject::Connection m_modelLoadStopConn;
+
+    VideoTrackerThread* m_trackerThread = nullptr;
+    bool m_trackingPaused = false;
 };
 
 #endif // AI_PROCESSOR_PLUGIN_H

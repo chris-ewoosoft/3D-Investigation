@@ -5,7 +5,7 @@
 #include <numeric>
 #include <opencv2/imgproc.hpp>
 
-AIProcessor::AIProcessor() : isDetModelLoaded(false), isSegModelLoaded(false) {
+AIProcessor::AIProcessor() : isDetModelLoaded(false), isSegModelLoaded(false), isTrackingLoaded(false) {
   env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "AIProcessor");
   sessionOptions = std::make_unique<Ort::SessionOptions>();
   sessionOptions->SetIntraOpNumThreads(1);
@@ -89,6 +89,21 @@ bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
     qWarning() << "ORT Exception during loading segmentation model:"
                << e.what();
     isSegModelLoaded = false;
+    return false;
+  }
+}
+
+bool AIProcessor::loadTrackingModel(const QString &modelPath) {
+  try {
+    std::wstring w_modelPath = modelPath.toStdWString();
+    trackingSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
+                                                *sessionOptions);
+    isTrackingLoaded = true;
+    qDebug() << "Tracking model loaded successfully with ORT:" << modelPath;
+    return true;
+  } catch (const Ort::Exception &e) {
+    qWarning() << "ORT Exception during loading tracking model:" << e.what();
+    isTrackingLoaded = false;
     return false;
   }
 }
@@ -326,6 +341,147 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
   }
 
   cv::addWeighted(resultImage, 1.0, color_mask, 0.5, 0, resultImage);
+
+  return resultImage;
+}
+
+void AIProcessor::resetTrackingState() {
+    currentTracks.clear();
+    nextTrackId = 0;
+}
+
+cv::Mat AIProcessor::runTracking(const cv::Mat &inputImage) {
+  if (!isTrackingLoaded || inputImage.empty()) {
+    qWarning() << "Tracking model not loaded or input image is empty.";
+    return inputImage;
+  }
+
+  const float SCORE_THRESHOLD = 0.5f;
+  const float NMS_THRESHOLD = 0.45f;
+  const int INPUT_WIDTH = 640;
+  const int INPUT_HEIGHT = 640;
+  const int CHANNELS = 3;
+
+  std::vector<float> inputTensorValues;
+  Ort::Value inputTensor = prepareInputTensor(inputImage, INPUT_WIDTH, INPUT_HEIGHT, inputTensorValues);
+
+  Ort::AllocatorWithDefaultOptions allocator;
+  auto inputNamePtr = trackingSession->GetInputNameAllocated(0, allocator);
+  const char *inputNames[] = {inputNamePtr.get()};
+
+  auto outputNamePtr = trackingSession->GetOutputNameAllocated(0, allocator);
+  const char *outputNames[] = {outputNamePtr.get()};
+
+  auto outputTensors = trackingSession->Run(Ort::RunOptions{nullptr}, inputNames,
+                                       &inputTensor, 1, outputNames, 1);
+
+  float *outputData = outputTensors[0].GetTensorMutableData<float>();
+  auto dims = outputTensors[0].GetTensorTypeAndShapeInfo().GetShape();
+
+  cv::Mat outMat(dims[1], dims[2], CV_32F, outputData);
+  outMat = outMat.t();
+
+  int num_preds = outMat.rows;
+  int num_classes = outMat.cols - 4;
+
+  std::vector<int> classIds;
+  std::vector<float> confidences;
+  std::vector<cv::Rect> boxes;
+
+  float x_factor = inputImage.cols / (float)INPUT_WIDTH;
+  float y_factor = inputImage.rows / (float)INPUT_HEIGHT;
+
+  for (int i = 0; i < num_preds; ++i) {
+    float *data = outMat.ptr<float>(i);
+
+    float max_score = -1.f;
+    int class_id = -1;
+    for (int j = 0; j < num_classes; ++j) {
+      if (data[4 + j] > max_score) {
+        max_score = data[4 + j];
+        class_id = j;
+      }
+    }
+
+    if (max_score >= SCORE_THRESHOLD) {
+      float cx = data[0];
+      float cy = data[1];
+      float w = data[2];
+      float h = data[3];
+
+      int left = int((cx - 0.5f * w) * x_factor);
+      int top = int((cy - 0.5f * h) * y_factor);
+      int width = int(w * x_factor);
+      int height = int(h * y_factor);
+
+      classIds.push_back(class_id);
+      confidences.push_back(max_score);
+      boxes.push_back(cv::Rect(left, top, width, height));
+    }
+  }
+
+  std::vector<int> indices;
+  applyNMS(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, indices);
+
+  std::vector<cv::Rect> current_frame_boxes;
+  for (int idx : indices) {
+      current_frame_boxes.push_back(boxes[idx]);
+  }
+
+  // Simple IOU Tracking
+  std::map<int, cv::Rect> newTracks;
+  std::vector<bool> matched_current(current_frame_boxes.size(), false);
+  const float IOU_THRESHOLD = 0.3f;
+
+  for (auto const& [track_id, prev_box] : currentTracks) {
+      int best_match = -1;
+      float best_iou = 0.0f;
+      for (size_t i = 0; i < current_frame_boxes.size(); ++i) {
+          if (matched_current[i]) continue;
+          
+          cv::Rect curr_box = current_frame_boxes[i];
+          float inter_area = (prev_box & curr_box).area();
+          float union_area = prev_box.area() + curr_box.area() - inter_area;
+          float iou = inter_area / union_area;
+          
+          if (iou > best_iou && iou > IOU_THRESHOLD) {
+              best_iou = iou;
+              best_match = i;
+          }
+      }
+      if (best_match != -1) {
+          matched_current[best_match] = true;
+          newTracks[track_id] = current_frame_boxes[best_match];
+      }
+  }
+
+  // Add unmatched to new tracks
+  for (size_t i = 0; i < current_frame_boxes.size(); ++i) {
+      if (!matched_current[i]) {
+          newTracks[nextTrackId++] = current_frame_boxes[i];
+      }
+  }
+
+  currentTracks = newTracks;
+
+  cv::Mat resultImage = inputImage.clone();
+  for (auto const& [track_id, box] : currentTracks) {
+    // Generate color based on track_id
+    cv::Scalar color((track_id * 37) % 255, (track_id * 73) % 255, (track_id * 149) % 255);
+    cv::rectangle(resultImage, box, color, 2);
+
+    QString label = QString("ID: %1").arg(track_id);
+    int baseLine;
+    cv::Size labelSize = cv::getTextSize(
+        label.toStdString(), cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
+    cv::rectangle(resultImage,
+                  cv::Point(box.x, box.y - labelSize.height - baseLine),
+                  cv::Point(box.x + labelSize.width, box.y),
+                  color, cv::FILLED);
+    cv::putText(resultImage, label.toStdString(),
+                cv::Point(box.x, box.y - baseLine), cv::FONT_HERSHEY_SIMPLEX,
+                0.5, cv::Scalar(255, 255, 255), 1);
+  }
 
   return resultImage;
 }

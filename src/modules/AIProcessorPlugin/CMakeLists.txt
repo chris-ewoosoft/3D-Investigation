@@ -9,6 +9,8 @@ add_library(AIProcessorPlugin SHARED
     AITrainDockWidget.cpp
     AIProcessorRibbonUI.h
     AIProcessorRibbonUI.cpp
+    VideoTrackerThread.h
+    VideoTrackerThread.cpp
 )
 
 target_include_directories(AIProcessorPlugin PRIVATE
