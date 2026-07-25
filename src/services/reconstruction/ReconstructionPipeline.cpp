@@ -28,6 +28,44 @@
 #include <numeric>
 #include <set>
 
+namespace {
+constexpr const char *kReconstructionCacheFileName = "recon_cache_quality_v2.ply";
+
+std::vector<cv::DMatch> filterMatchesByFundamental(
+    const std::vector<cv::DMatch> &matches,
+    const std::vector<cv::KeyPoint> &keypoints1,
+    const std::vector<cv::KeyPoint> &keypoints2,
+    double ransacThreshold)
+{
+    if (matches.size() < 8 || ransacThreshold <= 0.0)
+        return matches;
+
+    std::vector<cv::Point2f> points1;
+    std::vector<cv::Point2f> points2;
+    points1.reserve(matches.size());
+    points2.reserve(matches.size());
+    for (const auto &match : matches) {
+        points1.push_back(keypoints1[match.queryIdx].pt);
+        points2.push_back(keypoints2[match.trainIdx].pt);
+    }
+
+    cv::Mat inlierMask;
+    cv::Mat fundamental = cv::findFundamentalMat(
+        points1, points2, cv::FM_RANSAC, ransacThreshold, 0.995, inlierMask);
+    if (fundamental.empty() || inlierMask.empty())
+        return matches;
+
+    std::vector<cv::DMatch> inliers;
+    inliers.reserve(matches.size());
+    for (int i = 0; i < inlierMask.rows; ++i) {
+        if (inlierMask.at<uchar>(i))
+            inliers.push_back(matches[i]);
+    }
+
+    return inliers.size() >= 8 ? inliers : matches;
+}
+}
+
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 ReconstructionPipeline::ReconstructionPipeline() {
@@ -197,77 +235,150 @@ void ReconstructionPipeline::voxelGridDownsample(float leafSize) {
 
 // ─── reconstructWithGroundTruth ──────────────────────────────────────────────
 
-bool ReconstructionPipeline::reconstructWithGroundTruth() {
-    qDebug() << "=== Mode: GROUND-TRUTH camera params ===";
-    int N = (int)images.size();
+// bool ReconstructionPipeline::reconstructWithGroundTruth() {
+//     qDebug() << "=== Mode: GROUND-TRUTH camera params ===";
+//     int N = (int)images.size();
 
-    double maxBaseline = 0.0;
-    for (int i = 0; i < (int)camParams.size(); ++i)
-        for (int j = i + 1; j < (int)camParams.size(); ++j) {
-            cv::Mat Ci = -camParams[i].R.t() * camParams[i].t;
-            cv::Mat Cj = -camParams[j].R.t() * camParams[j].t;
-            cv::Mat d  = Ci - Cj;
-            maxBaseline = std::max(maxBaseline, std::sqrt(d.dot(d)));
-        }
-    double depthLimit = (maxBaseline > 1e-6)
-        ? maxBaseline * AppConstants::Reconstruction::DEPTH_LIMIT_MULTIPLIER : 1e9;
-    qDebug() << "  maxBaseline=" << maxBaseline << "  depthLimit=" << depthLimit;
+//     double maxBaseline = 0.0;
+//     for (int i = 0; i < (int)camParams.size(); ++i)
+//         for (int j = i + 1; j < (int)camParams.size(); ++j) {
+//             cv::Mat Ci = -camParams[i].R.t() * camParams[i].t;
+//             cv::Mat Cj = -camParams[j].R.t() * camParams[j].t;
+//             cv::Mat d  = Ci - Cj;
+//             maxBaseline = std::max(maxBaseline, std::sqrt(d.dot(d)));
+//         }
+//     double depthLimit = (maxBaseline > 1e-6)
+//         ? maxBaseline * AppConstants::Reconstruction::DEPTH_LIMIT_MULTIPLIER : 1e9;
+//     qDebug() << "  maxBaseline=" << maxBaseline << "  depthLimit=" << depthLimit;
+
+//     const int WINDOW = m_config.searchWindow;
+//     std::vector<std::pair<int, int>> pairs;
+//     for (int i = 0; i < N; ++i)
+//         for (int j = i + 1; j < std::min(N, i + WINDOW + 1); ++j)
+//             pairs.push_back({i, j});
+
+//     std::mutex mtx;
+//     cv::parallel_for_(cv::Range(0, (int)pairs.size()), [&](const cv::Range &range) {
+//         std::vector<cv::Point3f> lp; std::vector<cv::Vec3b> lc;
+//         for (int r = range.start; r < range.end; ++r) {
+//             int i = pairs[r].first, j = pairs[r].second;
+//             std::vector<cv::DMatch> matches;
+//             matchFeatures(i, j, matches);
+//             if ((int)matches.size() < m_config.minMatches) continue;
+
+//             std::vector<cv::Point2f> pi, pj;
+//             for (const auto &m : matches) {
+//                 pi.push_back(keypoints[i][m.queryIdx].pt);
+//                 pj.push_back(keypoints[j][m.trainIdx].pt);
+//             }
+//             std::vector<cv::Point3f> newPts;
+//             doTriangulate(camParams[i].P, camParams[j].P, pi, pj, newPts);
+
+//             int kept = 0;
+//             for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
+//                 const cv::Point3f &pt = newPts[k];
+//                 double zi = camParams[i].R.at<double>(2,0)*pt.x +
+//                             camParams[i].R.at<double>(2,1)*pt.y +
+//                             camParams[i].R.at<double>(2,2)*pt.z +
+//                             camParams[i].t.at<double>(2);
+//                 double zj = camParams[j].R.at<double>(2,0)*pt.x +
+//                             camParams[j].R.at<double>(2,1)*pt.y +
+//                             camParams[j].R.at<double>(2,2)*pt.z +
+//                             camParams[j].t.at<double>(2);
+//                 if (zi <= 0 || zj <= 0 || zi > depthLimit || zj > depthLimit) continue;
+//                 if (computeReprojectionError(camParams[i].P, pt, pi[k]) > m_config.reprojectionErrorMax) continue;
+//                 if (computeReprojectionError(camParams[j].P, pt, pj[k]) > m_config.reprojectionErrorMax) continue;
+
+//                 cv::Point2f kp = keypoints[i][matches[k].queryIdx].pt;
+//                 int x = cvRound(kp.x), y = cvRound(kp.y);
+//                 cv::Vec3b col(128, 128, 128);
+//                 if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
+//                     col = images[i].at<cv::Vec3b>(y, x);
+//                 lp.push_back(pt); lc.push_back(col); ++kept;
+//             }
+//             if (kept > 0)
+//                 qDebug() << "  Pair" << i << "-" << j
+//                          << "match=" << matches.size() << "kept=" << kept;
+//         }
+//         std::lock_guard<std::mutex> lock(mtx);
+//         points3D.insert(points3D.end(), lp.begin(), lp.end());
+//         colors.insert(colors.end(), lc.begin(), lc.end());
+//     });
+
+//     qDebug() << "=== Ground-truth raw points:" << points3D.size() << "===";
+//     return !points3D.empty();
+// }
+
+bool ReconstructionPipeline::reconstructWithGroundTruth() {
+    qDebug() << "=== Mode: Track-based Multi-View Triangulation (ground-truth poses) ===";
+    int N = std::min((int)images.size(), (int)camParams.size());
+
+    // 1. Build P matrices trực tiếp từ camParams (đã có sẵn cp.P = K*[R|t])
+    std::vector<cv::Mat> P(N);
+    for (int i = 0; i < N; ++i) P[i] = camParams[i].P;
+
+    // 2. Match pairwise trong sliding window (giữ nguyên window hiện tại)
+    TrackBuilder builder;
+    for (int i = 0; i < N; ++i)
+        for (int k = 0; k < (int)keypoints[i].size(); ++k)
+            builder.registerObs(i, k);
 
     const int WINDOW = m_config.searchWindow;
-    std::vector<std::pair<int, int>> pairs;
+    std::mutex mtx;
+    std::vector<std::pair<int,int>> pairs;
     for (int i = 0; i < N; ++i)
         for (int j = i + 1; j < std::min(N, i + WINDOW + 1); ++j)
             pairs.push_back({i, j});
 
-    std::mutex mtx;
     cv::parallel_for_(cv::Range(0, (int)pairs.size()), [&](const cv::Range &range) {
-        std::vector<cv::Point3f> lp; std::vector<cv::Vec3b> lc;
         for (int r = range.start; r < range.end; ++r) {
             int i = pairs[r].first, j = pairs[r].second;
             std::vector<cv::DMatch> matches;
             matchFeatures(i, j, matches);
+            matches = filterMatchesByFundamental(matches, keypoints[i], keypoints[j],
+                                                 m_config.pairFundamentalRansacThreshold);
             if ((int)matches.size() < m_config.minMatches) continue;
 
-            std::vector<cv::Point2f> pi, pj;
-            for (const auto &m : matches) {
-                pi.push_back(keypoints[i][m.queryIdx].pt);
-                pj.push_back(keypoints[j][m.trainIdx].pt);
-            }
-            std::vector<cv::Point3f> newPts;
-            doTriangulate(camParams[i].P, camParams[j].P, pi, pj, newPts);
-
-            int kept = 0;
-            for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
-                const cv::Point3f &pt = newPts[k];
-                double zi = camParams[i].R.at<double>(2,0)*pt.x +
-                            camParams[i].R.at<double>(2,1)*pt.y +
-                            camParams[i].R.at<double>(2,2)*pt.z +
-                            camParams[i].t.at<double>(2);
-                double zj = camParams[j].R.at<double>(2,0)*pt.x +
-                            camParams[j].R.at<double>(2,1)*pt.y +
-                            camParams[j].R.at<double>(2,2)*pt.z +
-                            camParams[j].t.at<double>(2);
-                if (zi <= 0 || zj <= 0 || zi > depthLimit || zj > depthLimit) continue;
-                if (computeReprojectionError(camParams[i].P, pt, pi[k]) > m_config.reprojectionErrorMax) continue;
-                if (computeReprojectionError(camParams[j].P, pt, pj[k]) > m_config.reprojectionErrorMax) continue;
-
-                cv::Point2f kp = keypoints[i][matches[k].queryIdx].pt;
-                int x = cvRound(kp.x), y = cvRound(kp.y);
-                cv::Vec3b col(128, 128, 128);
-                if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
-                    col = images[i].at<cv::Vec3b>(y, x);
-                lp.push_back(pt); lc.push_back(col); ++kept;
-            }
-            if (kept > 0)
-                qDebug() << "  Pair" << i << "-" << j
-                         << "match=" << matches.size() << "kept=" << kept;
+            std::lock_guard<std::mutex> lock(mtx);
+            for (const auto &m : matches)
+                builder.addMatch(i, m.queryIdx, j, m.trainIdx);
         }
-        std::lock_guard<std::mutex> lock(mtx);
+    });
+
+    // 3. Gộp thành track đa-view
+    auto tracks = builder.buildTracks(m_config.minTrackObservations);
+    qDebug() << "  Built" << tracks.size() << "multi-view tracks";
+
+    // 4. Triangulate + refine song song
+    points3D.clear(); colors.clear();
+    std::mutex resultMtx;
+    cv::parallel_for_(cv::Range(0, (int)tracks.size()), [&](const cv::Range &range) {
+        std::vector<cv::Point3f> lp; std::vector<cv::Vec3b> lc;
+        for (int t = range.start; t < range.end; ++t) {
+            FeatureTrack track = tracks[t];
+            if (!MultiViewTriangulator::triangulateTrack(track, P, keypoints, m_config.reprojectionErrorMax))
+                continue;
+            MultiViewTriangulator::refinePoint(track, P, keypoints, 8);
+            if (!MultiViewTriangulator::validateTrack(track, P, keypoints, m_config.reprojectionErrorMax))
+                continue;
+
+            // Màu: lấy từ view đầu tiên trong track
+            int imgIdx = track.observations[0].first, kpIdx = track.observations[0].second;
+            cv::Point2f kp = keypoints[imgIdx][kpIdx].pt;
+            int x = cvRound(kp.x), y = cvRound(kp.y);
+            cv::Vec3b col(128,128,128);
+            if (x >= 0 && y >= 0 && x < images[imgIdx].cols && y < images[imgIdx].rows)
+                col = images[imgIdx].at<cv::Vec3b>(y, x);
+
+            lp.push_back(track.point3D);
+            lc.push_back(col);
+        }
+        std::lock_guard<std::mutex> lock(resultMtx);
         points3D.insert(points3D.end(), lp.begin(), lp.end());
         colors.insert(colors.end(), lc.begin(), lc.end());
     });
 
-    qDebug() << "=== Ground-truth raw points:" << points3D.size() << "===";
+    qDebug() << "=== Ground-truth track-based points:" << points3D.size() << "===";
     return !points3D.empty();
 }
 
@@ -466,7 +577,7 @@ bool ReconstructionPipeline::reconstruct() {
     // Cache check
     QString cachePath;
     if (!imageFiles.empty()) {
-        cachePath = QFileInfo(imageFiles[0]).absolutePath() + "/recon_cache.ply";
+        cachePath = QFileInfo(imageFiles[0]).absolutePath() + "/" + kReconstructionCacheFileName;
         if (QFile::exists(cachePath)) {
             qDebug() << "Reconstruction: Found cache at" << cachePath;
             PointCloudT::Ptr cloud(new PointCloudT);

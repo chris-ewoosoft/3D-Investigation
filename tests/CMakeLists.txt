@@ -65,6 +65,9 @@ qt_add_executable(TestReconstructionPipeline TestReconstructionPipeline.cpp
     ../src/services/reconstruction/PoseEstimator.cpp
     ../src/services/reconstruction/Triangulator.cpp
     ../src/services/reconstruction/PointCloudFilter.cpp
+    ../src/services/reconstruction/FeatureTrack.h
+    # ../src/services/reconstruction/MultiViewTriangulator.h
+    ../src/services/reconstruction/MultiViewTriangulator.cpp
 )
 target_include_directories(TestReconstructionPipeline PRIVATE 
     ../src/services/reconstruction

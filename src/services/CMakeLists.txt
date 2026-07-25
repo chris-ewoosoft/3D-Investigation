@@ -35,6 +35,9 @@ target_sources(3D-Reconstruction PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/Triangulator.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/PointCloudFilter.h
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/PointCloudFilter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/FeatureTrack.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/MultiViewTriangulator.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/MultiViewTriangulator.cpp
     
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIProcessor.h
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIProcessor.cpp
@@ -45,4 +48,6 @@ target_sources(3D-Reconstruction PRIVATE
     
     ${CMAKE_CURRENT_SOURCE_DIR}/mail/MailService.h
     ${CMAKE_CURRENT_SOURCE_DIR}/mail/MailService.cpp
+
+    
 )

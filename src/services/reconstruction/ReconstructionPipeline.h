@@ -19,6 +19,8 @@ typedef pcl::PointCloud<PointT> PointCloudT;
 #include "Global.h"
 #include "ReconstructionConfig.h"
 #include "AppConstants.h"
+#include "FeatureTrack.h"
+#include "MultiViewTriangulator.h"
 
 class APP_EXPORT ReconstructionPipeline {
 public:

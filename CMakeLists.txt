@@ -159,8 +159,8 @@ find_package(VTK REQUIRED COMPONENTS
 )
 
 # ─── 5. Paths & Outputs ────────────────────────────────────────────────────────
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Release)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins/Release)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
 
 # ─── 5b. Build Optimizations ───────────────────────────────────────────────────
 # Enable Unity Build (Jumbo Build) to drastically reduce compilation time
@@ -178,6 +178,9 @@ find_package(OpenCV REQUIRED)
 set(PCL_DISABLE_MSVC_DEPRECATION_WARNINGS ON)
 set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files")
 find_package(PCL REQUIRED COMPONENTS common filters io)
+
+# ─── 4b. Eigen (dùng cho MultiViewTriangulator) ──────────────────────────────
+find_package(Eigen3 CONFIG REQUIRED)
 
 # ─── 5. ONNX Runtime ─────────────────────────────────────────────────────────
 include(FetchContent)
@@ -237,6 +240,7 @@ target_link_libraries(SharedPCH PUBLIC
     ${VTK_LIBRARIES}
     ${OpenCV_LIBS}
     ${PCL_LIBRARIES}
+    Eigen3::Eigen
 )
 
 # ─── 7c. Executable ────────────────────────────────────────────────────────────
@@ -301,6 +305,7 @@ target_link_libraries(3D-Reconstruction
         ${VTK_LIBRARIES}
         ${OpenCV_LIBS}
         ${PCL_LIBRARIES}
+        Eigen3::Eigen
         ${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib
 )
 
