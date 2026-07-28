@@ -1,4 +1,5 @@
 #include "ReconstructionPipeline.h"
+#include "CameraParamsParser.h"
 #include "FeatureExtractor.h"
 #include "FeatureMatcher.h"
 #include "PoseEstimator.h"
@@ -9,9 +10,6 @@
 #include <QDebug>
 #include <QFile>
 #include <QFileInfo>
-#include <QIODevice>
-#include <QRegularExpression>
-#include <QTextStream>
 #include <QElapsedTimer>
 #include <QVector>
 #include <QtConcurrent/QtConcurrent>
@@ -101,69 +99,7 @@ void ReconstructionPipeline::setImages(const std::vector<QString> &imagePaths) {
 //  FORMAT B (Middlebury): no count header, tokens: [...] imageName K(9) R(9) t(3)
 
 bool ReconstructionPipeline::loadCameraParams(const QString &paramsFilePath) {
-    QFile file(paramsFilePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        qWarning() << "Cannot open params file:" << paramsFilePath;
-        return false;
-    }
-
-    camParams.clear();
-    QTextStream in(&file);
-    QStringList allLines;
-    while (!in.atEnd()) {
-        QString line = in.readLine().trimmed();
-        if (!line.isEmpty()) allLines.append(line);
-    }
-    file.close();
-
-    if (allLines.isEmpty()) { qWarning() << "Params file is empty."; return false; }
-
-    bool isFormatA = false;
-    int  startLine = 0;
-    {
-        bool ok = false;
-        int  cnt = allLines[0].toInt(&ok);
-        if (ok && cnt > 0 && cnt < allLines.size()) { isFormatA = true; startLine = 1; }
-    }
-    qDebug() << "loadCameraParams: format ="
-             << (isFormatA ? "A (count header)" : "B (Middlebury/no header)")
-             << " startLine=" << startLine;
-
-    for (int li = startLine; li < allLines.size(); ++li) {
-        QStringList tok = allLines[li].split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-
-        int nameIdx = -1;
-        for (int ti = 0; ti < (int)tok.size(); ++ti) {
-            if (tok[ti].contains('.') && !tok[ti].startsWith('-') && !tok[ti].startsWith('+')) {
-                if (tok.size() - ti - 1 >= 21) { nameIdx = ti; break; }
-            }
-        }
-        if (nameIdx < 0) {
-            qWarning() << "Skipping line" << li << "— imageName not found:" << allLines[li].left(60);
-            continue;
-        }
-
-        CameraParams cp;
-        cp.imageName = tok[nameIdx];
-        cp.K = cv::Mat(3, 3, CV_64F);
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                cp.K.at<double>(r, c) = tok[nameIdx + 1 + r * 3 + c].toDouble();
-        cp.R = cv::Mat(3, 3, CV_64F);
-        for (int r = 0; r < 3; ++r)
-            for (int c = 0; c < 3; ++c)
-                cp.R.at<double>(r, c) = tok[nameIdx + 10 + r * 3 + c].toDouble();
-        cp.t = cv::Mat(3, 1, CV_64F);
-        for (int r = 0; r < 3; ++r)
-            cp.t.at<double>(r, 0) = tok[nameIdx + 19 + r].toDouble();
-
-        cv::Mat RT; cv::hconcat(cp.R, cp.t, RT);
-        cp.P = cp.K * RT;
-        camParams.push_back(cp);
-    }
-
-    hasGroundTruthParams = !camParams.empty();
-    qDebug() << "Loaded" << camParams.size() << "camera params";
+    hasGroundTruthParams = CameraParamsParser::loadFromFile(paramsFilePath, camParams);
     return hasGroundTruthParams;
 }
 
@@ -198,126 +134,36 @@ double ReconstructionPipeline::computeReprojectionError(const cv::Mat &P,
     return PoseEstimator::reprojectionError(P, pt3d, pt2d);
 }
 
-void ReconstructionPipeline::filterOutliersByDensity(float radius, int minNeighbors) {
-    PointCloudFilter::densityFilter(points3D, colors, radius, minNeighbors);
-}
 
 // ─── processPointCloud ───────────────────────────────────────────────────────
 
 void ReconstructionPipeline::processPointCloud() {
     if (points3D.empty()) return;
     qDebug() << "Post-processing. Initial points:" << points3D.size();
-    PointCloudFilter::statisticalOutlier(points3D, colors,
-                                         m_config.filter.sorMeanK,
-                                         m_config.filter.sorStdDevMul);
-    if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
-    PointCloudFilter::radiusOutlier(points3D, colors,
-                                    m_config.filter.rorRadius,
-                                    m_config.filter.rorMinNeighbors);
-    if (points3D.empty()) { qWarning() << "No points after ROR."; return; }
-    PointCloudFilter::voxelGrid(points3D, colors, m_config.filter.voxelLeafSize);
+
+    const auto &f = m_config.filter;
+    if (m_usedTrackBasedGroundTruth) {
+        PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanKTrack, f.sorStdDevMulTrack);
+        if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
+        PointCloudFilter::radiusOutlier(points3D, colors, f.rorRadiusTrack, f.rorMinNeighborsTrack);
+        if (points3D.empty()) { qWarning() << "No points after ROR."; return; }
+        PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSizeTrack);
+    } else {
+        PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanK, f.sorStdDevMul);
+        if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
+        PointCloudFilter::radiusOutlier(points3D, colors, f.rorRadius, f.rorMinNeighbors);
+        if (points3D.empty()) { qWarning() << "No points after ROR."; return; }
+        PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSize);
+    }
     qDebug() << "After post-processing:" << points3D.size() << "points";
-}
-
-// ─── PCL filter public accessors ─────────────────────────────────────────────
-
-void ReconstructionPipeline::statisticalOutlierFilter(float meanK, float stdDevMulThresh) {
-    PointCloudFilter::statisticalOutlier(points3D, colors, meanK, stdDevMulThresh);
-}
-
-void ReconstructionPipeline::radiusOutlierFilter(float radius, int minNeighbors) {
-    PointCloudFilter::radiusOutlier(points3D, colors, radius, minNeighbors);
-}
-
-void ReconstructionPipeline::voxelGridDownsample(float leafSize) {
-    PointCloudFilter::voxelGrid(points3D, colors, leafSize);
 }
 
 // ─── reconstructWithGroundTruth ──────────────────────────────────────────────
 
-// bool ReconstructionPipeline::reconstructWithGroundTruth() {
-//     qDebug() << "=== Mode: GROUND-TRUTH camera params ===";
-//     int N = (int)images.size();
-
-//     double maxBaseline = 0.0;
-//     for (int i = 0; i < (int)camParams.size(); ++i)
-//         for (int j = i + 1; j < (int)camParams.size(); ++j) {
-//             cv::Mat Ci = -camParams[i].R.t() * camParams[i].t;
-//             cv::Mat Cj = -camParams[j].R.t() * camParams[j].t;
-//             cv::Mat d  = Ci - Cj;
-//             maxBaseline = std::max(maxBaseline, std::sqrt(d.dot(d)));
-//         }
-//     double depthLimit = (maxBaseline > 1e-6)
-//         ? maxBaseline * AppConstants::Reconstruction::DEPTH_LIMIT_MULTIPLIER : 1e9;
-//     qDebug() << "  maxBaseline=" << maxBaseline << "  depthLimit=" << depthLimit;
-
-//     const int WINDOW = m_config.searchWindow;
-//     std::vector<std::pair<int, int>> pairs;
-//     for (int i = 0; i < N; ++i)
-//         for (int j = i + 1; j < std::min(N, i + WINDOW + 1); ++j)
-//             pairs.push_back({i, j});
-
-//     std::mutex mtx;
-//     cv::parallel_for_(cv::Range(0, (int)pairs.size()), [&](const cv::Range &range) {
-//         std::vector<cv::Point3f> lp; std::vector<cv::Vec3b> lc;
-//         for (int r = range.start; r < range.end; ++r) {
-//             int i = pairs[r].first, j = pairs[r].second;
-//             std::vector<cv::DMatch> matches;
-//             matchFeatures(i, j, matches);
-//             if ((int)matches.size() < m_config.minMatches) continue;
-
-//             std::vector<cv::Point2f> pi, pj;
-//             for (const auto &m : matches) {
-//                 pi.push_back(keypoints[i][m.queryIdx].pt);
-//                 pj.push_back(keypoints[j][m.trainIdx].pt);
-//             }
-//             std::vector<cv::Point3f> newPts;
-//             doTriangulate(camParams[i].P, camParams[j].P, pi, pj, newPts);
-
-//             int kept = 0;
-//             for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
-//                 const cv::Point3f &pt = newPts[k];
-//                 double zi = camParams[i].R.at<double>(2,0)*pt.x +
-//                             camParams[i].R.at<double>(2,1)*pt.y +
-//                             camParams[i].R.at<double>(2,2)*pt.z +
-//                             camParams[i].t.at<double>(2);
-//                 double zj = camParams[j].R.at<double>(2,0)*pt.x +
-//                             camParams[j].R.at<double>(2,1)*pt.y +
-//                             camParams[j].R.at<double>(2,2)*pt.z +
-//                             camParams[j].t.at<double>(2);
-//                 if (zi <= 0 || zj <= 0 || zi > depthLimit || zj > depthLimit) continue;
-//                 if (computeReprojectionError(camParams[i].P, pt, pi[k]) > m_config.reprojectionErrorMax) continue;
-//                 if (computeReprojectionError(camParams[j].P, pt, pj[k]) > m_config.reprojectionErrorMax) continue;
-
-//                 cv::Point2f kp = keypoints[i][matches[k].queryIdx].pt;
-//                 int x = cvRound(kp.x), y = cvRound(kp.y);
-//                 cv::Vec3b col(128, 128, 128);
-//                 if (x >= 0 && y >= 0 && x < images[i].cols && y < images[i].rows)
-//                     col = images[i].at<cv::Vec3b>(y, x);
-//                 lp.push_back(pt); lc.push_back(col); ++kept;
-//             }
-//             if (kept > 0)
-//                 qDebug() << "  Pair" << i << "-" << j
-//                          << "match=" << matches.size() << "kept=" << kept;
-//         }
-//         std::lock_guard<std::mutex> lock(mtx);
-//         points3D.insert(points3D.end(), lp.begin(), lp.end());
-//         colors.insert(colors.end(), lc.begin(), lc.end());
-//     });
-
-//     qDebug() << "=== Ground-truth raw points:" << points3D.size() << "===";
-//     return !points3D.empty();
-// }
-
 bool ReconstructionPipeline::reconstructWithGroundTruth() {
     qDebug() << "=== Mode: Track-based Multi-View Triangulation (ground-truth poses) ===";
-    int N = std::min((int)images.size(), (int)camParams.size());
+    int N = (int)images.size();
 
-    // 1. Build P matrices trực tiếp từ camParams (đã có sẵn cp.P = K*[R|t])
-    std::vector<cv::Mat> P(N);
-    for (int i = 0; i < N; ++i) P[i] = camParams[i].P;
-
-    // 2. Match pairwise trong sliding window (giữ nguyên window hiện tại)
     TrackBuilder builder;
     for (int i = 0; i < N; ++i)
         for (int k = 0; k < (int)keypoints[i].size(); ++k)
@@ -338,31 +184,34 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
             matches = filterMatchesByFundamental(matches, keypoints[i], keypoints[j],
                                                  m_config.pairFundamentalRansacThreshold);
             if ((int)matches.size() < m_config.minMatches) continue;
-
             std::lock_guard<std::mutex> lock(mtx);
             for (const auto &m : matches)
                 builder.addMatch(i, m.queryIdx, j, m.trainIdx);
         }
     });
 
-    // 3. Gộp thành track đa-view
-    auto tracks = builder.buildTracks(m_config.minTrackObservations);
+    auto tracks = builder.buildTracks(/*minObservations=*/2);   // ★ 2 thay vì 3
     qDebug() << "  Built" << tracks.size() << "multi-view tracks";
 
-    // 4. Triangulate + refine song song
+    MultiViewTriangulator::Params triParams;
+    triParams.maxReprojError           = 2.5;   // ★ nới từ 1.2
+    triParams.minTriangulationAngleDeg = 1.0;
+    triParams.minObservations          = 2;
+
     points3D.clear(); colors.clear();
     std::mutex resultMtx;
+    std::atomic<int> rejectedAngle{0}, rejectedTotal{0};
+
     cv::parallel_for_(cv::Range(0, (int)tracks.size()), [&](const cv::Range &range) {
         std::vector<cv::Point3f> lp; std::vector<cv::Vec3b> lc;
         for (int t = range.start; t < range.end; ++t) {
             FeatureTrack track = tracks[t];
-            if (!MultiViewTriangulator::triangulateTrack(track, P, keypoints, m_config.reprojectionErrorMax))
+            if (!MultiViewTriangulator::triangulateTrack(track, camParams, keypoints, triParams)) {
+                rejectedTotal++;
                 continue;
-            MultiViewTriangulator::refinePoint(track, P, keypoints, 8);
-            if (!MultiViewTriangulator::validateTrack(track, P, keypoints, m_config.reprojectionErrorMax))
-                continue;
+            }
+            MultiViewTriangulator::refinePoint(track, camParams, keypoints);
 
-            // Màu: lấy từ view đầu tiên trong track
             int imgIdx = track.observations[0].first, kpIdx = track.observations[0].second;
             cv::Point2f kp = keypoints[imgIdx][kpIdx].pt;
             int x = cvRound(kp.x), y = cvRound(kp.y);
@@ -378,6 +227,8 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
         colors.insert(colors.end(), lc.begin(), lc.end());
     });
 
+    qDebug() << "  Rejected tracks:" << rejectedTotal.load() << "/" << tracks.size();
+    m_usedTrackBasedGroundTruth = true;  // ★ để processPointCloud() chọn đúng filter profile
     qDebug() << "=== Ground-truth track-based points:" << points3D.size() << "===";
     return !points3D.empty();
 }
@@ -573,6 +424,7 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
 bool ReconstructionPipeline::reconstruct() {
     if (images.size() < 2) { qWarning() << "Need at least 2 images!"; return false; }
     points3D.clear(); colors.clear();
+    m_usedTrackBasedGroundTruth = false;   // ★ reset mỗi lần chạy lại
 
     // Cache check
     QString cachePath;

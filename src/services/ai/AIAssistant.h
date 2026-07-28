@@ -80,8 +80,6 @@ private:
     void processNextQueuedRequest();
     void saveAllSessions();
     void loadAllSessions();
-    QString getSessionsPath();
-    QString generateSessionId();
 };
 
 #endif // AIASSISTANT_H

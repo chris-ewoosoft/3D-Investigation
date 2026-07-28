@@ -2,24 +2,27 @@
 #include <opencv2/core.hpp>
 #include <vector>
 #include "FeatureTrack.h"
+#include "ReconstructionConfig.h" // CameraParams
 
 class MultiViewTriangulator {
 public:
-    // Triangulate 1 track bằng DLT-SVD trên TẤT CẢ view quan sát nó
-    static bool triangulateTrack(FeatureTrack &track,
-                                 const std::vector<cv::Mat> &projMatrices,   // P của mỗi ảnh
-                                 const std::vector<std::vector<cv::KeyPoint>> &keypoints,
-                                 double maxReprojError = 2.0);
+    struct Params {
+        double maxReprojError           = 2.5;  // px — nới từ 1.2 (quá chặt cho DLT đa-view)
+        double minTriangulationAngleDeg = 1.0;  // độ — chỉ áp dụng khi track có đúng 2-view
+        int    minObservations          = 2;    // ★ hạ từ 3 → 2
+    };
 
-    // Point-only refinement: tối ưu vị trí điểm 3D bằng Gauss-Newton,
-    // pose GIỮ NGUYÊN (đã là ground truth) — rẻ hơn Bundle Adjustment đầy đủ
+    static bool triangulateTrack(FeatureTrack &track,
+                                 const std::vector<CameraParams> &camParams,
+                                 const std::vector<std::vector<cv::KeyPoint>> &keypoints,
+                                 const Params &params);
+
     static void refinePoint(FeatureTrack &track,
-                            const std::vector<cv::Mat> &projMatrices,
+                            const std::vector<CameraParams> &camParams,
                             const std::vector<std::vector<cv::KeyPoint>> &keypoints,
                             int iterations = 5);
 
-    static bool validateTrack(FeatureTrack &track,
-                              const std::vector<cv::Mat> &projMatrices,
-                              const std::vector<std::vector<cv::KeyPoint>> &keypoints,
-                              double maxReprojError = 2.0);
+private:
+    static double maxPairwiseAngleDeg(const FeatureTrack &track,
+                                      const std::vector<CameraParams> &camParams);
 };

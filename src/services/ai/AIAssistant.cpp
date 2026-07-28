@@ -1,4 +1,5 @@
 #include "AIAssistant.h"
+#include "ChatSessionStore.h"
 #include <QStandardPaths>
 #include "AppConfig.h"
 #include "AppConstants.h"
@@ -9,8 +10,6 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QDateTime>
-#include <QDir>
-#include <QUuid>
 
 AIAssistant::AIAssistant(QObject *parent)
     : IAIAssistantService(parent),
@@ -135,7 +134,7 @@ void AIAssistant::switchModel(int index) {
 
 void AIAssistant::newChat() {
     ChatSession session;
-    session.id        = generateSessionId();
+    session.id        = ChatSessionStore::generateSessionId();
     session.title     = LM_TR("ai.new_session") + " " + QDateTime::currentDateTime().toString(AppConstants::Format::sessionDateTime());
     session.createdAt = QDateTime::currentDateTime();
     m_sessions.append(session);
@@ -549,48 +548,11 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 void AIAssistant::saveAllSessions() {
-    QJsonArray arr;
-    for (const auto &s : m_sessions) {
-        QJsonObject sObj;
-        sObj["id"]        = s.id;
-        sObj["title"]     = s.title;
-        sObj["createdAt"] = s.createdAt.toString(Qt::ISODate);
-        QJsonArray msgs;
-        for (const auto &m : s.messages) msgs.append(m);
-        sObj["messages"] = msgs;
-        arr.append(sObj);
-    }
-    QFile f(getSessionsPath());
-    if (f.open(QIODevice::WriteOnly)) {
-        f.write(QJsonDocument(arr).toJson());
-        f.close();
-    }
+    ChatSessionStore::save(m_sessions);
 }
 
 void AIAssistant::loadAllSessions() {
-    m_sessions.clear();
-    QFile f(getSessionsPath());
-    if (!f.open(QIODevice::ReadOnly)) return;
-    QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
-    f.close();
-    for (const auto &v : arr) {
-        QJsonObject sObj = v.toObject();
-        ChatSession s;
-        s.id        = sObj["id"].toString();
-        s.title     = sObj["title"].toString();
-        s.createdAt = QDateTime::fromString(sObj["createdAt"].toString(), Qt::ISODate);
-        for (const auto &m : sObj["messages"].toArray())
-            s.messages.append(m.toObject());
-        m_sessions.append(s);
-    }
-}
-
-QString AIAssistant::getSessionsPath() {
-    QString currentUser = UserManager::instance()->currentUsername();
-    if (currentUser.isEmpty()) currentUser = "default";
-    QString dir = QFileInfo(AppConfig::instance().configPath()).absolutePath() + "/";
-    QDir().mkpath(dir);
-    return dir + "chat_sessions_" + currentUser + ".json";
+    m_sessions = ChatSessionStore::load();
 }
 
 void AIAssistant::reloadSessions() {
@@ -602,8 +564,4 @@ void AIAssistant::reloadSessions() {
     }
     emit sessionsChanged();
     emit historyChanged();
-}
-
-QString AIAssistant::generateSessionId() {
-    return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }

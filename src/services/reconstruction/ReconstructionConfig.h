@@ -36,6 +36,14 @@ struct FilterConfig {
 
     // Voxel Grid
     float voxelLeafSize = 0.00025f;
+
+    // ★ MỚI — Profile "track-based / ground-truth" — cloud đã dedup + validate đa-view,
+    // không cần lọc mật độ gắt vì mỗi điểm đã qua kiểm tra reprojection + parallax angle
+    int   sorMeanKTrack        = 15;
+    float sorStdDevMulTrack    = 2.5f;
+    float rorRadiusTrack       = 0.015f;
+    int   rorMinNeighborsTrack = 2;
+    float voxelLeafSizeTrack   = 0.0002f;
 };
 
 struct ReconstructionConfig {
