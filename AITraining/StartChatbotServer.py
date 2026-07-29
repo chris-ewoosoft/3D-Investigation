@@ -100,6 +100,13 @@ CACHE_CHUNKS   = os.path.join(CACHE_DIR, "chunks.pkl")
 CACHE_BM25     = os.path.join(CACHE_DIR, "bm25.pkl")
 CACHE_METADATA = os.path.join(CACHE_DIR, "metadata.json")
 
+
+def _safe_relpath(path: str, start: str) -> str:
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        return os.path.abspath(path)
+
 # ─── 3. Cấu hình RAG — chỉnh tại đây ─────────────────────────────────────────
 # [FIX-8] Đổi sang model đa ngôn ngữ — hỗ trợ tiếng Việt tốt hơn all-MiniLM-L6-v2
 # Kích thước: ~470MB (so với ~80MB), nhưng độ chính xác retrieval tăng rõ rệt.
@@ -343,7 +350,7 @@ class BaseDocumentLoader(ABC):
 
     def _sliding_window_chunks(self, content: str, filepath: str, label: str = "Source") -> list:
         """Sentence-aware sliding window chunking (v2.1+)."""
-        rel     = os.path.relpath(filepath, PROJECT_DIR)
+        rel     = _safe_relpath(filepath, PROJECT_DIR)
         results = []
         pos     = 0
 
@@ -436,7 +443,7 @@ class MarkdownLoader(BaseDocumentLoader):
         if not content or len(content.strip()) < self.MIN_CHUNK_CHARS:
             raise ValueError(f"File rỗng: {fp}")
 
-        rel     = os.path.relpath(fp, PROJECT_DIR)
+        rel     = _safe_relpath(fp, PROJECT_DIR)
         matches = list(self.HEADING_RE.finditer(content))
         if not matches:
             return self._sliding_window_chunks(content, fp, label="Source MD")
@@ -497,7 +504,7 @@ class CppHeaderLoader(BaseDocumentLoader):
         return self._load_python(content, fp) if ext == ".py" else self._load_cpp(content, fp)
 
     def _load_cpp(self, content: str, fp: str) -> list:
-        rel       = os.path.relpath(fp, PROJECT_DIR)
+        rel       = _safe_relpath(fp, PROJECT_DIR)
         positions = [m.start() for m in self.FUNC_RE.finditer(content)]
         results   = []
         if positions:
@@ -518,7 +525,7 @@ class CppHeaderLoader(BaseDocumentLoader):
         return results
 
     def _load_python(self, content: str, fp: str) -> list:
-        rel     = os.path.relpath(fp, PROJECT_DIR)
+        rel     = _safe_relpath(fp, PROJECT_DIR)
         results = []
         lines   = content.splitlines()
         try:
@@ -551,7 +558,7 @@ class ImageLoader(BaseDocumentLoader):
 
     def load(self, fp: str) -> list:
         try:
-            rel = os.path.relpath(fp, PROJECT_DIR)
+            rel = _safe_relpath(fp, PROJECT_DIR)
             return [ChunkResult(
                 text=f"[Image: {rel}]",
                 source_path=fp,
@@ -1289,7 +1296,7 @@ async def lifespan(app: FastAPI):
     print(f"\n{'═'*54}")
     print(f"  ✅  Server ready in {total:.1f}s total")
     print("  🌐  http://127.0.0.1:8080")
-    print(f"  📋  Log: {os.path.relpath(LOG_FILE_PATH, BASE_DIR)}")
+    print(f"  📋  Log: {_safe_relpath(LOG_FILE_PATH, BASE_DIR)}")
     print(f"  🔍  Reranker: {'ON' if _reranker else 'OFF'}")
     print(f"  👁️  Vision: {'YES' if is_vision_model else 'no'}")
     print(f"{'═'*54}\n")
@@ -1474,7 +1481,7 @@ def _print_banner():
 ║  Vision  : {vision_str:<42}║
 ║  Embed   : {EMBED_MODEL_NAME:<42}║
 ║  Reranker: {str(USE_RERANKER)+" ("+RERANKER_MODEL+")" if USE_RERANKER else "disabled":<42}║
-║  Cache   : {os.path.relpath(CACHE_DIR, BASE_DIR):<42}║
+║  Cache   : {_safe_relpath(CACHE_DIR, BASE_DIR):<42}║
 ╚══════════════════════════════════════════════════════╝""")
 
 

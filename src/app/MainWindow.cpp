@@ -200,6 +200,9 @@ void MainWindow::setupTabContent(QWidget *root, QVBoxLayout *rootLayout) {
   for (auto it = m_tabPanels.begin(); it != m_tabPanels.end(); ++it)
     m_tabContent->addWidget(it.value());
 
+  if (!m_activeTab.isEmpty())
+    activateTab(m_activeTab);
+
   rootLayout->addWidget(m_tabContent);
 }
 

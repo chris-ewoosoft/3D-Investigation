@@ -51,7 +51,6 @@ private:
     CustomProgressDialog* m_progressDialog = nullptr;
     void setupChatbotUI();
     
-    QString buildMessageHtml(const QString &role, const QString &content, const QJsonArray &attachments);
     void addAttachmentPreview(const QString &filePath, bool isImage);
 
     QStringList pendingAttachments;

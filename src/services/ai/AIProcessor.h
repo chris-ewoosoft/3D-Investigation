@@ -42,9 +42,6 @@ public:
     void resetTrackingState();
 
 private:
-    void applyNMS(const std::vector<cv::Rect>& boxes, const std::vector<float>& confidences, 
-                  float scoreThreshold, float nmsThreshold, std::vector<int>& indices);
-    
     void tryInitGPUProvider();
     Ort::Value prepareInputTensor(const cv::Mat& img, int width, int height, std::vector<float>& tensorValues);
     

@@ -6,6 +6,7 @@
 #include "IAIAssistantService.h"
 #include "LanguageManager.h"
 #include "UserManager.h"
+#include "AIAttachmentPreviewFactory.h"
 #include "../../utils/FileUtilities.h"
 #include <QDockWidget>
 #include <QVBoxLayout>
@@ -20,24 +21,16 @@
 #include <QLineEdit>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QMessageBox>
 #include <QInputDialog>
-#include <QSettings>
 #include <QApplication>
 #include <QDesktopServices>
-#include <QJsonArray>
-#include <QRegularExpression>
 #include <QMenu>
-#include <QMenuBar>
 #include <qclipboard.h>
-#include <QPainter>
-#include <QLinearGradient>
 
 #include "AIAssistantRibbonUI.h"
 #include "ChatBotDockWidget.h"
 #include "AppConfig.h"
 #include "AppConstants.h"
-#include "ChatTemplates.h"
 #include "ChatMessageRenderer.h"
 #include "../../utils/CustomProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
@@ -439,25 +432,13 @@ void AIAssistantPlugin::addAttachmentPreview(const QString &filePath, bool isIma
     if (!result.success) return;
 
     pendingAttachments.append(result.destPath);
-    // We don't append thumbPath to pendingAttachments to avoid double display in chat history.
 
-    QWidget *previewWidget = new QWidget(m_dockUI->attachmentPreviewArea());
-    previewWidget->setFixedSize(84, 84);
-    previewWidget->setStyleSheet("background:#2a2a35; border-radius:6px; border:1px solid #3a3a4a;");
-    
-    QLabel *imgLabel = new QLabel(previewWidget);
-    imgLabel->setGeometry(2, 2, 80, 80);
-    imgLabel->setPixmap(result.thumbnail);
-    imgLabel->setAlignment(Qt::AlignCenter);
-
-    QPushButton *btnRemove = new QPushButton("×", previewWidget);
-    btnRemove->setGeometry(64, 2, 18, 18);
-    btnRemove->setStyleSheet("QPushButton { background:rgba(0,0,0,150); color:white; border-radius:9px; font-weight:bold; font-size:12px; padding-bottom:2px; }"
-                             "QPushButton:hover { background:rgba(255,50,50,200); }");
-    
-    connect(btnRemove, &QPushButton::clicked, this, [this, result, previewWidget]() {
-        removeAttachment(result.destPath, previewWidget);
-    });
+    QWidget *previewWidget = AIAttachmentPreviewFactory::create(
+        m_dockUI->attachmentPreviewArea(),
+        result,
+        [this, result](QWidget *widget) {
+            removeAttachment(result.destPath, widget);
+        });
 
     m_dockUI->attachmentLayout()->addWidget(previewWidget);
     m_dockUI->attachmentPreviewArea()->show();
@@ -483,8 +464,6 @@ void AIAssistantPlugin::removeAttachment(const QString &filePath, QWidget *previ
         m_dockUI->attachmentPreviewArea()->hide();
     }
 }
-
-#include "../../utils/HtmlUtilities.h"
 
 void AIAssistantPlugin::updateChatUI() {
     if (!m_dockUI || !m_dockUI->chatHistory()) return;

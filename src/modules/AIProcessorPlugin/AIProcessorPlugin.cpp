@@ -8,6 +8,7 @@
 #include "Image2DLoader.h"
 #include "AITrainDockWidget.h"
 #include "AIProcessorRibbonUI.h"
+#include "AIPredictionLogger.h"
 #include "LanguageManager.h"
 #include "VideoTrackerThread.h"
 #include "IconFactory.h"
@@ -19,7 +20,6 @@
 #include <QMenu>
 #include <QProcess>
 #include <QUrl>
-#include <QDateTime>
 #include <QFile>
 #include <QDockWidget>
 #include <QVBoxLayout>
@@ -32,7 +32,6 @@
 #include <QVTKOpenGLNativeWidget.h>
 #include <QTimer>
 #include <QtConcurrent>
-#include <QThreadPool>
 #include <QGroupBox>
 #include <QStyle>
 #include "AppConfig.h"
@@ -232,16 +231,7 @@ void AIProcessorPlugin::onObjectDetection() {
   m_ctx->scene()->vtkWidget()->renderWindow()->Render();
   m_ctx->updateMenuStates();
 
-  // Log prediction image asynchronously
-  QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
-  QString predictDir = AppConfig::instance().predictDir("detection") + "/" + currentDate;
-  QDir().mkpath(predictDir);
-  QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
-  
-  cv::Mat resClone = res.clone();
-  QThreadPool::globalInstance()->start([logPath, resClone]() {
-      cv::imwrite(logPath.toStdString(), resClone);
-  });
+  AIPredictionLogger::logAsync("detection", currentImg, res);
 }
 
 void AIProcessorPlugin::onSegmentation() {
@@ -269,16 +259,7 @@ void AIProcessorPlugin::onSegmentation() {
   m_ctx->scene()->vtkWidget()->renderWindow()->Render();
   m_ctx->updateMenuStates();
 
-  // Log prediction image asynchronously
-  QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
-  QString predictDir = AppConfig::instance().predictDir("segmentation") + "/" + currentDate;
-  QDir().mkpath(predictDir);
-  QString logPath = predictDir + "/" + QFileInfo(currentImg).baseName() + "_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
-  
-  cv::Mat resClone = res.clone();
-  QThreadPool::globalInstance()->start([logPath, resClone]() {
-      cv::imwrite(logPath.toStdString(), resClone);
-  });
+  AIPredictionLogger::logAsync("segmentation", currentImg, res);
 }
 
 void AIProcessorPlugin::onHideAIResults() {

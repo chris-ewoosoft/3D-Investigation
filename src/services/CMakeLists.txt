@@ -1,6 +1,8 @@
 target_sources(3D-Reconstruction PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/SceneService.h
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/SceneService.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/CrosshairGeometry.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/scene/CrosshairGeometry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/CrosshairManager.h
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/CrosshairManager.cpp
     
@@ -43,6 +45,8 @@ target_sources(3D-Reconstruction PRIVATE
     
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIProcessor.h
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIProcessor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIYoloPostProcessor.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIYoloPostProcessor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIAssistant.h
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/AIAssistant.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ai/ChatSessionStore.h
