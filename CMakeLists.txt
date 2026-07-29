@@ -16,9 +16,19 @@ cmake_minimum_required(VERSION 3.19)
 #    "shared tree" settings below may apply in this case, or CI loses its
 #    cache directory and silently stops installing vtk/pcl/opencv4/openssl.
 #
-# A caller-supplied CMAKE_TOOLCHAIN_FILE (i.e. anything other than the stale
-# Qt Creator one) is the signal that we're in the CI/external case.
-if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg-dependencies")
+# A caller-supplied toolchain other than the shared local toolchain (or Qt
+# Creator's stale project-local helper) signals the CI/external case. The
+# explicit local comparison is important on the second configure, when the
+# local toolchain is already present in CMakeCache.txt.
+set(PROJECT_VCPKG_ROOT "F:/PROJECTS/QT/vcpkg" CACHE PATH
+    "Shared vcpkg root used by this project")
+set(_project_vcpkg_toolchain
+    "${PROJECT_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+file(TO_CMAKE_PATH "${CMAKE_TOOLCHAIN_FILE}" _supplied_vcpkg_toolchain)
+file(TO_CMAKE_PATH "${_project_vcpkg_toolchain}" _local_vcpkg_toolchain)
+if(DEFINED CMAKE_TOOLCHAIN_FILE
+   AND NOT _supplied_vcpkg_toolchain MATCHES "vcpkg-dependencies"
+   AND NOT _supplied_vcpkg_toolchain STREQUAL _local_vcpkg_toolchain)
     set(_external_vcpkg_toolchain TRUE)
     message(STATUS "Using externally supplied vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
 else()
@@ -29,11 +39,6 @@ if(NOT _external_vcpkg_toolchain)
     # Qt Creator's package-manager helper is disabled in
     # QtCreatorPackageManager.cmake so it cannot replace this toolchain with a
     # project-local copy and trigger a second manifest installation.
-    set(PROJECT_VCPKG_ROOT "F:/PROJECTS/QT/vcpkg" CACHE PATH
-        "Shared vcpkg root used by this project")
-    set(_project_vcpkg_toolchain
-        "${PROJECT_VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-
     if(NOT EXISTS "${_project_vcpkg_toolchain}")
         message(FATAL_ERROR
             "Shared vcpkg toolchain was not found: ${_project_vcpkg_toolchain}")
@@ -48,6 +53,15 @@ if(NOT _external_vcpkg_toolchain)
     # install` during every CMake configure.
     set(VCPKG_MANIFEST_INSTALL OFF CACHE BOOL
         "Install vcpkg manifest dependencies during CMake configure" FORCE)
+
+    # AppLocal starts a PowerShell dependency scan after every executable and
+    # DLL. With the application, plugins, and tests this dominated even no-op
+    # local builds. Runtime deployment remains opt-in for dependency refreshes.
+    option(DEV_AUTO_DEPLOY_VCPKG_RUNTIME
+        "Run vcpkg AppLocal after every local binary target" OFF)
+    set(VCPKG_APPLOCAL_DEPS ${DEV_AUTO_DEPLOY_VCPKG_RUNTIME} CACHE BOOL
+        "Automatically copy vcpkg runtime dependencies after each target"
+        FORCE)
 endif()
 
 # Needed by both scenarios (plugin deployment further below also relies on
@@ -71,13 +85,17 @@ endif()
 project(3D-Reconstruction LANGUAGES CXX)
 
 # ─── Build Performance Options ────────────────────────────────────────────────
-option(CMAKE_UNITY_BUILD "Enable Unity (Jumbo) build for faster compilation" OFF)
+option(ENABLE_UNITY_BUILD "Enable Unity (Jumbo) build for faster compilation" ON)
+option(BUILD_TESTING "Build unit-test executables as part of the default build" OFF)
 option(CLEAN_STALE_DLLS "Remove stale DLLs from Release directory at configure time" OFF)
-if(CMAKE_UNITY_BUILD)
-    # Large unity batches exhaust cl.exe's heap with the Qt/PCL/VTK/OpenCV
-    # headers used here.  A batch of one is still opt-in but remains safe.
-    set(CMAKE_UNITY_BUILD_BATCH_SIZE 1)
+set(CMAKE_UNITY_BUILD ${ENABLE_UNITY_BUILD})
+if(ENABLE_UNITY_BUILD)
+    # PCH keeps the heavy Qt/PCL/VTK/OpenCV headers out of each source parse.
+    # Eight retains enough independent compiler work for /MP without creating
+    # translation units so large that MSVC loses parallelism.
+    set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
 endif()
+set(CMAKE_AUTOGEN_PARALLEL 8)
 
 # Fix future timestamps that cause constant rebuilds in MSBuild.  Restrict the
 # scan to project sources: walking build/, .git/, or vcpkg/ is slow and those
@@ -163,12 +181,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
 
 # ─── 5b. Build Optimizations ───────────────────────────────────────────────────
-# Enable Unity Build (Jumbo Build) to drastically reduce compilation time
-# by merging multiple source files into a single translation unit.
-set(CMAKE_UNITY_BUILD ON)
-# Reduce the batch size if memory issues occur (default is 8)
-# set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
-
 # ─── 3. OpenCV ────────────────────────────────────────────────────────────────
 set(OpenCV_DIR "C:/opencv/build")
 find_package(OpenCV REQUIRED)
@@ -464,5 +476,7 @@ endif()
 add_subdirectory(src/modules)
 
 # ─── 13. Testing ─────────────────────────────────────────────────────────────
-enable_testing()
-add_subdirectory(tests)
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
