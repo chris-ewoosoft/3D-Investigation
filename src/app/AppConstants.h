@@ -8,6 +8,9 @@ namespace AppConstants {
 
     // ── Reconstruction Pipeline ──────────────────────────────────────────────
     namespace Reconstruction {
+        constexpr int    MIN_POINTS_FOR_PNP        = 15;   // số correspondence 3D-2D tối thiểu để resection
+        constexpr double PNP_REPROJECTION_ERROR_PX = 4.0;  // ngưỡng RANSAC cho solvePnPRansac
+
         constexpr int    SIFT_MAX_FEATURES              = 20000;
         constexpr int    SIFT_OCTAVE_LAYERS             = 3;
         constexpr double SIFT_CONTRAST_THRESHOLD        = 0.01;

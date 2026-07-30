@@ -43,6 +43,16 @@ QString AppConfig::appDir() const {
     return m_appDir;
 }
 
+QString AppConfig::projectRootDir() const {
+    std::shared_lock lock(m_mutex);
+    return m_projectRoot;
+}
+
+QString AppConfig::dataRootDir() const {
+    std::shared_lock lock(m_mutex);
+    return m_dataRoot;
+}
+
 QString AppConfig::configPath() const {
     std::shared_lock lock(m_mutex);
     return QDir::cleanPath(m_dataRoot + "/Config/Config.ini");
@@ -71,6 +81,11 @@ QString AppConfig::aiTrainingDir() const {
 QString AppConfig::uploadDir() const {
     std::shared_lock lock(m_mutex);
     return QDir::cleanPath(m_dataRoot + "/Upload");
+}
+
+QString AppConfig::thumbnailsDir() const {
+    std::shared_lock lock(m_mutex);
+    return QDir::cleanPath(m_dataRoot + "/Thumbnails");
 }
 
 QString AppConfig::pluginsDir() const {

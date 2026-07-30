@@ -278,9 +278,8 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         // Remove leading slash if it exists (for file:///path)
         if (path.startsWith("/")) path.remove(0, 1);
         
-        // Resolve relative path against project root
-        QString projectRoot = QDir::cleanPath(QApplication::applicationDirPath() + "/../../");
-        QString absPath = QDir(projectRoot).absoluteFilePath(path);
+        // Resolve relative path against the configured project root.
+        QString absPath = QDir(AppConfig::instance().projectRootDir()).absoluteFilePath(path);
         
         if (QFileInfo::exists(absPath)) {
             QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
@@ -426,8 +425,11 @@ void AIAssistantPlugin::onAttachFile() {
 
 void AIAssistantPlugin::addAttachmentPreview(const QString &filePath, bool isImage) {
     if (!m_dockUI) return;
-    QString projectRoot = QDir::cleanPath(QApplication::applicationDirPath() + "/../../");
-    FileUtilities::AttachmentResult result = FileUtilities::processAttachment(filePath, isImage, projectRoot);
+    FileUtilities::AttachmentResult result = FileUtilities::processAttachment(
+        filePath,
+        isImage,
+        AppConfig::instance().uploadDir(),
+        AppConfig::instance().thumbnailsDir());
 
     if (!result.success) return;
 

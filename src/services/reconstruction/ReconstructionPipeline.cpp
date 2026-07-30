@@ -26,6 +26,9 @@
 #include <numeric>
 #include <set>
 
+#include <map>
+#include <unordered_map>
+
 namespace {
 constexpr const char *kReconstructionCacheFileName = "recon_cache_quality_v2.ply";
 
@@ -51,7 +54,7 @@ std::vector<cv::DMatch> filterMatchesByFundamental(
     cv::Mat fundamental = cv::findFundamentalMat(
         points1, points2, cv::FM_RANSAC, ransacThreshold, 0.995, inlierMask);
     if (fundamental.empty() || inlierMask.empty())
-        return matches;
+        return std::vector<cv::DMatch>();
 
     std::vector<cv::DMatch> inliers;
     inliers.reserve(matches.size());
@@ -60,7 +63,7 @@ std::vector<cv::DMatch> filterMatchesByFundamental(
             inliers.push_back(matches[i]);
     }
 
-    return inliers.size() >= 8 ? inliers : matches;
+    return inliers.size() >= 8 ? inliers : std::vector<cv::DMatch>();
 }
 }
 
@@ -151,8 +154,12 @@ void ReconstructionPipeline::processPointCloud() {
     } else {
         PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanK, f.sorStdDevMul);
         if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
-        PointCloudFilter::radiusOutlier(points3D, colors, f.rorRadius, f.rorMinNeighbors);
-        if (points3D.empty()) { qWarning() << "No points after ROR."; return; }
+        
+        // ROR relies on absolute distance thresholds which fails heavily on estimated 
+        // pose clouds where scale is arbitrary (due to recovering pose from Essential matrix).
+        // Therefore, we skip ROR for estimated pose. SOR + VoxelGrid is sufficient.
+        // PointCloudFilter::radiusOutlier(points3D, colors, f.rorRadius, f.rorMinNeighbors);
+
         PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSize);
     }
     qDebug() << "After post-processing:" << points3D.size() << "points";
@@ -236,13 +243,45 @@ bool ReconstructionPipeline::reconstructWithGroundTruth() {
 // ─── reconstructWithEstimatedPose ────────────────────────────────────────────
 
 bool ReconstructionPipeline::reconstructWithEstimatedPose() {
-    qDebug() << "=== Mode: ESTIMATED pose ===";
+    qDebug() << "=== Mode: ESTIMATED pose (incremental SfM via PnP resectioning) ===";
     int N = (int)images.size();
 
     K_fallback = PoseEstimator::estimateIntrinsics(images[0]);
     qDebug() << "  K: fx=" << K_fallback.at<double>(0,0)
              << "  cx=" << K_fallback.at<double>(0,2)
              << "  cy=" << K_fallback.at<double>(1,2);
+
+    // ── Match cache: tránh chạy lại FLANN kNN cho cùng một cặp ảnh trong lúc
+    //    tìm base pair và trong mỗi vòng lặp incremental (nguyên nhân chính
+    //    khiến pipeline này chạy ~14 phút cho 47 ảnh trước đây).
+    std::map<std::pair<int,int>, std::vector<cv::DMatch>> matchCache;
+    auto matchFeaturesCached = [&](int a, int b, std::vector<cv::DMatch> &out) {
+        auto it = matchCache.find({a, b});
+        if (it != matchCache.end()) { out = it->second; return; }
+        auto itRev = matchCache.find({b, a});
+        if (itRev != matchCache.end()) {
+            out.clear();
+            out.reserve(itRev->second.size());
+            for (const auto &m : itRev->second) {
+                cv::DMatch sw = m;
+                std::swap(sw.queryIdx, sw.trainIdx);
+                out.push_back(sw);
+            }
+            matchCache[{a, b}] = out;
+            return;
+        }
+        matchFeatures(a, b, out);
+        out = filterMatchesByFundamental(out, keypoints[a], keypoints[b], m_config.pairFundamentalRansacThreshold);
+        matchCache[{a, b}] = out;
+    };
+
+    // ── obsIndex: (imageIdx, keypointIdx) → index vào points3D. Cho biết,
+    //    với bất kỳ ảnh nào, keypoint nào của nó đã tương ứng với một điểm 3D
+    //    đã dựng — nền tảng để resection bằng PnP.
+    std::unordered_map<int64_t, int> obsIndex;
+    auto obsKey = [](int img, int kp) -> int64_t {
+        return (int64_t)img * 100000 + kp;
+    };
 
     int    best_i = 0, best_j = 1;
     size_t bestInliers = 0;
@@ -251,7 +290,7 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
     for (int i = 0; i < std::min(N-1, 20); ++i) {
         for (int jj = i+1; jj <= std::min(N-1, i+5); ++jj) {
             std::vector<cv::DMatch> tmp;
-            matchFeatures(i, jj, tmp);
+            matchFeaturesCached(i, jj, tmp);
             if ((int)tmp.size() < 30) continue;
 
             std::vector<cv::Point2f> p1, p2;
@@ -280,11 +319,11 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         for (int i = 0; i < N-1; ++i) {
             for (int jj = i+1; jj <= std::min(N-1, i+3); ++jj) {
                 std::vector<cv::DMatch> tmp;
-                matchFeatures(i, jj, tmp);
+                matchFeaturesCached(i, jj, tmp);
                 if (tmp.size() > bestMatch) { bestMatch = tmp.size(); best_i = i; best_j = jj; }
             }
         }
-        std::vector<cv::DMatch> tmp2; matchFeatures(best_i, best_j, tmp2);
+        std::vector<cv::DMatch> tmp2; matchFeaturesCached(best_i, best_j, tmp2);
         std::vector<cv::Point2f> p1, p2;
         for (const auto &m : tmp2) {
             p1.push_back(keypoints[best_i][m.queryIdx].pt);
@@ -296,9 +335,9 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         if (bestInliers < 10) { qWarning() << "Base pair failed → return false."; return false; }
     }
 
-    // Base pair pose
+    // Base pair pose (2-view — bắt buộc dùng Essential Matrix vì chưa có điểm 3D nào)
     std::vector<cv::DMatch> baseMatches;
-    matchFeatures(best_i, best_j, baseMatches);
+    matchFeaturesCached(best_i, best_j, baseMatches);
     std::vector<cv::Point2f> bp1, bp2;
     for (const auto &m : baseMatches) {
         bp1.push_back(keypoints[best_i][m.queryIdx].pt);
@@ -309,7 +348,6 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         qWarning() << "estimatePoseFromMatches failed."; return false;
     }
 
-    // Triangulate base
     cv::Mat P0 = K_fallback * cv::Mat::eye(3, 4, CV_64F);
     cv::Mat RT0; cv::hconcat(R_base, t_base, RT0);
     cv::Mat P1 = K_fallback * RT0;
@@ -317,21 +355,21 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
     std::vector<cv::Point3f> basePts;
     doTriangulate(P0, P1, bp1, bp2, basePts);
 
-    std::vector<float> zvec;
-    for (const auto &p : basePts) if (p.z > 0) zvec.push_back(p.z);
-    if (zvec.empty()) { qWarning() << "No positive depth!"; return false; }
-    std::nth_element(zvec.begin(), zvec.begin() + zvec.size()/2, zvec.end());
-    float zMed = zvec[zvec.size()/2];
-    float zMin = zMed * AppConstants::Reconstruction::DEPTH_MIN_MEDIAN_RATIO;
-    float zMax = zMed * AppConstants::Reconstruction::DEPTH_MAX_MEDIAN_RATIO;
-    qDebug() << "  zMedian=" << zMed << "  range=[" << zMin << "," << zMax << "]";
-
-    points3D.clear(); colors.clear();
+    // Cheirality (depth dương ở CẢ HAI camera) + reprojection filter, thay cho
+    // khoảng world-Z toàn cục cũ. World-Z chỉ đúng khi mọi camera vẫn nhìn gần
+    // trùng hướng camera gốc — sai với baseline rộng / quét orbital, và là một
+    // nguyên nhân khiến cloud gần như bị xóa sạch sau SOR/ROR ở chuỗi ảnh dài.
+    points3D.clear(); colors.clear(); obsIndex.clear();
     for (size_t k = 0; k < basePts.size() && k < baseMatches.size(); ++k) {
         const auto &pt = basePts[k];
-        if (pt.z < zMin || pt.z > zMax) continue;
+        cv::Mat p4 = (cv::Mat_<double>(4,1) << pt.x, pt.y, pt.z, 1.0);
+        double depth0 = cv::Mat(P0.row(2) * p4).at<double>(0);
+        double depth1 = cv::Mat(P1.row(2) * p4).at<double>(0);
+        if (depth0 <= 0.0 || depth1 <= 0.0) continue;
         if (computeReprojectionError(P0, pt, bp1[k]) > m_config.reprojectionErrorMax) continue;
         if (computeReprojectionError(P1, pt, bp2[k]) > m_config.reprojectionErrorMax) continue;
+
+        int newIdx = (int)points3D.size();
         points3D.push_back(pt);
         cv::Point2f kp = keypoints[best_i][baseMatches[k].queryIdx].pt;
         int x = cvRound(kp.x), y = cvRound(kp.y);
@@ -339,83 +377,193 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         if (x >= 0 && y >= 0 && x < images[best_i].cols && y < images[best_i].rows)
             col = images[best_i].at<cv::Vec3b>(y, x);
         colors.push_back(col);
+
+        obsIndex[obsKey(best_i, baseMatches[k].queryIdx)] = newIdx;
+        obsIndex[obsKey(best_j, baseMatches[k].trainIdx)] = newIdx;
     }
     qDebug() << "  Base triangulated:" << points3D.size();
+    if (points3D.empty()) { qWarning() << "Base pair produced no valid points."; return false; }
 
-    // Incremental SfM
+    // Incremental SfM — resection từng camera mới bằng solvePnPRansac dựa trên
+    // cấu trúc 3D ĐÃ CÓ, thay vì chain pose từ Essential Matrix (xem giải
+    // thích ở đầu message: recoverPose() chỉ cho translation scale-đơn-vị,
+    // chain trực tiếp làm scale trôi/méo qua từng bước).
     struct PoseInfo { int imgIdx; cv::Mat P, R, t; };
     std::vector<PoseInfo> knownPoses;
     knownPoses.push_back({best_i, P0.clone(), cv::Mat::eye(3,3,CV_64F), cv::Mat::zeros(3,1,CV_64F)});
     knownPoses.push_back({best_j, P1.clone(), R_base.clone(), t_base.clone()});
     std::set<int> processed = {best_i, best_j};
 
+    int consecutiveFailures = 0;
     for (int iter = 0; iter < N-2; ++iter) {
-        int bestNew = -1, bestRef = -1, bestCnt = 0;
-        for (int idx = 0; idx < N; ++idx) {
-            if (processed.count(idx)) continue;
-            for (int pi = 0; pi < (int)knownPoses.size(); ++pi) {
-                if (std::abs(idx - knownPoses[pi].imgIdx) > 8) continue;
-                std::vector<cv::DMatch> tmp;
-                matchFeatures(idx, knownPoses[pi].imgIdx, tmp);
-                if ((int)tmp.size() > bestCnt) { bestCnt = tmp.size(); bestNew = idx; bestRef = pi; }
-            }
-        }
-        if (bestNew < 0 || bestCnt < m_config.minMatches) {
-            bestCnt = 0;
+        auto findNextCamera = [&](bool limitWindow) {
+            int bNew = -1;
+            int bRef = -1;
+            std::vector<cv::Point3f> bObjPts;
+            std::vector<cv::Point2f> bImgPts;
+            std::vector<int> bObjIndices;
+            std::vector<int> bImgKpIndices;
+
             for (int idx = 0; idx < N; ++idx) {
                 if (processed.count(idx)) continue;
-                for (int pi = 0; pi < (int)knownPoses.size(); ++pi) {
-                    std::vector<cv::DMatch> tmp;
-                    matchFeatures(idx, knownPoses[pi].imgIdx, tmp);
-                    if ((int)tmp.size() > bestCnt) { bestCnt = tmp.size(); bestNew = idx; bestRef = pi; }
+
+                std::vector<cv::Point3f> objPts;
+                std::vector<cv::Point2f> imgPts;
+                std::vector<int> objIndices;
+                std::vector<int> imgKpIndices;
+                std::map<int, int> refMatchCount;
+                std::set<int> usedKeypoints;
+
+                for (const auto &kp : knownPoses) {
+                    int refImg = kp.imgIdx;
+                    int dist = std::abs(idx - refImg);
+                    int ringDist = std::min(dist, N - dist);
+                    if (limitWindow && ringDist > m_config.searchWindow) continue;
+
+                    std::vector<cv::DMatch> matches;
+                    matchFeaturesCached(idx, refImg, matches);
+                    refMatchCount[refImg] = matches.size();
+
+                    for (const auto &m : matches) {
+                        if (usedKeypoints.count(m.queryIdx)) continue;
+                        auto it = obsIndex.find(obsKey(refImg, m.trainIdx));
+                        if (it != obsIndex.end()) {
+                            objPts.push_back(points3D[it->second]);
+                            imgPts.push_back(keypoints[idx][m.queryIdx].pt);
+                            objIndices.push_back(it->second);
+                            imgKpIndices.push_back(m.queryIdx);
+                            usedKeypoints.insert(m.queryIdx);
+                        }
+                    }
+                }
+
+                if (objPts.size() > bObjPts.size()) {
+                    bNew = idx;
+                    bObjPts = std::move(objPts);
+                    bImgPts = std::move(imgPts);
+                    bObjIndices = std::move(objIndices);
+                    bImgKpIndices = std::move(imgKpIndices);
+
+                    int maxMatches = 0;
+                    for (const auto &pair : refMatchCount) {
+                        if (pair.second > maxMatches) {
+                            maxMatches = pair.second;
+                            bRef = pair.first;
+                        }
+                    }
                 }
             }
-        }
-        if (bestNew < 0 || bestCnt < m_config.minMatches) { qDebug() << "  No more images to add."; break; }
+            return std::make_tuple(bNew, bRef, bObjPts, bImgPts, bObjIndices, bImgKpIndices);
+        };
 
-        int refImg = knownPoses[bestRef].imgIdx;
-        std::vector<cv::DMatch> matches;
-        matchFeatures(bestNew, refImg, matches);
-        std::vector<cv::Point2f> pNew, pRef;
-        for (const auto &m : matches) {
-            pNew.push_back(keypoints[bestNew][m.queryIdx].pt);
-            pRef.push_back(keypoints[refImg][m.trainIdx].pt);
-        }
+        int bestNew, bestRef;
+        std::vector<cv::Point3f> bestObjPts;
+        std::vector<cv::Point2f> bestImgPts;
+        std::vector<int> bestObjIndices;
+        std::vector<int> bestImgKpIndices;
 
-        cv::Mat R_rel, t_rel;
-        if (!estimatePoseFromMatches(pNew, pRef, R_rel, t_rel)) {
-            qDebug() << "  Skipping image" << bestNew;
-            processed.insert(bestNew); continue;
+        std::tie(bestNew, bestRef, bestObjPts, bestImgPts, bestObjIndices, bestImgKpIndices) = findNextCamera(true);
+        if (bestNew < 0 || (int)bestObjPts.size() < AppConstants::Reconstruction::MIN_POINTS_FOR_PNP) {
+            std::tie(bestNew, bestRef, bestObjPts, bestImgPts, bestObjIndices, bestImgKpIndices) = findNextCamera(false);
         }
 
-        cv::Mat R_abs = knownPoses[bestRef].R * R_rel;
-        cv::Mat t_abs = knownPoses[bestRef].R * t_rel + knownPoses[bestRef].t;
+        if (bestNew < 0 || (int)bestObjPts.size() < AppConstants::Reconstruction::MIN_POINTS_FOR_PNP) {
+            qDebug() << "  No more images can be resectioned. Stopping.";
+            break;
+        }
+
+        cv::Mat rvec, tvec;
+        std::vector<int> pnpInliers;
+        bool pnpOk = cv::solvePnPRansac(
+            bestObjPts, bestImgPts, K_fallback, distCoeffs,
+            rvec, tvec, false, 1000,
+            8.0f,
+            0.999, pnpInliers, cv::SOLVEPNP_EPNP);
+
+        if (!pnpOk || (int)pnpInliers.size() < AppConstants::Reconstruction::MIN_POINTS_FOR_PNP) {
+            qDebug() << "  PnP failed for image" << bestNew
+                     << "(inliers=" << pnpInliers.size() << "/" << bestObjPts.size() << "). Skipping.";
+            processed.insert(bestNew);
+            if (++consecutiveFailures >= 5) {
+                qWarning() << "  5 consecutive resectioning failures — stopping early.";
+                break;
+            }
+            continue;
+        }
+        consecutiveFailures = 0;
+
+        std::vector<cv::Point3f> inlierObj; std::vector<cv::Point2f> inlierImg;
+        inlierObj.reserve(pnpInliers.size()); inlierImg.reserve(pnpInliers.size());
+        for (int idx : pnpInliers) { 
+            inlierObj.push_back(bestObjPts[idx]); 
+            inlierImg.push_back(bestImgPts[idx]); 
+            // Cập nhật obsIndex để ghi nhận rằng camera mới này đang nhìn thấy các điểm 3D cũ.
+            // Điều này cực kỳ quan trọng để liên kết các camera tiếp theo!
+            obsIndex[obsKey(bestNew, bestImgKpIndices[idx])] = bestObjIndices[idx];
+        }
+        cv::solvePnPRefineLM(inlierObj, inlierImg, K_fallback, distCoeffs, rvec, tvec);
+
+        cv::Mat R_abs; cv::Rodrigues(rvec, R_abs);
+        cv::Mat t_abs = tvec;
         cv::Mat RT_n; cv::hconcat(R_abs, t_abs, RT_n);
         cv::Mat P_new = K_fallback * RT_n;
-        knownPoses.push_back({bestNew, P_new, R_abs.clone(), t_abs.clone()});
+
+        knownPoses.push_back({bestNew, P_new.clone(), R_abs.clone(), t_abs.clone()});
         processed.insert(bestNew);
 
+        std::vector<cv::DMatch> triMatches;
+        matchFeaturesCached(bestNew, bestRef, triMatches);
+
+        cv::Mat P_ref;
+        for (const auto &kp : knownPoses) if (kp.imgIdx == bestRef) { P_ref = kp.P; break; }
+
+        std::vector<cv::Point2f> pNew, pRef;
+        std::vector<cv::DMatch>  newObsMatches;
+        for (const auto &m : triMatches) {
+            if (obsIndex.count(obsKey(bestRef, m.trainIdx))) continue; // đã có điểm 3D rồi
+            pNew.push_back(keypoints[bestNew][m.queryIdx].pt);
+            pRef.push_back(keypoints[bestRef][m.trainIdx].pt);
+            newObsMatches.push_back(m);
+        }
+
         std::vector<cv::Point3f> newPts;
-        doTriangulate(knownPoses[bestRef].P, P_new, pRef, pNew, newPts);
+        doTriangulate(P_ref, P_new, pRef, pNew, newPts);
+
         int added = 0;
-        for (size_t k = 0; k < newPts.size() && k < matches.size(); ++k) {
+        for (size_t k = 0; k < newPts.size() && k < newObsMatches.size(); ++k) {
             const auto &pt = newPts[k];
-            if (pt.z < zMin || pt.z > zMax) continue;
-            if (computeReprojectionError(knownPoses[bestRef].P, pt, pRef[k]) > m_config.reprojectionErrorMax) continue;
+            cv::Mat p4 = (cv::Mat_<double>(4,1) << pt.x, pt.y, pt.z, 1.0);
+            double depthRef = cv::Mat(P_ref.row(2) * p4).at<double>(0);
+            double depthNew = cv::Mat(P_new.row(2) * p4).at<double>(0);
+            if (depthRef <= 0.0 || depthNew <= 0.0) continue;
+            if (computeReprojectionError(P_ref, pt, pRef[k]) > m_config.reprojectionErrorMax) continue;
             if (computeReprojectionError(P_new, pt, pNew[k]) > m_config.reprojectionErrorMax) continue;
+
+            int newIdx = (int)points3D.size();
             points3D.push_back(pt);
-            cv::Point2f kp = keypoints[bestNew][matches[k].queryIdx].pt;
-            int x = cvRound(kp.x), y = cvRound(kp.y);
+            cv::Point2f kp2 = keypoints[bestNew][newObsMatches[k].queryIdx].pt;
+            int x = cvRound(kp2.x), y = cvRound(kp2.y);
             cv::Vec3b col(128, 128, 128);
             if (x >= 0 && y >= 0 && x < images[bestNew].cols && y < images[bestNew].rows)
                 col = images[bestNew].at<cv::Vec3b>(y, x);
-            colors.push_back(col); ++added;
+            colors.push_back(col);
+
+            obsIndex[obsKey(bestNew, newObsMatches[k].queryIdx)] = newIdx;
+            obsIndex[obsKey(bestRef,  newObsMatches[k].trainIdx)] = newIdx;
+            ++added;
         }
-        qDebug() << "  Image" << bestNew << "(ref=" << refImg << ")"
+
+        qDebug() << "  Image" << bestNew << "resectioned (ref=" << bestRef
+                 << " inliers=" << pnpInliers.size() << "/" << bestObjPts.size() << ")"
                  << "added" << added << "pts. Total:" << points3D.size();
     }
 
-    qDebug() << "=== Estimated raw points:" << points3D.size() << "===";
+    qDebug() << "=== Estimated pose (PnP) raw points:" << points3D.size()
+             << "| cameras resectioned:" << processed.size() << "/" << N << "===";
+    if ((int)processed.size() < N / 2) {
+        qWarning() << "Only resectioned" << processed.size() << "/" << N
+                   << "images — result may be incomplete. Check image overlap/order.";
+    }
     return !points3D.empty();
 }
 

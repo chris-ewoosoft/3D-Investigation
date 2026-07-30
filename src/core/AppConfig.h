@@ -14,12 +14,15 @@ public:
     void initialize(const QString& appDir);
 
     QString appDir() const;
+    QString projectRootDir() const;
+    QString dataRootDir() const;
     QString configPath() const;
     QString logsDir() const;
     QString modelsDir() const;
     QString predictDir(const QString& type) const;
     QString aiTrainingDir() const;
     QString uploadDir() const;
+    QString thumbnailsDir() const;
     QString pluginsDir() const;
 
 private:
