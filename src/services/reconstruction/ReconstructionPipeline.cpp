@@ -251,9 +251,9 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
              << "  cx=" << K_fallback.at<double>(0,2)
              << "  cy=" << K_fallback.at<double>(1,2);
 
-    // ── Match cache: tránh chạy lại FLANN kNN cho cùng một cặp ảnh trong lúc
-    //    tìm base pair và trong mỗi vòng lặp incremental (nguyên nhân chính
-    //    khiến pipeline này chạy ~14 phút cho 47 ảnh trước đây).
+    // ── Match cache: tránh chạy lại FLANN kNN + fundamental-matrix filter cho
+    //    cùng một cặp ảnh nhiều lần trong lúc tìm base pair và trong mỗi vòng
+    //    lặp incremental (nguồn chính gây runtime dài với chuỗi ảnh lớn).
     std::map<std::pair<int,int>, std::vector<cv::DMatch>> matchCache;
     auto matchFeaturesCached = [&](int a, int b, std::vector<cv::DMatch> &out) {
         auto it = matchCache.find({a, b});
@@ -283,17 +283,25 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         return (int64_t)img * 100000 + kp;
     };
 
+    // ── Base pair: quét TOÀN BỘ chuỗi ảnh (không giới hạn 20 ảnh đầu như
+    //    trước) — giới hạn cũ có thể bỏ lỡ cặp ảnh tốt hơn nếu các ảnh đầu
+    //    tiên có overlap kém (mờ, thiếu sáng, hoặc là điểm nối đầu/cuối quỹ
+    //    đạo). Cửa sổ ±BASE_PAIR_WINDOW giữ chi phí ở mức O(N), rẻ hơn nhiều
+    //    so với bước incremental phía sau.
+    const int BASE_PAIR_WINDOW = 5;
     int    best_i = 0, best_j = 1;
     size_t bestInliers = 0;
+    double bestRatio = 0.0;
 
-    qDebug() << "  Finding base pair (window=5)...";
-    for (int i = 0; i < std::min(N-1, 20); ++i) {
-        for (int jj = i+1; jj <= std::min(N-1, i+5); ++jj) {
+    qDebug() << "  Finding base pair (full scan, window=" << BASE_PAIR_WINDOW << ")...";
+    for (int i = 0; i < N - 1; ++i) {
+        for (int jj = i + 1; jj <= std::min(N - 1, i + BASE_PAIR_WINDOW); ++jj) {
             std::vector<cv::DMatch> tmp;
             matchFeaturesCached(i, jj, tmp);
             if ((int)tmp.size() < 30) continue;
 
             std::vector<cv::Point2f> p1, p2;
+            p1.reserve(tmp.size()); p2.reserve(tmp.size());
             for (const auto &m : tmp) {
                 p1.push_back(keypoints[i][m.queryIdx].pt);
                 p2.push_back(keypoints[jj][m.trainIdx].pt);
@@ -307,32 +315,48 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
                 inl >= AppConstants::Reconstruction::MIN_INLIERS_FOR_ESTIMATED_POSE &&
                 ratio > 0.5)
             {
-                bestInliers = inl; best_i = i; best_j = jj;
+                bestInliers = inl; best_i = i; best_j = jj; bestRatio = ratio;
             }
         }
     }
-    qDebug() << "  Base pair:" << best_i << "-" << best_j << " inliers=" << bestInliers;
+    qDebug() << "  Base pair:" << best_i << "-" << best_j
+             << " inliers=" << bestInliers << " ratio=" << bestRatio;
 
     if (bestInliers < (size_t)m_config.minMatches) {
-        qWarning() << "No good base pair found! Trying wider window...";
+        // Fallback chỉ được chấp nhận nếu vẫn đạt tối thiểu về mặt hình học
+        // (inlier ratio > 0.35). Trước đây fallback chọn cặp thuần theo số
+        // lượng match thô, có thể chấp nhận một Essential Matrix không ổn
+        // định — làm lệch toàn bộ hệ tọa độ 3D dựng từ đó về sau.
+        qWarning() << "No good base pair in primary pass — trying relaxed fallback...";
         size_t bestMatch = 0;
-        for (int i = 0; i < N-1; ++i) {
-            for (int jj = i+1; jj <= std::min(N-1, i+3); ++jj) {
+        int fb_i = best_i, fb_j = best_j;
+        for (int i = 0; i < N - 1; ++i) {
+            for (int jj = i + 1; jj <= std::min(N - 1, i + 3); ++jj) {
                 std::vector<cv::DMatch> tmp;
                 matchFeaturesCached(i, jj, tmp);
-                if (tmp.size() > bestMatch) { bestMatch = tmp.size(); best_i = i; best_j = jj; }
+                if (tmp.size() > bestMatch) { bestMatch = tmp.size(); fb_i = i; fb_j = jj; }
             }
         }
-        std::vector<cv::DMatch> tmp2; matchFeaturesCached(best_i, best_j, tmp2);
+        std::vector<cv::DMatch> tmp2; matchFeaturesCached(fb_i, fb_j, tmp2);
         std::vector<cv::Point2f> p1, p2;
         for (const auto &m : tmp2) {
-            p1.push_back(keypoints[best_i][m.queryIdx].pt);
-            p2.push_back(keypoints[best_j][m.trainIdx].pt);
+            p1.push_back(keypoints[fb_i][m.queryIdx].pt);
+            p2.push_back(keypoints[fb_j][m.trainIdx].pt);
         }
         cv::Mat Rt, tt, mask2;
         cv::Mat E2 = cv::findEssentialMat(p1, p2, K_fallback, cv::RANSAC, 0.999, 1.0, mask2);
-        if (!E2.empty()) bestInliers = cv::recoverPose(E2, p1, p2, K_fallback, Rt, tt, mask2);
-        if (bestInliers < 10) { qWarning() << "Base pair failed → return false."; return false; }
+        size_t fbInliers = 0;
+        if (!E2.empty()) fbInliers = cv::recoverPose(E2, p1, p2, K_fallback, Rt, tt, mask2);
+        double fbRatio = tmp2.empty() ? 0.0 : (double)fbInliers / tmp2.size();
+
+        if (fbInliers < 10 || fbRatio <= 0.35) {
+            qCritical() << "Base pair search failed (best fallback inliers=" << fbInliers
+                        << " ratio=" << fbRatio << ") — reconstruction aborted.";
+            return false;
+        }
+        best_i = fb_i; best_j = fb_j; bestInliers = fbInliers; bestRatio = fbRatio;
+        qWarning() << "  Fallback base pair accepted:" << best_i << "-" << best_j
+                   << " inliers=" << bestInliers << " ratio=" << bestRatio;
     }
 
     // Base pair pose (2-view — bắt buộc dùng Essential Matrix vì chưa có điểm 3D nào)
@@ -345,7 +369,8 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
     }
     cv::Mat R_base, t_base;
     if (!estimatePoseFromMatches(bp1, bp2, R_base, t_base)) {
-        qWarning() << "estimatePoseFromMatches failed."; return false;
+        qCritical() << "estimatePoseFromMatches failed for base pair.";
+        return false;
     }
 
     cv::Mat P0 = K_fallback * cv::Mat::eye(3, 4, CV_64F);
@@ -355,10 +380,9 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
     std::vector<cv::Point3f> basePts;
     doTriangulate(P0, P1, bp1, bp2, basePts);
 
-    // Cheirality (depth dương ở CẢ HAI camera) + reprojection filter, thay cho
-    // khoảng world-Z toàn cục cũ. World-Z chỉ đúng khi mọi camera vẫn nhìn gần
-    // trùng hướng camera gốc — sai với baseline rộng / quét orbital, và là một
-    // nguyên nhân khiến cloud gần như bị xóa sạch sau SOR/ROR ở chuỗi ảnh dài.
+    // Cheirality (depth dương ở CẢ HAI camera) + reprojection filter, đúng
+    // với mọi quỹ đạo camera (kể cả quét orbital 360°) thay vì phụ thuộc
+    // hướng world-Z của camera gốc.
     points3D.clear(); colors.clear(); obsIndex.clear();
     for (size_t k = 0; k < basePts.size() && k < baseMatches.size(); ++k) {
         const auto &pt = basePts[k];
@@ -382,12 +406,14 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
         obsIndex[obsKey(best_j, baseMatches[k].trainIdx)] = newIdx;
     }
     qDebug() << "  Base triangulated:" << points3D.size();
-    if (points3D.empty()) { qWarning() << "Base pair produced no valid points."; return false; }
+    if (points3D.empty()) {
+        qCritical() << "Base pair produced no valid points after cheirality/reprojection filter.";
+        return false;
+    }
 
-    // Incremental SfM — resection từng camera mới bằng solvePnPRansac dựa trên
-    // cấu trúc 3D ĐÃ CÓ, thay vì chain pose từ Essential Matrix (xem giải
-    // thích ở đầu message: recoverPose() chỉ cho translation scale-đơn-vị,
-    // chain trực tiếp làm scale trôi/méo qua từng bước).
+    // Incremental SfM — resection từng camera mới bằng solvePnPRansac dựa
+    // trên cấu trúc 3D ĐÃ CÓ (không chain pose tương đối), giữ scale nhất
+    // quán suốt toàn bộ chuỗi ảnh.
     struct PoseInfo { int imgIdx; cv::Mat P, R, t; };
     std::vector<PoseInfo> knownPoses;
     knownPoses.push_back({best_i, P0.clone(), cv::Mat::eye(3,3,CV_64F), cv::Mat::zeros(3,1,CV_64F)});
@@ -395,7 +421,7 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
     std::set<int> processed = {best_i, best_j};
 
     int consecutiveFailures = 0;
-    for (int iter = 0; iter < N-2; ++iter) {
+    for (int iter = 0; iter < N - 2; ++iter) {
         auto findNextCamera = [&](bool limitWindow) {
             int bNew = -1;
             int bRef = -1;
@@ -422,7 +448,7 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
 
                     std::vector<cv::DMatch> matches;
                     matchFeaturesCached(idx, refImg, matches);
-                    refMatchCount[refImg] = matches.size();
+                    refMatchCount[refImg] = (int)matches.size();
 
                     for (const auto &m : matches) {
                         if (usedKeypoints.count(m.queryIdx)) continue;
@@ -474,10 +500,15 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
 
         cv::Mat rvec, tvec;
         std::vector<int> pnpInliers;
+        // Ngưỡng RANSAC dùng PNP_REPROJECTION_ERROR_PX (4.0px, đã định nghĩa
+        // trong AppConstants — trước đây bị bỏ qua, hardcode 8.0px) để gần
+        // với reprojectionErrorMax chấp nhận điểm triangulate, giảm khả năng
+        // một pose "vừa đủ qua ải RANSAC" nhưng thực chất lệch bị chấp nhận
+        // rồi lan sai số sang các bước resection tiếp theo.
         bool pnpOk = cv::solvePnPRansac(
             bestObjPts, bestImgPts, K_fallback, distCoeffs,
             rvec, tvec, false, 1000,
-            8.0f,
+            (float)AppConstants::Reconstruction::PNP_REPROJECTION_ERROR_PX,
             0.999, pnpInliers, cv::SOLVEPNP_EPNP);
 
         if (!pnpOk || (int)pnpInliers.size() < AppConstants::Reconstruction::MIN_POINTS_FOR_PNP) {
@@ -494,11 +525,11 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
 
         std::vector<cv::Point3f> inlierObj; std::vector<cv::Point2f> inlierImg;
         inlierObj.reserve(pnpInliers.size()); inlierImg.reserve(pnpInliers.size());
-        for (int idx : pnpInliers) { 
-            inlierObj.push_back(bestObjPts[idx]); 
-            inlierImg.push_back(bestImgPts[idx]); 
-            // Cập nhật obsIndex để ghi nhận rằng camera mới này đang nhìn thấy các điểm 3D cũ.
-            // Điều này cực kỳ quan trọng để liên kết các camera tiếp theo!
+        for (int idx : pnpInliers) {
+            inlierObj.push_back(bestObjPts[idx]);
+            inlierImg.push_back(bestImgPts[idx]);
+            // Cập nhật obsIndex để ghi nhận rằng camera mới này đang nhìn thấy
+            // các điểm 3D cũ — cực kỳ quan trọng để liên kết các camera tiếp theo.
             obsIndex[obsKey(bestNew, bestImgKpIndices[idx])] = bestObjIndices[idx];
         }
         cv::solvePnPRefineLM(inlierObj, inlierImg, K_fallback, distCoeffs, rvec, tvec);
@@ -558,11 +589,15 @@ bool ReconstructionPipeline::reconstructWithEstimatedPose() {
                  << "added" << added << "pts. Total:" << points3D.size();
     }
 
+    const double coverage = N > 0 ? (double)processed.size() / N : 0.0;
     qDebug() << "=== Estimated pose (PnP) raw points:" << points3D.size()
-             << "| cameras resectioned:" << processed.size() << "/" << N << "===";
-    if ((int)processed.size() < N / 2) {
+             << "| cameras resectioned:" << processed.size() << "/" << N
+             << "(" << QString::number(coverage * 100.0, 'f', 1) << "%) ===";
+    if (coverage < 0.5) {
         qWarning() << "Only resectioned" << processed.size() << "/" << N
-                   << "images — result may be incomplete. Check image overlap/order.";
+                   << "images (" << QString::number(coverage * 100.0, 'f', 1)
+                   << "%) — result may be incomplete or unreliable. "
+                      "Check image overlap/order, or verify camera intrinsics estimate.";
     }
     return !points3D.empty();
 }
