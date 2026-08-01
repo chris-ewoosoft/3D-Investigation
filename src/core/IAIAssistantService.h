@@ -7,6 +7,7 @@
 #include <QList>
 #include <QJsonObject>
 #include <QDateTime>
+#include <QVariantMap>
 #include "Global.h"
 
 struct ChatSession {
@@ -26,6 +27,7 @@ public:
     virtual void sendMessage(const QString &text, const QStringList &attachments = QStringList()) = 0;
     virtual void sendMessageToSession(const QString &sessionId, const QString &text, const QStringList &attachments = QStringList()) = 0;
     virtual void retryMessage(const QString &sessionId, int msgIndex) = 0;
+    virtual void retryAgentTask(const QString &sessionId, int msgIndex) = 0;
     virtual void editMessage(const QString &sessionId, int msgIndex, const QString &newText) = 0;
     virtual void switchModel(int index) = 0;
 
@@ -43,12 +45,24 @@ public:
     virtual bool isSessionThinking(const QString &sessionId) const = 0;
     virtual bool isServerRunning() const = 0;
 
+    // Agent mode
+    virtual void executeAgentTask(const QString &sessionId, const QString &task) = 0;
+    virtual void approveAgentAction(const QString &sessionId, const QString &actionId) = 0;
+    virtual void rejectAgentAction(const QString &sessionId, const QString &actionId) = 0;
+
 signals:
     void historyChanged();
     void sessionsChanged();
     void serverStatusChanged(const QString &status);
     void errorOccurred(const QString &error);
     void responseReceived();
+    
+    // Agent signals
+    void agentStepReceived(const QString &sessionId, const QJsonObject &step);
+    void agentApprovalRequired(const QString &sessionId, const QJsonObject &action);
+    void agentTaskCompleted(const QString &sessionId, const QString &finalAnswer);
+    void agentUiActionRequested(const QString &action, const QVariantMap &parameters);
+
 
 protected:
     explicit IAIAssistantService(QObject* parent = nullptr) : QObject(parent) {}

@@ -189,6 +189,33 @@ void AIProcessorPlugin::setupConnections() {
   connect(m_ctx->signalBus(), &SignalBus::stateChanged, this, &AIProcessorPlugin::updateActions);
   connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &AIProcessorPlugin::updateActions);
   connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this, &AIProcessorPlugin::onImageChanged);
+  connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
+          [this](const QString &action, const QVariantMap &) {
+      const QDir root(AppConfig::instance().projectRootDir());
+      if (action == "ai.run_detection" || action == "ai.run_segmentation") {
+          const QDir images(root.filePath("3DRecontruction/templeRing"));
+          const QStringList files = images.entryList({"*.png", "*.jpg", "*.jpeg", "*.bmp"},
+                                                     QDir::Files, QDir::Name);
+          if (files.isEmpty()) return;
+          m_ctx->viewer()->setCurrent2DImagePath(images.absoluteFilePath(files.first()));
+          if (action == "ai.run_detection") onObjectDetection();
+          else onSegmentation();
+      } else if (action == "ai.video_tracking") {
+          const QDir videos(root.filePath("VideoTracking"));
+          const QStringList files = videos.entryList({"*.mp4", "*.avi", "*.mkv"},
+                                                     QDir::Files, QDir::Name);
+          if (!files.isEmpty()) {
+              m_agentVideoPath = videos.absoluteFilePath(files.first());
+              onObjectTracking();
+          }
+      } else if (action == "ai.hide_results") {
+          onHideAIResults();
+      } else if (action == "ai.training_model") {
+          if (m_trainDock) m_trainDock->startTraining(true);
+      } else if (action == "ai.view_training_charts") {
+          onViewCharts();
+      }
+  });
 }
 
 void AIProcessorPlugin::cleanup() {
@@ -351,8 +378,12 @@ void AIProcessorPlugin::onObjectTracking() {
         return;
     }
 
-    QString lastUsedPath = m_ctx->settings()->getLastUsedPath("ai_video_tracking");
-    QString videoPath = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("aiproc.select_video_tracking"), lastUsedPath, "Video Files (*.mp4 *.avi *.mkv)");
+    QString videoPath = m_agentVideoPath;
+    m_agentVideoPath.clear();
+    if (videoPath.isEmpty()) {
+        QString lastUsedPath = m_ctx->settings()->getLastUsedPath("ai_video_tracking");
+        videoPath = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("aiproc.select_video_tracking"), lastUsedPath, "Video Files (*.mp4 *.avi *.mkv)");
+    }
     if (videoPath.isEmpty()) return;
     
     m_ctx->settings()->setLastUsedPath("ai_video_tracking", QFileInfo(videoPath).absolutePath());

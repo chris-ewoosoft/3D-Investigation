@@ -297,7 +297,15 @@ void AIAssistant::processNextQueuedRequest() {
 
     const QueuedCompletionRequest request = m_queuedRequests.takeFirst();
 
-    QNetworkRequest req{QUrl(AppConstants::AIServer::apiEndpoint())};
+    QString urlStr = AppConstants::AIServer::apiEndpoint();
+    if (request.isAgent) {
+        if (request.isApproval) {
+            urlStr = urlStr.replace("/chat/completions", "/agent/approve");
+        } else {
+            urlStr = urlStr.replace("/chat/completions", "/agent/execute");
+        }
+    }
+    QNetworkRequest req{QUrl(urlStr)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     const int timeoutMs = (m_currentModelIndex == AppConstants::AIAssistant::VISION_MODEL_INDEX)
         ? AppConstants::AIServer::VISION_INFERENCE_TIMEOUT_MS
@@ -378,6 +386,36 @@ void AIAssistant::retryMessage(const QString &sessionId, int msgIndex) {
     emit historyChanged();
 }
 
+void AIAssistant::retryAgentTask(const QString &sessionId, int msgIndex) {
+    if (hasPendingRequestForSession(sessionId)) return;
+
+    ChatSession *sess = getSession(sessionId);
+    if (!sess || msgIndex < 0 || msgIndex >= sess->messages.size()) return;
+
+    const QJsonObject target = sess->messages[msgIndex];
+    if (target["role"].toString() != "user" || target["content"].toString().trimmed().isEmpty()) return;
+
+    while (sess->messages.size() > msgIndex + 1) {
+        sess->messages.removeLast();
+    }
+    QJsonObject msg = sess->messages[msgIndex];
+    msg["timestamp"] = QDateTime::currentDateTime().toString(AppConstants::Format::chatTimestamp());
+    sess->messages[msgIndex] = msg;
+    saveAllSessions();
+
+    QueuedCompletionRequest request;
+    request.sessionId = sessionId;
+    request.isAgent = true;
+    request.payload["task"] = msg["content"].toString();
+    request.payload["session_id"] = sessionId;
+    request.payload["temperature"] = 0.3;
+    request.payload["language"] = LanguageManager::instance().currentLanguage();
+    m_queuedRequests.append(request);
+    m_isThinking = true;
+    processNextQueuedRequest();
+    emit historyChanged();
+}
+
 void AIAssistant::editMessage(const QString &sessionId, int msgIndex, const QString &newText) {
     ChatSession *sess = getSession(sessionId);
     if (!sess) return;
@@ -388,6 +426,88 @@ void AIAssistant::editMessage(const QString &sessionId, int msgIndex, const QStr
     sess->messages[msgIndex] = msg;
     
     retryMessage(sessionId, msgIndex);
+}
+
+// ── Agent mode ────────────────────────────────────────────────────────────────
+
+void AIAssistant::executeAgentTask(const QString &sessionId, const QString &task) {
+    if (task.isEmpty()) return;
+    
+    QString targetSessionId = sessionId;
+    ChatSession *sess = getSession(targetSessionId);
+    if (!sess) {
+        newChat();
+        sess = currentSession();
+        if (!sess) return;
+        targetSessionId = sess->id;
+    }
+
+    if (hasPendingRequestForSession(targetSessionId)) return;
+
+    QJsonObject um;
+    um["role"]      = "user";
+    um["content"]   = task;
+    um["timestamp"] = QDateTime::currentDateTime().toString(AppConstants::Format::chatTimestamp());
+    
+    sess->messages.append(um);
+
+    if (sess->messages.size() == 1) {
+        sess->title = task.left(AppConstants::Chat::SESSION_TITLE_MAX_LENGTH) + (task.length() > AppConstants::Chat::SESSION_TITLE_MAX_LENGTH ? "..." : "");
+        emit sessionsChanged();
+    }
+    
+    saveAllSessions();
+    emit historyChanged();
+
+    QJsonObject payload;
+    payload["task"] = task;
+    payload["session_id"] = targetSessionId;
+    payload["temperature"] = 0.3;
+    payload["language"] = LanguageManager::instance().currentLanguage();
+
+    QueuedCompletionRequest request;
+    request.sessionId = targetSessionId;
+    request.payload = payload;
+    request.isAgent = true;
+    request.isApproval = false;
+
+    m_queuedRequests.append(request);
+    m_isThinking = true;
+    processNextQueuedRequest();
+}
+
+void AIAssistant::approveAgentAction(const QString &sessionId, const QString &actionId) {
+    QJsonObject payload;
+    payload["action_id"] = actionId;
+    payload["approved"] = true;
+    payload["session_id"] = sessionId;
+
+    QueuedCompletionRequest request;
+    request.sessionId = sessionId;
+    request.payload = payload;
+    request.isAgent = true;
+    request.isApproval = true;
+
+    m_queuedRequests.append(request);
+    m_isThinking = true;
+    processNextQueuedRequest();
+}
+
+void AIAssistant::rejectAgentAction(const QString &sessionId, const QString &actionId) {
+    QJsonObject payload;
+    payload["action_id"] = actionId;
+    payload["approved"] = false;
+    payload["session_id"] = sessionId;
+
+    QueuedCompletionRequest request;
+    request.sessionId = sessionId;
+    request.payload = payload;
+    request.isAgent = true;
+    request.isApproval = true;
+
+    m_queuedRequests.append(request);
+    m_isThinking = true;
+    processNextQueuedRequest();
 }
 
 // ── Process callbacks ─────────────────────────────────────────────────────────
@@ -497,11 +617,51 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
     QString sessionId = request.sessionId;  // Remove from pending and get sessionId
     
     if (reply->error() == QNetworkReply::NoError) {
-        QJsonObject m = QJsonDocument::fromJson(reply->readAll())
-                            .object()["choices"].toArray()[0]
-                            .toObject()["message"].toObject();
-        appendAssistantMessage(sessionId, m["content"].toString());
-        emit responseReceived();
+        if (request.isAgent) {
+            QJsonObject res = QJsonDocument::fromJson(reply->readAll()).object();
+
+            // application_action is deliberately executed by the desktop app,
+            // not by the Python server.  This gives agent mode access to the
+            // same Qt slots as the ribbon buttons without exposing UI control
+            // to a subprocess.
+            const QJsonArray steps = res.value("steps").toArray();
+            for (const QJsonValue &value : steps) {
+                const QJsonObject step = value.toObject();
+                if (step.value("type").toString() != "tool_call" ||
+                    step.value("tool").toString() != "application_action") {
+                    continue;
+                }
+                const QJsonObject params = step.value("params").toObject();
+                const QString action = params.value("action").toString();
+                if (action.isEmpty()) continue;
+                emit agentUiActionRequested(action, params.toVariantMap());
+            }
+            
+            // Append agent step message to history to keep it
+            QJsonObject am;
+            am["role"] = "assistant_agent";
+            am["content"] = QString::fromUtf8(QJsonDocument(res).toJson(QJsonDocument::Compact));
+            am["timestamp"] = QDateTime::currentDateTime().toString(AppConstants::Format::chatTimestamp());
+            
+            ChatSession *sess = getSession(sessionId);
+            if (sess) {
+                sess->messages.append(am);
+                saveAllSessions();
+            }
+            
+            if (res.value("status").toString() == "pending_approval") {
+                emit agentApprovalRequired(sessionId, res);
+            } else {
+                emit agentTaskCompleted(sessionId, "");
+            }
+            emit agentStepReceived(sessionId, res);
+        } else {
+            QJsonObject m = QJsonDocument::fromJson(reply->readAll())
+                                .object()["choices"].toArray()[0]
+                                .toObject()["message"].toObject();
+            appendAssistantMessage(sessionId, m["content"].toString());
+            emit responseReceived();
+        }
     } else {
         const QByteArray responseBody = reply->readAll();
         qWarning() << "[AIAssistant] Request failed:" << reply->errorString();

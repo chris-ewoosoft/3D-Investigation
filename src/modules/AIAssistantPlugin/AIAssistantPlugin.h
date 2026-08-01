@@ -7,6 +7,7 @@
 #include <QUrl>
 #include <QToolButton>
 #include <QGroupBox>
+#include <QSet>
 #include "IPlugin.h"
 
 #include "IAppContext.h"
@@ -54,6 +55,7 @@ private:
     void addAttachmentPreview(const QString &filePath, bool isImage);
 
     QStringList pendingAttachments;
+    QSet<QString> m_submittedAgentActions;
 
     IAppContext* m_ctx = nullptr;
     IAIAssistantService* m_aiAssistant = nullptr;

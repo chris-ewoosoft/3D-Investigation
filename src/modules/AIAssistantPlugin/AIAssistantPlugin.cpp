@@ -45,6 +45,9 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
     }
     
     setupChatbotUI();
+    connect(m_dockUI->btnToggleAgentMode(), &QPushButton::toggled, this, [this](bool active) {
+        m_dockUI->setAgentModeActive(active);
+    });
     
     // Connect AIAssistant signals
     if (m_aiAssistant) {
@@ -53,6 +56,17 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         connect(m_aiAssistant, &IAIAssistantService::serverStatusChanged,this, &AIAssistantPlugin::onAssistantStatusChanged);
         connect(m_aiAssistant, &IAIAssistantService::errorOccurred,      this, &AIAssistantPlugin::onAssistantError);
         connect(m_aiAssistant, &IAIAssistantService::responseReceived,   this, &AIAssistantPlugin::updateChatUI);
+        connect(m_aiAssistant, &IAIAssistantService::agentStepReceived,  this, [this](const QString &, const QJsonObject &) {
+            m_submittedAgentActions.clear();
+            updateChatUI();
+        });
+        connect(m_aiAssistant, &IAIAssistantService::agentApprovalRequired, this, [this](const QString &, const QJsonObject &){
+            updateChatUI();
+        });
+        connect(m_aiAssistant, &IAIAssistantService::agentUiActionRequested, this,
+                [this](const QString &action, const QVariantMap &parameters) {
+            emit m_ctx->signalBus()->agentUiActionRequested(action, parameters);
+        });
     }
     
     // Inject AI Assistant button into tab.ai_assistant panel
@@ -72,6 +86,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             m_dockUI->btnAttach()->setToolTip(m_ctx->translate("ai.attach"));
             m_dockUI->actAttachImage()->setText(m_ctx->translate("ai.attach_image"));
             m_dockUI->actAttachFile()->setText(m_ctx->translate("ai.attach_file"));
+            m_dockUI->setAgentModeActive(m_dockUI->btnToggleAgentMode()->isChecked());
         }
 
         // Update Ribbon UI button and Groupbox
@@ -84,6 +99,15 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         }
         updateSessionListUI();
         updateChatUI();
+    });
+    connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
+            [this](const QString &action, const QVariantMap &) {
+        if (!m_dockUI) return;
+        if (action == "assistant.open" && m_dockUI->dockWidget()->isHidden()) {
+            onToggleChatbot();
+        } else if (action == "assistant.close" && !m_dockUI->dockWidget()->isHidden()) {
+            onToggleChatbot();
+        }
     });
     
     m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
@@ -203,20 +227,35 @@ void AIAssistantPlugin::onSendChatMessage() {
     }
     m_dockUI->attachmentPreviewArea()->hide();
     
+    bool isAgentMode = m_dockUI->btnToggleAgentMode()->isChecked();
+    qDebug() << "[AIAssistantPlugin] Mode đang sử dụng:" << (isAgentMode ? "Agent Model" : "Chat Model") << "| Nội dung:" << tx;
+
     // Get selected sessions (allow multi-select)
     QList<QListWidgetItem*> selectedItems = m_dockUI->sessionListWidget()->selectedItems();
     if (selectedItems.isEmpty()) {
         // If no selection, send to current session
-        m_aiAssistant->sendMessage(tx, atts);
+        if (isAgentMode) {
+            m_aiAssistant->executeAgentTask(m_aiAssistant->currentSessionId(), tx);
+        } else {
+            m_aiAssistant->sendMessage(tx, atts);
+        }
     } else if (selectedItems.size() == 1) {
         // Single selection - send to that session
         QString sessionId = selectedItems[0]->data(Qt::UserRole).toString();
-        m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
+        if (isAgentMode) {
+            m_aiAssistant->executeAgentTask(sessionId, tx);
+        } else {
+            m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
+        }
     } else {
         // Multiple selections - send the same message to all selected sessions
         for (QListWidgetItem* item : selectedItems) {
             QString sessionId = item->data(Qt::UserRole).toString();
-            m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
+            if (isAgentMode) {
+                m_aiAssistant->executeAgentTask(sessionId, tx);
+            } else {
+                m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
+            }
         }
     }
     
@@ -247,7 +286,11 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         QString path = url.path();
         if (path.startsWith("retry:")) {
             int msgIndex = path.mid(6).toInt();
-            m_aiAssistant->retryMessage(m_aiAssistant->currentSessionId(), msgIndex);
+            if (m_dockUI && m_dockUI->btnToggleAgentMode()->isChecked()) {
+                m_aiAssistant->retryAgentTask(m_aiAssistant->currentSessionId(), msgIndex);
+            } else {
+                m_aiAssistant->retryMessage(m_aiAssistant->currentSessionId(), msgIndex);
+            }
         } else if (path.startsWith("edit:")) {
             int msgIndex = path.mid(5).toInt();
             auto history = m_aiAssistant->getHistory();
@@ -262,6 +305,26 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
                     m_aiAssistant->editMessage(m_aiAssistant->currentSessionId(), msgIndex, newText);
                 }
             }
+        }
+        return;
+    }
+
+    if (url.scheme() == "agent") {
+        QString path = url.path();
+        if (path.startsWith("approve:")) {
+            QString actionId = path.mid(8);
+            if (m_submittedAgentActions.contains(actionId)) return;
+            if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("ai.agent_approve_title"),
+                                            m_ctx->translate("ai.agent_approve_confirm"))) return;
+            m_submittedAgentActions.insert(actionId);
+            m_aiAssistant->approveAgentAction(m_aiAssistant->currentSessionId(), actionId);
+        } else if (path.startsWith("reject:")) {
+            QString actionId = path.mid(7);
+            if (m_submittedAgentActions.contains(actionId)) return;
+            if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("ai.agent_reject_title"),
+                                            m_ctx->translate("ai.agent_reject_confirm"))) return;
+            m_submittedAgentActions.insert(actionId);
+            m_aiAssistant->rejectAgentAction(m_aiAssistant->currentSessionId(), actionId);
         }
         return;
     }

@@ -25,8 +25,14 @@ public:
     void sendMessage(const QString &text, const QStringList &attachments = QStringList()) override;
     void sendMessageToSession(const QString &sessionId, const QString &text, const QStringList &attachments = QStringList()) override;
     void retryMessage(const QString &sessionId, int msgIndex) override;
+    void retryAgentTask(const QString &sessionId, int msgIndex) override;
     void editMessage(const QString &sessionId, int msgIndex, const QString &newText) override;
     void switchModel(int index) override;
+
+    // Agent mode
+    void executeAgentTask(const QString &sessionId, const QString &task) override;
+    void approveAgentAction(const QString &sessionId, const QString &actionId) override;
+    void rejectAgentAction(const QString &sessionId, const QString &actionId) override;
 
     // Session management
     void newChat() override;                              // Create new session (keep old)
@@ -55,6 +61,8 @@ private:
         QString sessionId;
         QJsonObject payload;
         int retryCount = 0;
+        bool isAgent = false;
+        bool isApproval = false;
     };
 
     QProcess *aiServerProcess;

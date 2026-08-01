@@ -52,6 +52,15 @@ void SendMailPlugin::initialize(IAppContext *context)
             label->setText(m_ctx->translate("mail.menu"));
         }
     });
+    connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
+            [this](const QString &action, const QVariantMap &) {
+        if (!m_dockUI) return;
+        if (action == "mail.close" && !m_dockUI->dockWidget()->isHidden()) {
+            m_dockUI->dockWidget()->hide();
+        } else if (action == "mail.settings") {
+            m_dockUI->showSettingsDialog();
+        }
+    });
 }
 
 void SendMailPlugin::cleanup()

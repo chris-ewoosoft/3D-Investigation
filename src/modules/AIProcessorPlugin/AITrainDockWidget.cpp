@@ -11,6 +11,7 @@
 #include <QDialog>
 #include <QCheckBox>
 #include <QDialogButtonBox>
+#include <QTimer>
 
 AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     : QDockWidget("🚀 AI Training", parent), m_ctx(ctx) 
@@ -90,7 +91,7 @@ AITrainDockWidget::~AITrainDockWidget() {
     }
 }
 
-void AITrainDockWidget::startTraining() {
+void AITrainDockWidget::startTraining(bool autoConfirm) {
     show();
     if (trainProcess->state() == QProcess::NotRunning) {
         QString scriptPath = AppConfig::instance().aiTrainingDir() + "/TrainModel.py";
@@ -122,11 +123,14 @@ void AITrainDockWidget::startTraining() {
         connect(btnBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         layout->addWidget(btnBox);
         
+        if (autoConfirm) {
+            QTimer::singleShot(0, &dialog, &QDialog::accept);
+        }
         if (dialog.exec() != QDialog::Accepted) {
             return;
         }
 
-        if (modelExists) {
+        if (modelExists && !autoConfirm) {
             if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
                 return;
             }

@@ -80,6 +80,26 @@ void UserAuthPlugin::initialize(IAppContext* context) {
     // Connect SignalBus so we retranslate whenever language changes
     connect(m_context->signalBus(), &SignalBus::languageChanged,
             this, &UserAuthPlugin::onLanguageChanged);
+    connect(m_context->signalBus(), &SignalBus::agentUiActionRequested, this,
+            [this](const QString &action, const QVariantMap &parameters) {
+        if (action == "language.change") {
+            const QString language = parameters.value("language").toString();
+            if (language == "vi" || language == "en") {
+                m_context->setLanguage(language);
+                saveUserPref("language", language);
+            }
+        } else if (action == "admin.settings") {
+            onOpenSettings();
+        } else if (action == "admin.change_avatar") {
+            onChangeAvatar();
+        } else if (action == "admin.change_password") {
+            onChangePassword();
+        } else if (action == "admin.logout") {
+            onLogout();
+        } else if (action == "help.about") {
+            onAbout();
+        }
+    });
 }
 
 void UserAuthPlugin::cleanup() {

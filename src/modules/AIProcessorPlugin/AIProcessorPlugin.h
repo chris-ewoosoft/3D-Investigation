@@ -79,6 +79,7 @@ private:
 
     VideoTrackerThread* m_trackerThread = nullptr;
     bool m_trackingPaused = false;
+    QString m_agentVideoPath;
 };
 
 #endif // AI_PROCESSOR_PLUGIN_H

@@ -38,6 +38,7 @@
 #include <QListWidgetItem>
 #include <QStyle>
 #include "ReconstructionRibbonUI.h"
+#include "AppConfig.h"
 
 void ReconstructionPlugin::initialize(IAppContext* context) {
     m_ctx = context;
@@ -69,6 +70,23 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
 
     connect(m_ctx->signalBus(), &SignalBus::stateChanged, this, &ReconstructionPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ReconstructionPlugin::updateActions);
+    connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
+            [this](const QString &action, const QVariantMap &) {
+        const QString sampleFolder = QDir(AppConfig::instance().projectRootDir())
+                                         .filePath("3DRecontruction/templeRing");
+        if (action == "reconstruction.load_images") {
+            m_agentImageFolder = sampleFolder;
+            onLoadMultipleImages();
+        } else if (action == "reconstruction.start_reconstruction") {
+            m_agentImageFolder = sampleFolder;
+            onLoadMultipleImages();
+            onRunReconstruction();
+        } else if (action == "reconstruction.view_3d_model") {
+            onTogglePointCloud(true);
+        } else if (action == "reconstruction.close_3d_model") {
+            onHidePointCloud();
+        }
+    });
 
     updateActions();
 }
@@ -80,8 +98,13 @@ void ReconstructionPlugin::cleanup() {
     }
 }
 void ReconstructionPlugin::onLoadMultipleImages() {
-    QString lastUsedPath = m_ctx->settings()->getLastUsedPath("recon");
-    QString folderPath = QFileDialog::getExistingDirectory(m_ctx->mainWindow(), m_ctx->translate("file.select_recon"), lastUsedPath);
+    QString folderPath = m_agentImageFolder;
+    const bool useAgentFolder = !folderPath.isEmpty();
+    m_agentImageFolder.clear();
+    if (!useAgentFolder) {
+        const QString lastUsedPath = m_ctx->settings()->getLastUsedPath("recon");
+        folderPath = QFileDialog::getExistingDirectory(m_ctx->mainWindow(), m_ctx->translate("file.select_recon"), lastUsedPath);
+    }
     
     if (folderPath.isEmpty()) {
         return;
@@ -162,7 +185,7 @@ void ReconstructionPlugin::onLoadMultipleImages() {
     }
 
     // 2. If not found, ask user
-    if (paramsPath.isEmpty()) {
+    if (paramsPath.isEmpty() && !useAgentFolder) {
         paramsPath = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("file.select_camera"), folder, "Text Files (*.txt)");
     }
 
