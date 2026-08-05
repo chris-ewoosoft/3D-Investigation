@@ -43,6 +43,7 @@ public:
     virtual QList<QJsonObject> getHistory() const = 0;
     virtual bool isThinking() const = 0;
     virtual bool isSessionThinking(const QString &sessionId) const = 0;
+    virtual int sessionThinkingInsertIndex(const QString &sessionId) const = 0;
     virtual bool isServerRunning() const = 0;
 
     // Agent mode

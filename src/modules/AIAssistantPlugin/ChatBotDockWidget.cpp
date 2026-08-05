@@ -163,6 +163,7 @@ QWidget* ChatBotDockWidget::createInputRow(QWidget* parent) {
     m_btnToggleAgentMode->setObjectName("modernControlBtn");
     m_btnToggleAgentMode->setFixedSize(40, 40);
     m_btnToggleAgentMode->setCheckable(true);
+    m_btnToggleAgentMode->setChecked(true);
     m_btnToggleAgentMode->setToolTip(m_ctx->translate("ai.agent_mode"));
 
     il->addWidget(m_btnAttach);

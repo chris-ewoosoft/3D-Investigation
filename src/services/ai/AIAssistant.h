@@ -46,6 +46,7 @@ public:
     QList<QJsonObject> getHistory() const override;
     bool isThinking() const override { return m_isThinking; }
     bool isSessionThinking(const QString &sessionId) const override;
+    int sessionThinkingInsertIndex(const QString &sessionId) const override;
     bool isServerRunning() const override { return aiServerProcess->state() != QProcess::NotRunning; }
 
 // Signals are declared in IAIAssistantService
@@ -63,6 +64,7 @@ private:
         int retryCount = 0;
         bool isAgent = false;
         bool isApproval = false;
+        int insertAfterIndex = -1;
     };
 
     QProcess *aiServerProcess;
@@ -82,9 +84,9 @@ private:
     bool hasPendingRequestForSession(const QString &sessionId) const;
     QJsonObject buildCompletionPayload(const QList<QJsonObject> &messages) const;
     bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
-    void appendAssistantMessage(const QString &sessionId, const QString &content);
+    void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
     void startServerProcess(int modelIndex);
-    void enqueueCompletionRequest(const QString &sessionId, const QJsonObject &payload);
+    void enqueueCompletionRequest(const QString &sessionId, const QJsonObject &payload, int insertAfterIndex = -1);
     void processNextQueuedRequest();
     void saveAllSessions();
     void loadAllSessions();

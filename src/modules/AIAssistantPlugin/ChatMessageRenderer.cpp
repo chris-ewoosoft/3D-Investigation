@@ -64,7 +64,7 @@ QString formatToolResult(const QString& toolName, const QJsonObject& result, IAp
 }
 }
 
-void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* ctx, const QList<QJsonObject>& history, bool isThinking) {
+void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* ctx, const QList<QJsonObject>& history, bool isThinking, int thinkingInsertIndex) {
     if (!browser) return;
     
     QString h = ChatTemplates::CSS;
@@ -86,9 +86,13 @@ void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* 
         const auto &m = history[i];
         h += buildMessageHtml(m["role"].toString(), m["content"].toString(), m["attachments"].toArray(),
                               m["timestamp"].toString(), i, ctx, resolvedActions);
+        
+        if (isThinking && thinkingInsertIndex == i) {
+            h += QString("<div class='typing'>%1</div>").arg(ctx->translate("ai.thinking"));
+        }
     }
     
-    if (isThinking) {
+    if (isThinking && (thinkingInsertIndex == -1 || thinkingInsertIndex >= history.size())) {
         h += QString("<div class='typing'>%1</div>").arg(ctx->translate("ai.thinking"));
     }
     

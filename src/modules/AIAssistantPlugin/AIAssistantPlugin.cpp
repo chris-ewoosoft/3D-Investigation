@@ -546,7 +546,8 @@ void AIAssistantPlugin::updateChatUI() {
     m_dockUI->chatHistory()->clear(); 
     
     auto history = m_aiAssistant->getHistory();
-    ChatMessageRenderer::renderChatHistory(m_dockUI->chatHistory(), m_ctx, history, currentSessionThinking);
+    const int thinkingInsertIndex = m_aiAssistant->sessionThinkingInsertIndex(m_aiAssistant->currentSessionId());
+    ChatMessageRenderer::renderChatHistory(m_dockUI->chatHistory(), m_ctx, history, currentSessionThinking, thinkingInsertIndex);
 }
 
 void AIAssistantPlugin::onProgressStopped() {

@@ -57,6 +57,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+try:
+    from LangGraphAgent import LocalAgentGraph
+    LANGGRAPH_AVAILABLE = True
+    LANGGRAPH_IMPORT_ERROR = ""
+except ImportError as error:
+    LocalAgentGraph = None
+    LANGGRAPH_AVAILABLE = False
+    LANGGRAPH_IMPORT_ERROR = str(error)
+
 if sys.platform == "win32":
     ctypes.windll.kernel32.SetConsoleOutputCP(65001)
     ctypes.windll.kernel32.SetConsoleCP(65001)
@@ -71,6 +80,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+USE_LANGGRAPH_AGENT = os.environ.get("USE_LANGGRAPH_AGENT", "1") != "0"
 
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -781,14 +791,14 @@ def build_index_from_scratch(chunks: list, embed_model):
     final_embeddings = [None] * len(chunks)
     
     if texts:
-        print(f"\n       Encoding {len(texts)} text chunks", end="", flush=True)
+        print(f"Encoding {len(texts)} text chunks", end="", flush=True)
         text_embs = embed_model.encode(texts, show_progress_bar=False, normalize_embeddings=True, batch_size=64)
         for idx, emb in zip(text_indices, text_embs):
             final_embeddings[idx] = emb
             
     if image_items:
         image_batch_size = 4
-        print(f"\n       Encoding {len(image_items)} image chunks", end="", flush=True)
+        print(f"Encoding {len(image_items)} image chunks", end="", flush=True)
         for start in range(0, len(image_items), image_batch_size):
             batch_items = image_items[start:start + image_batch_size]
             batch_indices = []
@@ -1469,9 +1479,8 @@ async def list_models():
 # ─── 14b. Agent Tools & Execution ─────────────────────────────────────────────
 # [v2.3] AI Agent: Tool-calling loop cho phép LLM tự thực thi các task trên project
 
-import subprocess
 import fnmatch
-from typing import Any
+import subprocess
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
@@ -1568,7 +1577,7 @@ AGENT_TOOLS = [
     {
         "name": "application_action",
         "description": "Run a 3D-Reconstruction desktop UI action. Use this instead of source-code tools when the user asks to operate the application. "
-                       "Supported actions: viewer.load_2d, viewer.load_3d, viewer.load_dicom, reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model, ai.run_detection, ai.run_segmentation, ai.video_tracking, ai.hide_results, ai.training_model, ai.view_training_charts, assistant.open, assistant.close, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout. "
+                       "Supported actions: viewer.load_2d, viewer.load_3d, viewer.load_dicom, reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model, ai.run_detection, ai.run_segmentation, ai.video_tracking, ai.hide_results, ai.training_model, ai.view_training_charts, assistant.open, assistant.close, mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout. "
                        "Use language.change with language='vi' or language='en'. The desktop client performs the action using its configured sample paths.",
         "parameters": {
             "action": {"type": "string", "description": "One supported desktop action name", "required": True},
@@ -1767,7 +1776,7 @@ def tool_search_text(params: dict) -> dict:
                                 })
                                 if len(results) >= max_results:
                                     return {"query": query, "count": len(results), "truncated": True, "results": results}
-                except Exception:
+                except (OSError, UnicodeDecodeError):
                     continue
 
         return {"query": query, "count": len(results), "truncated": False, "results": results}
@@ -1924,9 +1933,9 @@ def tool_get_project_status(params: dict) -> dict:
                 source_counts[ext] = source_counts.get(ext, 0) + 1
     try:
         branch = subprocess.run(["git", "branch", "--show-current"], cwd=PROJECT_DIR,
-                                capture_output=True, text=True, timeout=5).stdout.strip()
+                                capture_output=True, text=True, timeout=5, check=False).stdout.strip()
         changed = subprocess.run(["git", "status", "--short"], cwd=PROJECT_DIR,
-                                 capture_output=True, text=True, timeout=5).stdout.splitlines()
+                                 capture_output=True, text=True, timeout=5, check=False).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         branch, changed = "", []
     return {"project_root": PROJECT_DIR, "git_branch": branch, "changed_files": changed[:100],
@@ -1960,7 +1969,7 @@ _DESKTOP_ACTIONS = {
     "reconstruction.view_3d_model", "reconstruction.close_3d_model",
     "ai.run_detection", "ai.run_segmentation", "ai.video_tracking",
     "ai.hide_results", "ai.training_model", "ai.view_training_charts",
-    "assistant.open", "assistant.close", "mail.close", "mail.settings",
+    "assistant.open", "assistant.close", "mail.open", "mail.close", "mail.settings",
     "help.about", "language.change", "admin.settings", "admin.change_avatar",
     "admin.change_password", "admin.logout",
 }
@@ -1983,6 +1992,8 @@ _DESKTOP_ACTION_ALIASES = {
     "ai.tracking": "ai.video_tracking",
     "language.set": "language.change",
     "language.changed": "language.change",
+    "mail.inbox": "mail.open",
+    "mail.open_inbox": "mail.open",
 }
 
 
@@ -2000,7 +2011,28 @@ def _normalise_agent_task(text: str) -> str:
     normalized = unicodedata.normalize("NFD", text.casefold())
     normalized = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
     normalized = normalized.replace("đ", "d")
+    # Vietnamese đ is not decomposed by NFD, so normalize it explicitly.
+    normalized = normalized.replace("đ", "d")
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+# Từ khóa gợi ý đây là lệnh điều khiển UI — dùng để (a) tắt bơm RAG context
+# không liên quan khi request rơi xuống LangGraph, và (b) làm tín hiệu cho
+# bước self-correction trong _run_langgraph_agent khi model bỏ lỡ tool_call
+# ở lượt suy luận đầu tiên. Đây KHÔNG phải một fast-path bypass — quyết định
+# gọi tool cuối cùng vẫn hoàn toàn do model đưa ra qua LangGraph.
+_UI_ACTION_HINT_WORDS = (
+    "ngon ngu", "doi ngon ngu", "sang tieng viet", "sang tieng anh",
+    "sang english", "language", "mail", "avatar", "mat khau", "password",
+    "dang xuat", "logout", "reconstruction", "tai tao", "detection",
+    "nhan dien", "segmentation", "phan doan", "tracking", "theo doi video",
+    "dicom", "3d model", "training", "huan luyen", "bieu do", "gioi thieu",
+    "cai dat", "assistant",
+)
+
+
+def _looks_like_ui_action(text: str) -> bool:
+    return any(hint in text for hint in _UI_ACTION_HINT_WORDS)
 
 
 def _match_desktop_action(task: str) -> dict | None:
@@ -2019,6 +2051,9 @@ def _match_desktop_action(task: str) -> dict | None:
         return {"action": "admin.logout"}
     if "mail settings" in text or "cai dat mail" in text:
         return {"action": "mail.settings"}
+    if ("open mail" in text or "open email" in text or "mo mail" in text
+            or "mo email" in text or "open inbox" in text or "mo inbox" in text):
+        return {"action": "mail.open"}
     if "close mail" in text or "dong mail" in text:
         return {"action": "mail.close"}
     if "open ai assistant" in text or "mo ai assistant" in text:
@@ -2192,6 +2227,7 @@ def _execute_approved_run_command(params: dict) -> dict:
             timeout=timeout,
             encoding="utf-8",
             errors="replace",
+            check=False,
         )
         stdout = proc.stdout[:5000] if proc.stdout else ""
         stderr = proc.stderr[:2000] if proc.stderr else ""
@@ -2249,7 +2285,15 @@ Khi cần sử dụng tool, trả lời CHÍNH XÁC theo format JSON sau (KHÔNG
 9. Nếu task quá lớn hoặc nguy hiểm, hãy giải thích và hỏi lại trước khi thực hiện.
 10. Scope: chỉ làm việc trong thư mục project — không truy cập file ngoài project.
 
-11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action. Do not substitute source-code tools. Call it once for each requested UI action.
+11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action. Do not substitute source-code tools. Call it once for each requested UI action. This overrides rule 3 — even if you already have relevant text in context (including RELEVANT DOCUMENTATION below), a request to change the app language is a UI action, NOT a request to translate that text. Never respond with a translated passage when the user is asking to switch the interface language.
+
+## EXAMPLE:
+
+User: đổi project sang tiếng việt giúp tôi
+Assistant:
+```tool_call
+{{"tool": "application_action", "params": {{"action": "language.change", "language": "vi"}}}}
+```
 
 ## PROJECT INFORMATION:
 - Project root: {_safe_relpath(PROJECT_DIR, PROJECT_DIR)} (thư mục gốc)
@@ -2293,6 +2337,143 @@ def _parse_tool_call(response_text: str) -> tuple:
     return None, None
 
 
+def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
+                         temperature: float, language: str, request_started: float,
+                         initial_messages: list[dict[str, str]] | None = None,
+                         initial_steps: list[dict] | None = None,
+                         initial_iteration: int = 0) -> dict:
+    """Run the tool loop through LangGraph while preserving the Qt API response."""
+    if not LANGGRAPH_AVAILABLE or LocalAgentGraph is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LangGraph is required for Agent mode. Run: pip install -r AITraining/requirements.txt",
+        )
+
+    def complete(messages: list[dict[str, str]], current_temperature: float) -> str:
+        total_chars = sum(len(message.get("content", "")) for message in messages)
+        estimated_tokens = int(total_chars / CHARS_PER_TOKEN)
+        if estimated_tokens >= LLM_N_CTX - 512:
+            return "Context quá dài, dừng Agent."
+        max_tokens = min(2048, max(512, LLM_N_CTX - estimated_tokens - 400))
+
+        def call(msgs: list[dict[str, str]]) -> str:
+            with llm_lock:
+                response_iter = llm.create_chat_completion(
+                    messages=msgs,
+                    max_tokens=max_tokens,
+                    temperature=current_temperature,
+                    repeat_penalty=1.1,
+                    stream=True,
+                )
+                text = ""
+                for chunk in response_iter:
+                    delta = chunk["choices"][0].get("delta", {})
+                    if "content" in delta:
+                        text += delta["content"]
+                return text
+
+        logger.info("LangGraph gọi Model (messages: %d, estimated_tokens: %d)", len(messages), estimated_tokens)
+        answer = call(messages)
+        logger.info("LangGraph nhận phản hồi từ Model (length: %d chars)", len(answer))
+
+        # [FIX-13] Self-correction NGAY TRONG vòng lặp LangGraph: ở lượt suy
+        # luận đầu tiên (messages chỉ gồm system+user, chưa có tool nào chạy),
+        # nếu model trả lời bằng văn bản thường (không phát ```tool_call```)
+        # trong khi câu hỏi của người dùng mang dáng dấp một lệnh điều khiển
+        # UI (rule #11 trong system prompt), cho model MỘT cơ hội tự sửa bằng
+        # một system reminder nhấn mạnh rule #11, trước khi chấp nhận đó là
+        # final_answer. Quyết định gọi tool cuối cùng vẫn hoàn toàn do model
+        # đưa ra qua đúng cơ chế parse/execute của LangGraph — không bypass.
+        if len(messages) == 2:
+            tool_name, _ = _parse_tool_call(answer)
+            user_task = messages[-1].get("content", "")
+            if tool_name is None and _looks_like_ui_action(_normalise_agent_task(user_task)):
+                logger.info("LangGraph: chưa thấy tool_call ở lượt đầu nhưng task giống lệnh UI — nhắc lại rule #11 và thử lại")
+                reminder = {
+                    "role": "system",
+                    "content": ("Nhắc lại RULE #11: đây là một yêu cầu điều khiển ứng dụng (application UI "
+                                "request). Bạn PHẢI trả lời CHÍNH XÁC bằng một khối ```tool_call``` gọi "
+                                "application_action. KHÔNG được trả lời bằng văn bản thường, KHÔNG được dịch "
+                                "hay diễn giải bất kỳ nội dung nào — chỉ trả về đúng JSON tool_call theo format "
+                                "đã hướng dẫn."),
+                }
+                retry_answer = call([*messages, reminder])
+                logger.info("LangGraph nhận phản hồi từ Model sau khi nhắc lại (length: %d chars)", len(retry_answer))
+                retry_tool_name, _ = _parse_tool_call(retry_answer)
+                if retry_tool_name is not None:
+                    logger.info("LangGraph: model đã tự sửa và phát tool_call ở lần thử lại")
+                    return retry_answer
+                logger.info("LangGraph: model vẫn không phát tool_call sau khi nhắc — giữ nguyên câu trả lời gốc")
+
+        return answer
+
+    def execute(tool_name: str, params: dict) -> dict:
+        if tool_name == "application_action":
+            canonical_params = _canonical_desktop_action(params)
+            if canonical_params is None:
+                return {"error": f"Unsupported desktop action: {params.get('action', '')}"}
+            params.clear()
+            params.update(canonical_params)
+        executor = _TOOL_EXECUTORS.get(tool_name)
+        if executor is None:
+            return {"error": f"Tool không tồn tại: {tool_name}"}
+        return executor(params)
+
+    logger.info("Khởi động LangGraph vòng lặp thực thi tool (session: %s)", session_id)
+    graph = LocalAgentGraph(
+        complete=complete,      # Gọi model để sinh ra câu trả lời
+        parse=_parse_tool_call, # Parse tool_call ra khỏi câu trả lời
+        execute=execute,        # Thực thi tool
+        needs_approval=lambda tool_name: tool_name in _TOOLS_REQUIRING_APPROVAL, # Kiểm tra xem có cần approval không
+        max_iterations=_AGENT_MAX_ITERATIONS, # Số lần lặp tối đa
+    )
+    messages = initial_messages or [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task},
+    ]
+    state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration)
+    pending_status = "pending_approval" if state.get("pending_tool") else "completed"
+    logger.info("LangGraph hoàn thành vòng lặp execution (iteration: %d, status: %s)", state.get("iteration", 0), pending_status)
+    steps = state["steps"]
+    pending = state.get("pending_tool")
+    if pending:
+        action_id = _generate_action_id()
+        with _pending_lock:
+            _pending_actions[action_id] = {
+                "tool": pending["tool"],
+                "params": pending["params"],
+                "session_id": session_id,
+                "task": task,
+                "messages": state["messages"],
+                "steps": steps,
+                "iteration": state["iteration"],
+                "temperature": temperature,
+                "language": language,
+                "created_at": time.time(),
+            }
+            _save_pending_actions()
+        steps.append({
+            "type": "pending_approval",
+            "action_id": action_id,
+            "tool": pending["tool"],
+            "params": pending["params"],
+            "description": pending["params"].get("description", f"Thực thi {pending['tool']}"),
+        })
+        return {
+            "status": "pending_approval", "session_id": session_id,
+            "steps": steps, "action_id": action_id,
+            "total_ms": round((time.monotonic() - request_started) * 1000),
+        }
+
+    if not any(step["type"] == "final_answer" for step in steps):
+        steps.append({"type": "final_answer", "content": "Agent đã kết thúc mà chưa có kết luận."})
+    return {
+        "status": "completed", "session_id": session_id, "steps": steps,
+        "iterations": state["iteration"],
+        "total_ms": round((time.monotonic() - request_started) * 1000),
+    }
+
+
 # ── Pydantic models for Agent ─────────────────────────────────────────────────
 
 class AgentExecuteRequest(BaseModel):
@@ -2325,6 +2506,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     req_start = time.monotonic()
     task = request.task
     session_id = request.session_id or "agent_default"
+    use_langgraph = USE_LANGGRAPH_AGENT and LANGGRAPH_AVAILABLE
     logger.info("[MODE: AGENT] Task from %s: %s…", http_req.client.host, task[:80].replace("\n", " "))
 
     # Fixed UI commands do not need model reasoning. Handling them here makes
@@ -2352,13 +2534,21 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # Build initial messages
     system_prompt = _build_agent_system_prompt(request.language)
 
-    # Add RAG context if available
-    if ENABLE_RAG and knowledge_chunks:
+    # [FIX-12] Add RAG context if available — nhưng bỏ qua khi task có vẻ là
+    # một lệnh điều khiển UI mà fast-path (_match_desktop_action) không nhận
+    # diện được trọn vẹn. Nhồi tài liệu RAG không liên quan vào những câu như
+    # "đổi project sang tiếng việt" từng khiến model dịch nhầm nội dung RAG
+    # thay vì gọi application_action.
+    if ENABLE_RAG and knowledge_chunks and not _looks_like_ui_action(_normalise_agent_task(task)):
         doc_ctx, code_ctx, _ = get_context(task)
         if doc_ctx:
             system_prompt += f"\n\n## RELEVANT DOCUMENTATION:\n{doc_ctx[:3000]}"
         if code_ctx:
             system_prompt += f"\n\n## RELEVANT CODE:\n{code_ctx[:3000]}"
+
+    if use_langgraph:
+        return _run_langgraph_agent(system_prompt, task, session_id,
+                                    request.temperature, request.language, req_start)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -2593,6 +2783,20 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         "role": "user",
         "content": f"Tool `{tool_name}` was approved and executed. Result:\n```json\n{result_text}\n```\n\nContinue with your analysis or provide final answer.",
     })
+
+    if USE_LANGGRAPH_AGENT and LANGGRAPH_AVAILABLE:
+        system_prompt = messages[0]["content"] if messages and messages[0].get("role") == "system" else _build_agent_system_prompt(action.get("language", "vi"))
+        return _run_langgraph_agent(
+            system_prompt=system_prompt,
+            task=action["task"],
+            session_id=action["session_id"],
+            temperature=action["temperature"],
+            language=action.get("language", "vi"),
+            request_started=time.monotonic(),
+            initial_messages=messages,
+            initial_steps=steps,
+            initial_iteration=action["iteration"],
+        )
 
     # Continue the agent loop
     iteration = action["iteration"]
