@@ -37,6 +37,7 @@ import ctypes
 import gc
 import glob
 import hashlib
+import io
 import json
 import logging
 import logging.handlers
@@ -66,14 +67,29 @@ except ImportError as error:
     LANGGRAPH_AVAILABLE = False
     LANGGRAPH_IMPORT_ERROR = str(error)
 
+# Fix UTF-8 encoding cho Qt Creator (piped stdout — SetConsoleOutputCP không có hiệu lực)
+os.environ["PYTHONUTF8"] = "1"
 if sys.platform == "win32":
-    ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-    ctypes.windll.kernel32.SetConsoleCP(65001)
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
 
-if sys.stdout and hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if sys.stderr and hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+def _force_utf8_stream(stream):
+    """Bọc stream binary buffer bằng UTF-8 TextIOWrapper (hoạt động cả khi Qt Creator pipe stdout)."""
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+            return stream
+        if hasattr(stream, "buffer"):
+            return io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+    return stream
+
+sys.stdout = _force_utf8_stream(sys.stdout)
+sys.stderr = _force_utf8_stream(sys.stderr)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -160,6 +176,12 @@ def setup_logging():
     ch = logging.StreamHandler(sys.stdout)
     ch.setFormatter(fmt_console)
     ch.setLevel(logging.INFO)
+    # Đảm bảo handler emit UTF-8 ngay cả khi stream bị override sau này
+    if hasattr(ch, "stream") and hasattr(ch.stream, "reconfigure"):
+        try:
+            ch.stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     root.addHandler(ch)
 
     fh = logging.handlers.RotatingFileHandler(
