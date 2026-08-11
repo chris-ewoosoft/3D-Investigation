@@ -62,8 +62,13 @@ namespace AppConstants {
             return QStringLiteral("http://127.0.0.1:%1/v1/chat/completions").arg(SERVER_PORT);
         }
 
+        inline QString adminEndpoint(const QString &path) {
+            return QStringLiteral("http://127.0.0.1:%1/admin/%2").arg(SERVER_PORT).arg(path);
+        }
+
         inline QString chatbotScript() {
-            return QStringLiteral("StartChatbotServer.py");
+            return QStringLiteral("server_manager.py");
+            // return QStringLiteral("StartChatbotServer.py");
         }
     }
 

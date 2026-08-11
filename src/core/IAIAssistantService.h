@@ -30,6 +30,9 @@ public:
     virtual void retryAgentTask(const QString &sessionId, int msgIndex) = 0;
     virtual void editMessage(const QString &sessionId, int msgIndex, const QString &newText) = 0;
     virtual void switchModel(int index) = 0;
+    virtual void restartModel() = 0;
+    virtual void restartRAG() = 0;
+    virtual void restartAgent() = 0;
 
     // Session management
     virtual void newChat() = 0;

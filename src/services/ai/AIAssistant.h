@@ -28,6 +28,9 @@ public:
     void retryAgentTask(const QString &sessionId, int msgIndex) override;
     void editMessage(const QString &sessionId, int msgIndex, const QString &newText) override;
     void switchModel(int index) override;
+    void restartModel() override;
+    void restartRAG() override;
+    void restartAgent() override;
 
     // Agent mode
     void executeAgentTask(const QString &sessionId, const QString &task) override;
@@ -47,7 +50,7 @@ public:
     bool isThinking() const override { return m_isThinking; }
     bool isSessionThinking(const QString &sessionId) const override;
     int sessionThinkingInsertIndex(const QString &sessionId) const override;
-    bool isServerRunning() const override { return aiServerProcess->state() != QProcess::NotRunning; }
+    bool isServerRunning() const override { return m_serverReadyEmitted; }
 
 // Signals are declared in IAIAssistantService
 

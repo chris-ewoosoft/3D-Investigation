@@ -60,7 +60,7 @@ void AIAssistant::startServerProcess(int modelIndex) {
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
         env.insert("PYTHONUNBUFFERED", "1");
         env.insert("PYTHONIOENCODING", "utf-8");
-        env.insert("APP_DATA_DIR", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/3D-Reconstruction");
+        env.insert("APP_DATA_DIR", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
         aiServerProcess->setProcessEnvironment(env);
         
         aiServerProcess->setWorkingDirectory(AppConfig::instance().aiTrainingDir());
@@ -129,6 +129,72 @@ void AIAssistant::stopServer() {
 
 void AIAssistant::switchModel(int index) {
     startServer(index);
+}
+
+void AIAssistant::restartModel() {
+    if (!isServerRunning()) {
+        emit errorOccurred(LM_TR("ai.server_not_running"));
+        return;
+    }
+    emit serverStatusChanged(tr("Đang tải lại Model..."));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-model"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(600000); // 10 min (model load có thể lâu)
+    QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            const auto doc = QJsonDocument::fromJson(reply->readAll());
+            const QString msg = doc.object().value("message").toString("Model reloaded");
+            emit serverStatusChanged(tr("✅ ") + msg);
+        } else {
+            emit errorOccurred(tr("Restart Model thất bại: ") + reply->errorString());
+        }
+    });
+}
+
+void AIAssistant::restartRAG() {
+    if (!isServerRunning()) {
+        emit errorOccurred(LM_TR("ai.server_not_running"));
+        return;
+    }
+    emit serverStatusChanged(tr("Đang tải lại RAG index..."));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-rag"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(600000); // RAG rebuild can take several minutes on a large project.
+    QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            const auto doc = QJsonDocument::fromJson(reply->readAll());
+            const QString msg = doc.object().value("message").toString("RAG reloaded");
+            emit serverStatusChanged(tr("✅ ") + msg);
+        } else {
+            emit errorOccurred(tr("Restart RAG thất bại: ") + reply->errorString());
+        }
+    });
+}
+
+void AIAssistant::restartAgent() {
+    if (!isServerRunning()) {
+        emit errorOccurred(LM_TR("ai.server_not_running"));
+        return;
+    }
+    emit serverStatusChanged(tr("Đang reset Agent..."));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-agent"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(15000);
+    QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() == QNetworkReply::NoError) {
+            const auto doc = QJsonDocument::fromJson(reply->readAll());
+            const QString msg = doc.object().value("message").toString("Agent reset");
+            emit serverStatusChanged(tr("✅ ") + msg);
+        } else {
+            emit errorOccurred(tr("Restart Agent thất bại: ") + reply->errorString());
+        }
+    });
 }
 
 // ── Session management ────────────────────────────────────────────────────────

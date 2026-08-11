@@ -25,6 +25,7 @@
 #include <QApplication>
 #include <QDesktopServices>
 #include <QMenu>
+#include <QTimer>
 #include <qclipboard.h>
 
 #include "AIAssistantRibbonUI.h"
@@ -73,6 +74,32 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
     if (QWidget* panel = m_ctx->getTabPanel("tab.ai_assistant")) {
         m_ribbonUI = new AIAssistantRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnToggleAssistant(), &QToolButton::clicked, this, &AIAssistantPlugin::onToggleChatbot);
+        connect(m_ribbonUI->btnRestartModel(), &QToolButton::clicked, this, [this]() {
+            if (!m_aiAssistant) return;
+            auto *btn = m_ribbonUI->btnRestartModel();
+            btn->setEnabled(false);
+            btn->setText(m_ctx->translate("ai.reloading"));
+            m_aiAssistant->restartModel();
+            QTimer::singleShot(5000, btn, [this, btn]() {
+                btn->setEnabled(true);
+                btn->setText(m_ctx->translate("ai.restart_model"));
+            });
+        });
+        connect(m_ribbonUI->btnRestartRAG(), &QToolButton::clicked, this, [this]() {
+            if (!m_aiAssistant) return;
+            auto *btn = m_ribbonUI->btnRestartRAG();
+            btn->setEnabled(false);
+            btn->setText(m_ctx->translate("ai.reloading"));
+            m_aiAssistant->restartRAG();
+            QTimer::singleShot(5000, btn, [this, btn]() {
+                btn->setEnabled(true);
+                btn->setText(m_ctx->translate("ai.restart_rag"));
+            });
+        });
+        connect(m_ribbonUI->btnRestartAgent(), &QToolButton::clicked, this, [this]() {
+            if (!m_aiAssistant) return;
+            m_aiAssistant->restartAgent();
+        });
     }
     
     // Connect SignalBus for retranslation
@@ -93,6 +120,9 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         if (m_ribbonUI) {
             bool visible = m_dockUI && m_dockUI->dockWidget()->isVisible();
             m_ribbonUI->btnToggleAssistant()->setText(visible ? m_ctx->translate("ai.close_assistant") : m_ctx->translate("ai.open_assistant"));
+            m_ribbonUI->btnRestartModel()->setText(m_ctx->translate("ai.restart_model"));
+            m_ribbonUI->btnRestartRAG()->setText(m_ctx->translate("ai.restart_rag"));
+            m_ribbonUI->btnRestartAgent()->setText(m_ctx->translate("ai.restart_agent"));
             if (QLabel *lbl = m_ribbonUI->groupAI()->findChild<QLabel*>("groupTitleLabel")) {
                 lbl->setText(m_ctx->translate("menu.ai_assistant"));
             }

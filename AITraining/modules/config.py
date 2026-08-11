@@ -1,0 +1,269 @@
+# ruff: noqa: BLE001, S110, DTZ005, RUF012
+"""
+StartChatbotServer.py — 3D-Reconstruction AI Server v2.2
+=========================================================
+
+[v2.2] Cải tiến chất lượng RAG so với v2.1:
+  [FIX-6]  BM25 tokenizer hỗ trợ tiếng Việt — regex cũ bỏ sót TOÀN BỘ từ Việt
+  [FIX-7]  Cross-encoder re-ranking (tùy chọn) — tăng precision đáng kể
+  [FIX-8]  Embedding model đa ngôn ngữ — paraphrase-multilingual-MiniLM-L12-v2
+  [FIX-9]  Chunk nhỏ hơn (1200 chars) — embedding signal tập trung, ít nhiễu hơn
+  [FIX-10] Phát hiện finish_reason="length" — cảnh báo và tự thử lại nếu bị cắt
+  [FIX-11] Context formatting có số thứ tự + nhãn nguồn — model cite đúng hơn
+
+[v2.1] Giữ nguyên:
+  CHARS_PER_TOKEN=2.2, buffer=400 token, MAX_CONTEXT_CHARS=7500
+  Sentence-aware chunking, source dedup ≤2/file, rule #8 system prompt
+
+Cấu trúc thư mục:
+  AITraining/
+  ├── StartChatbotServer.py
+  ├── requirements.txt
+  ├── Cache/
+  │   ├── faiss_index.bin
+  │   ├── chunks.pkl
+  │   ├── bm25.pkl
+  │   └── metadata.json
+  └── logs/
+      └── server_YYYYMMDD_HHMMSS.log
+
+LƯU Ý: v2.2 đổi embedding model và chunk size → xóa Cache/ để rebuild.
+"""
+
+# ─── 0. Bootstrap ─────────────────────────────────────────────────────────────
+import ast
+import base64
+import ctypes
+import gc
+import glob
+import hashlib
+import io
+import json
+import logging
+import logging.handlers
+import os
+import pickle
+import re
+import sys
+import threading
+import time
+import unicodedata
+import warnings
+from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
+
+try:
+    from LangGraphAgent import LocalAgentGraph
+    LANGGRAPH_AVAILABLE = True
+    LANGGRAPH_IMPORT_ERROR = ""
+except ImportError as error:
+    LocalAgentGraph = None
+    LANGGRAPH_AVAILABLE = False
+    LANGGRAPH_IMPORT_ERROR = str(error)
+
+# Fix UTF-8 encoding cho Qt Creator (piped stdout — SetConsoleOutputCP không có hiệu lực)
+os.environ["PYTHONUTF8"] = "1"
+if sys.platform == "win32":
+    try:
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+def _force_utf8_stream(stream):
+    """Bọc stream binary buffer bằng UTF-8 TextIOWrapper (hoạt động cả khi Qt Creator pipe stdout)."""
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+            return stream
+        if hasattr(stream, "buffer"):
+            return io.TextIOWrapper(stream.buffer, encoding="utf-8", errors="replace", line_buffering=True)
+    except Exception:
+        pass
+    return stream
+
+sys.stdout = _force_utf8_stream(sys.stdout)
+sys.stderr = _force_utf8_stream(sys.stderr)
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+USE_LANGGRAPH_AGENT = os.environ.get("USE_LANGGRAPH_AGENT", "1") != "0"
+
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", module="keras")
+
+# ─── 1. Stdlib imports ────────────────────────────────────────────────────────
+# ─── 2. Đường dẫn ─────────────────────────────────────────────────────────────
+MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR    = os.path.abspath(os.path.join(MODULES_DIR, ".."))
+PROJECT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+APP_DATA_DIR = os.environ.get("APP_DATA_DIR", PROJECT_DIR)
+DOCS_DIR    = os.path.join(PROJECT_DIR, "Docs")
+
+
+def _existing_data_path(name: str) -> str:
+    """Use old duplicate AppData storage only while a user has not migrated it."""
+    primary = os.path.join(APP_DATA_DIR, "AITraining", name)
+    legacy = os.path.join(APP_DATA_DIR, "3D-Reconstruction", "AITraining", name)
+    if not os.path.exists(primary) and os.path.exists(legacy):
+        return legacy
+    return primary
+
+
+MODELS_DIR  = _existing_data_path("Models")
+CACHE_DIR   = _existing_data_path("Cache")
+LOGS_DIR    = os.path.join(APP_DATA_DIR, "AITraining", "logs")
+EMBED_CACHE = os.path.join(CACHE_DIR, "embed_model")
+
+for _d in (CACHE_DIR, LOGS_DIR, EMBED_CACHE, MODELS_DIR):
+    os.makedirs(_d, exist_ok=True)
+if not os.path.exists(DOCS_DIR):
+    try:
+        os.makedirs(DOCS_DIR, exist_ok=True)
+    except PermissionError:
+        pass
+
+CACHE_INDEX    = os.path.join(CACHE_DIR, "faiss_index.bin")
+CACHE_CHUNKS   = os.path.join(CACHE_DIR, "chunks.pkl")
+CACHE_BM25     = os.path.join(CACHE_DIR, "bm25.pkl")
+CACHE_METADATA = os.path.join(CACHE_DIR, "metadata.json")
+
+
+def _safe_relpath(path: str, start: str) -> str:
+    try:
+        return os.path.relpath(path, start)
+    except ValueError:
+        return os.path.abspath(path)
+
+# ─── 3. Cấu hình RAG — chỉnh tại đây ─────────────────────────────────────────
+# [FIX-8] Đổi sang model đa ngôn ngữ — hỗ trợ tiếng Việt tốt hơn all-MiniLM-L6-v2
+# Kích thước: ~470MB (so với ~80MB), nhưng độ chính xác retrieval tăng rõ rệt.
+# Nếu muốn giữ model cũ (tiết kiệm RAM/disk): đổi lại "all-MiniLM-L6-v2" hoặc "paraphrase-multilingual-MiniLM-L12-v2"
+EMBED_MODEL_NAME = "clip-ViT-B-32"
+RAG_CACHE_VERSION = 3
+
+# [FIX-7] Cross-encoder re-ranking — bật/tắt tùy tài nguyên
+# True  = kết quả chính xác hơn, latency tăng ~100-300ms/request
+# False = tắt hoàn toàn, hành vi như v2.1
+USE_RERANKER    = True
+RERANKER_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # ~80MB
+RERANKER_TOP_K  = 8    # Tăng lên 8 để lấy thêm context
+
+# [FIX-9] Chunk nhỏ hơn → embedding signal tập trung, ít nhiễu
+# 1200 thay vì 1800: mỗi chunk mang một ý chính, không pha trộn nhiều chủ đề
+# LƯU Ý: thay đổi giá trị này buộc rebuild cache
+ENABLE_VISION_LLM = os.environ.get("AI_ENABLE_VISION_LLM", "1").strip().lower() in {"1", "true", "yes", "on"}
+ENABLE_RAG      = os.environ.get("AI_ENABLE_RAG", "1").strip().lower() in {"1", "true", "yes", "on"}
+CHUNK_CHARS     = 1200
+OVERLAP_CHARS   = 300  # Tăng lên 300 để giữ liên kết tiếng Việt
+
+# v2.1 constants (giữ nguyên)
+SIMILARITY_THRESHOLD = 0.25
+MAX_CONTEXT_CHARS    = 9000 # Tăng lên 9000 để chứa đủ chi tiết tiếng Việt
+CHARS_PER_TOKEN      = 2.2   # Việt+code, tránh underestimate
+LLM_N_CTX            = 8192
+
+# ─── 4. Logging ───────────────────────────────────────────────────────────────
+def setup_logging():
+    log_filename = os.path.join(
+        LOGS_DIR, f"server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    )
+    fmt_console = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", "%H:%M:%S")
+    fmt_file    = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                    "%Y-%m-%d %H:%M:%S")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(fmt_console)
+    ch.setLevel(logging.INFO)
+    # Đảm bảo handler emit UTF-8 ngay cả khi stream bị override sau này
+    if hasattr(ch, "stream") and hasattr(ch.stream, "reconfigure"):
+        try:
+            ch.stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    root.addHandler(ch)
+
+    fh = logging.handlers.RotatingFileHandler(
+        log_filename, maxBytes=10*1024*1024, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt_file)
+    fh.setLevel(logging.DEBUG)
+    root.addHandler(fh)
+
+    for _n in ("httpx", "httpcore", "urllib3", "sentence_transformers",
+               "huggingface_hub", "faiss", "uvicorn.access"):
+        logging.getLogger(_n).setLevel(logging.WARNING)
+
+    return logging.getLogger("chatbot_server"), log_filename
+
+logger, LOG_FILE_PATH = setup_logging()
+
+# ─── 5. Startup timer ─────────────────────────────────────────────────────────
+_SERVER_START_TIME = time.monotonic()
+
+@contextmanager
+def startup_step(name: str):
+    print(f"  ⏳  {name}...", end="", flush=True)
+    t = time.monotonic()
+    try:
+        yield
+    except Exception as e:
+        elapsed = time.monotonic() - t
+        print(f" ✗ ({elapsed:.1f}s) — {e}")
+        logger.error("FAIL step: %s — %.1fs — %s", name, elapsed, e)
+        raise
+    else:
+        elapsed = time.monotonic() - t
+        print(f" ✓  ({elapsed:.1f}s)")
+        logger.info("DONE step: %-40s %.1fs", name, elapsed)
+
+# ─── 6. Model list ────────────────────────────────────────────────────────────
+MODELS = [
+    {
+        "repo_id":  "bartowski/Qwen2.5-7B-Instruct-GGUF",
+        "filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+        "desc":     "Qwen2.5-7B (Q4_K_M) — Text",
+    },
+    {
+        "repo_id":  "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        "desc":     "Qwen2.5-coder-7B (Q4_K_M) — Coder",
+    },
+    {
+        "repo_id":       "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF",
+        "filename":      "Qwen_Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf",
+        "desc":          "Qwen2.5-VL-7B (Q4_K_M) — Vision",
+        "is_vision":     True,
+        "mmproj_repo_id":  "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF",
+        "mmproj_filename": "mmproj-Qwen_Qwen2.5-VL-7B-Instruct-f16.gguf",
+    },
+]
+
+FALLBACK_TEXT_MODEL = {
+    "repo_id":  "bartowski/Qwen2.5-3B-Instruct-GGUF",
+    "filename": "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+    "desc":     "Qwen2.5-3B (Q4_K_M) — Text Fallback",
+}
+
+try:
+    MODEL_IDX = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    if MODEL_IDX < 0 or MODEL_IDX >= len(MODELS):
+        MODEL_IDX = 0
+except (ValueError, IndexError):
+    MODEL_IDX = 0
+
+active_model_desc = MODELS[MODEL_IDX]["desc"]
+
