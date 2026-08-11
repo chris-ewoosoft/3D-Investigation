@@ -1,6 +1,8 @@
 """FastAPI router and entry point for the 3D-Reconstruction AI server."""
 
 from contextlib import asynccontextmanager
+import gc
+import importlib
 import sys
 import time
 
@@ -50,10 +52,25 @@ app.add_middleware(
 app.include_router(agent_module.agent_router)
 
 
+def _refresh_agent_routes() -> None:
+    """Replace FastAPI's old Agent handlers after reloading agent_module."""
+    agent_paths = {"/v1/agent/execute", "/v1/agent/approve"}
+    app.router.routes[:] = [route for route in app.router.routes
+                            if getattr(route, "path", None) not in agent_paths]
+    app.include_router(agent_module.agent_router)
+    app.openapi_schema = None
+
+
 @app.post("/admin/reload-model")
 def reload_model():
     try:
-        llm_module.reload_model()
+        with llm_module.llm_lock:
+            old_llm, llm_module.llm = llm_module.llm, None
+            del old_llm
+            gc.collect()
+            rag_module._release_ml_memory()
+        importlib.reload(llm_module)
+        llm_module.load_model()
         if llm_module.is_vision_model:
             rag_module.release_embedding_for_vision()
         return {"status": "ok", "model": llm_module.active_model_desc,
@@ -68,6 +85,15 @@ def reload_rag():
     if not ENABLE_RAG:
         return {"status": "skipped", "message": "RAG is disabled"}
     try:
+        with rag_module.rag_lock:
+            rag_module.knowledge_index = None
+            rag_module.knowledge_chunks = []
+            rag_module.bm25_index = None
+            rag_module.embed_model_ref = None
+            rag_module._reranker = None
+        gc.collect()
+        rag_module._release_ml_memory()
+        importlib.reload(rag_module)
         chunks = rag_module.initialize_rag(
             force_rebuild=True, enable_reranker=not llm_module.is_vision_model,
         )
@@ -81,8 +107,15 @@ def reload_rag():
 
 @app.post("/admin/reload-agent")
 def reload_agent():
-    agent_module.reset_agent_state()
-    return {"status": "ok", "message": "Agent state reset successfully"}
+    try:
+        agent_module.reset_agent_state()
+        importlib.reload(agent_module)
+        _refresh_agent_routes()
+        agent_module.reset_agent_state()
+        return {"status": "ok", "message": "Agent code and state reloaded successfully"}
+    except Exception as error:
+        logger.exception("Agent reload failed")
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @app.post("/v1/chat/completions")

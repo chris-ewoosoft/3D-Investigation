@@ -2,7 +2,6 @@ from .config import *
 from .config import _safe_relpath
 from . import rag_module as rag_runtime
 from . import llm_module as llm_runtime
-from .rag_module import get_context
 
 # ─── 14b. Agent Tools & Execution ─────────────────────────────────────────────
 # [v2.3] AI Agent: Tool-calling loop cho phép LLM tự thực thi các task trên project
@@ -1071,7 +1070,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # "đổi project sang tiếng việt" từng khiến model dịch nhầm nội dung RAG
     # thay vì gọi application_action.
     if ENABLE_RAG and rag_runtime.knowledge_chunks and not _looks_like_ui_action(_normalise_agent_task(task)):
-        doc_ctx, code_ctx, _ = get_context(task)
+        doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
         if doc_ctx:
             system_prompt += f"\n\n## RELEVANT DOCUMENTATION:\n{doc_ctx[:3000]}"
         if code_ctx:

@@ -64,6 +64,7 @@ void AIAssistant::startServerProcess(int modelIndex) {
         aiServerProcess->setProcessEnvironment(env);
         
         aiServerProcess->setWorkingDirectory(AppConfig::instance().aiTrainingDir());
+        // aiServerProcess->startDetached("python", QStringList() << "-u" << sp << QString::number(modelIndex));
         aiServerProcess->start("python", QStringList() << "-u" << sp << QString::number(modelIndex));
     } else {
         emit errorOccurred(LM_TR("ai.missing_script"));
@@ -85,46 +86,14 @@ void AIAssistant::stopServer() {
     disconnect(aiServerProcess, nullptr, this, nullptr);
 
     if (aiServerProcess->state() != QProcess::NotRunning) {
-#ifdef Q_OS_WIN
-        QProcess::execute("taskkill", QStringList() << "/F" << "/T" << "/PID"
-                          << QString::number(aiServerProcess->processId()));
-#else
-        aiServerProcess->kill();
-#endif
-        aiServerProcess->waitForFinished(AppConstants::AIServer::STOP_SERVER_TIMEOUT_MS);
+        // Keep the detached StartChatbotServer.py process running after Qt exits.
+        aiServerProcess->terminate();
+        if (!aiServerProcess->waitForFinished(1000)) {
+            aiServerProcess->kill();
+            aiServerProcess->waitForFinished(AppConstants::AIServer::STOP_SERVER_TIMEOUT_MS);
+        }
     }
 
-    // Tiêu diệt triệt để bất kỳ tiến trình nào đang chiếm dụng cổng 8080 để tránh lỗi bind port
-#ifdef Q_OS_WIN
-    QProcess netstat;
-    netstat.start("cmd", QStringList() << "/c" << QString("netstat -ano | findstr :%1").arg(AppConstants::AIServer::SERVER_PORT));
-    if (netstat.waitForFinished(2000)) {
-        QString output = QString::fromUtf8(netstat.readAllStandardOutput());
-        QStringList lines = output.split('\n');
-        for (const QString &line : lines) {
-            if (line.contains("LISTENING")) {
-                QStringList parts = line.simplified().split(' ');
-                if (parts.size() >= 5) {
-                    QString pid = parts.last();
-                    bool ok;
-                    int pidVal = pid.toInt(&ok);
-                    if (ok && pidVal > 0) {
-                        QProcess::execute("taskkill", QStringList() << "/F" << "/PID" << pid);
-                    }
-                }
-            }
-        }
-    }
-#else
-    QProcess lsof;
-    lsof.start("sh", QStringList() << "-c" << QString("lsof -t -i:%1").arg(AppConstants::AIServer::SERVER_PORT));
-    if (lsof.waitForFinished(2000)) {
-        QString output = QString::fromUtf8(lsof.readAllStandardOutput()).trimmed();
-        if (!output.isEmpty()) {
-            QProcess::execute("kill", QStringList() << "-9" << output);
-        }
-    }
-#endif
 }
 
 void AIAssistant::switchModel(int index) {
