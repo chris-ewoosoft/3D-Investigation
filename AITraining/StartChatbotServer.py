@@ -1,10 +1,12 @@
 """FastAPI router and entry point for the 3D-Reconstruction AI server."""
 
-from contextlib import asynccontextmanager
 import gc
 import importlib
+import os
 import sys
+import threading
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,8 +14,17 @@ from pydantic import BaseModel, Field, field_validator
 
 from modules import agent_module, llm_module, rag_module
 from modules.config import (
-    CHARS_PER_TOKEN, EMBED_MODEL_NAME, ENABLE_RAG, LLM_N_CTX, LOG_FILE_PATH,
-    MODEL_IDX, MODELS, _SERVER_START_TIME, _safe_relpath, BASE_DIR, logger,
+    _SERVER_START_TIME,
+    BASE_DIR,
+    CHARS_PER_TOKEN,
+    EMBED_MODEL_NAME,
+    ENABLE_RAG,
+    LLM_N_CTX,
+    LOG_FILE_PATH,
+    MODEL_IDX,
+    MODELS,
+    _safe_relpath,
+    logger,
 )
 
 
@@ -73,6 +84,7 @@ def reload_model():
         llm_module.load_model()
         if llm_module.is_vision_model:
             rag_module.release_embedding_for_vision()
+        logger.info("Model reloaded successfully")
         return {"status": "ok", "model": llm_module.active_model_desc,
                 "message": "Model reloaded successfully"}
     except Exception as error:
@@ -99,6 +111,7 @@ def reload_rag():
         )
         if llm_module.is_vision_model:
             rag_module.release_embedding_for_vision()
+        logger.info("RAG index rebuilt successfully")
         return {"status": "ok", "chunks": chunks, "message": "RAG index rebuilt successfully"}
     except Exception as error:
         logger.exception("RAG reload failed")
@@ -112,10 +125,26 @@ def reload_agent():
         importlib.reload(agent_module)
         _refresh_agent_routes()
         agent_module.reset_agent_state()
+        logger.info("Agent code and state reloaded successfully")
         return {"status": "ok", "message": "Agent code and state reloaded successfully"}
     except Exception as error:
         logger.exception("Agent reload failed")
         raise HTTPException(status_code=500, detail=str(error)) from error
+
+@app.post("/admin/shutdown")
+def shutdown_server():
+    """Terminate this AI Server process so ServerManager can spawn a fresh one.
+
+    Runs the actual exit from a background thread with a tiny delay so the
+    HTTP response reaches the Qt client before the process disappears.
+    """
+    def _terminate():
+        time.sleep(0.3)
+        logger.info("Shutdown requested via /admin/shutdown — exiting process")
+        os._exit(0)
+
+    threading.Thread(target=_terminate, daemon=True).start()
+    return {"status": "ok", "message": "AI Server is shutting down"}        
 
 
 @app.post("/v1/chat/completions")

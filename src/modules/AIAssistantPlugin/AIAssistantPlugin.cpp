@@ -100,6 +100,17 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             if (!m_aiAssistant) return;
             m_aiAssistant->restartAgent();
         });
+        connect(m_ribbonUI->btnRestartServer(), &QToolButton::clicked, this, [this]() {
+            if (!m_aiAssistant) return;
+            auto *btn = m_ribbonUI->btnRestartServer();
+            btn->setEnabled(false);
+            btn->setText(m_ctx->translate("ai.reloading"));
+            m_aiAssistant->restartServer();
+            QTimer::singleShot(5000, btn, [this, btn]() {
+                btn->setEnabled(true);
+                btn->setText(m_ctx->translate("ai.restart_server"));
+            });
+        });
     }
     
     // Connect SignalBus for retranslation
@@ -123,6 +134,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             m_ribbonUI->btnRestartModel()->setText(m_ctx->translate("ai.restart_model"));
             m_ribbonUI->btnRestartRAG()->setText(m_ctx->translate("ai.restart_rag"));
             m_ribbonUI->btnRestartAgent()->setText(m_ctx->translate("ai.restart_agent"));
+            m_ribbonUI->btnRestartServer()->setText(m_ctx->translate("ai.restart_server"));
             if (QLabel *lbl = m_ribbonUI->groupAI()->findChild<QLabel*>("groupTitleLabel")) {
                 lbl->setText(m_ctx->translate("menu.ai_assistant"));
             }

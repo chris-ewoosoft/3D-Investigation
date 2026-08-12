@@ -166,6 +166,54 @@ void AIAssistant::restartAgent() {
     });
 }
 
+void AIAssistant::restartServer() {
+    emit serverStatusChanged(tr("Đang khởi động lại AI Server..."));
+
+    auto killManagerAndRestart = [this]() {
+        // Discard anything in flight — the backend behind it is gone/going.
+        m_queuedRequests.clear();
+        const auto activeReplies = m_pendingRequests.keys();
+        m_pendingRequests.clear();
+        for (QNetworkReply *reply : activeReplies) {
+            if (reply) reply->abort();
+        }
+        m_isThinking = false;
+        m_serverReadyEmitted = false;
+        m_serverRecoveryAttempts = 0;
+
+        // Kill aiServerProcess — the ServerManager wrapper (server_manager.py).
+        disconnect(aiServerProcess, nullptr, this, nullptr);
+        if (aiServerProcess->state() != QProcess::NotRunning) {
+            aiServerProcess->terminate();
+            if (!aiServerProcess->waitForFinished(1000)) {
+                aiServerProcess->kill();
+                aiServerProcess->waitForFinished(AppConstants::AIServer::STOP_SERVER_TIMEOUT_MS);
+            }
+        }
+
+        // Give the OS a moment to free port 8080 before the new ServerManager
+        // instance probes /health and (re)spawns a fresh AI Server.
+        QTimer::singleShot(800, this, [this]() {
+            startServerProcess(m_currentModelIndex);
+        });
+    };
+
+    if (isServerRunning()) {
+        // Ask the AI Server that ServerManager spawned (detached, so we
+        // don't otherwise hold a handle to it) to terminate itself first.
+        QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("shutdown"))};
+        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        req.setTransferTimeout(5000);
+        QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
+        connect(reply, &QNetworkReply::finished, this, [reply, killManagerAndRestart]() {
+            reply->deleteLater();
+            killManagerAndRestart();   // run regardless of success/failure
+        });
+    } else {
+        killManagerAndRestart();
+    }
+}
+
 // ── Session management ────────────────────────────────────────────────────────
 
 void AIAssistant::newChat() {

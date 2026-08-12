@@ -1,4 +1,5 @@
-from .config import *
+from .config import *  # noqa: I001
+from .config import _safe_relpath
 
 # ─── 7. BM25 tokenizer hỗ trợ tiếng Việt ─────────────────────────────────────
 # [FIX-6] CRITICAL: regex cũ r"[a-z0-9_]+" chỉ bắt Latin → bỏ sót TOÀN BỘ

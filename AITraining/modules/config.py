@@ -1,4 +1,4 @@
-# ruff: noqa: BLE001, S110, DTZ005, RUF012
+# ruff: noqa: BLE001, S110
 """
 StartChatbotServer.py — 3D-Reconstruction AI Server v2.2
 =========================================================

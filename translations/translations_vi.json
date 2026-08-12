@@ -109,6 +109,7 @@
     "ai.restart_model": "Tải lại Model",
     "ai.restart_rag": "Tải lại RAG",
     "ai.restart_agent": "Tải lại Agent",
+    "ai.restart_server": "Tải lại Server",
     "ai.reloading": "Đang tải...",
     "tab.ai_assistant": "Trợ lý AI",
     "ai.menu": "Xử lý AI",

@@ -109,6 +109,7 @@
     "ai.restart_model": "Restart Model",
     "ai.restart_rag": "Restart RAG",
     "ai.restart_agent": "Restart Agent",
+    "ai.restart_server": "Restart Server",
     "ai.reloading": "Reloading...",
     "tab.ai_assistant": "AI Assistant",
     "ai.menu": "AI Processing",

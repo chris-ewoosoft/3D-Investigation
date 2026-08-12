@@ -47,6 +47,13 @@ AIAssistantRibbonUI::AIAssistantRibbonUI(IAppContext* ctx, QWidget* parentPanel,
         m_btnRestartAgent->setMinimumWidth(80);
         gLayout->addWidget(m_btnRestartAgent);
 
+        m_btnRestartServer = new QToolButton(m_groupAI);
+        m_btnRestartServer->setText(m_ctx->translate("ai.restart_server"));
+        m_btnRestartServer->setIcon(IconFactory::createModern("🖥️", QColor("#ef4444"), QColor("#b91c1c")));
+        m_btnRestartServer->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        m_btnRestartServer->setMinimumWidth(80);
+        gLayout->addWidget(m_btnRestartServer);
+
         vbox->addLayout(gLayout);
         vbox->addStretch();
 

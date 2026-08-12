@@ -31,6 +31,7 @@ public:
     void restartModel() override;
     void restartRAG() override;
     void restartAgent() override;
+    void restartServer() override;
 
     // Agent mode
     void executeAgentTask(const QString &sessionId, const QString &task) override;

@@ -1,13 +1,11 @@
-from .config import *
-from .config import _safe_relpath
-from . import rag_module as rag_runtime
-from . import llm_module as llm_runtime
-
-# ─── 14b. Agent Tools & Execution ─────────────────────────────────────────────
-# [v2.3] AI Agent: Tool-calling loop cho phép LLM tự thực thi các task trên project
-
+# ruff: noqa: I001
 import fnmatch
 import subprocess
+
+from .config import *
+from .config import _safe_relpath
+from . import llm_module as llm_runtime
+from . import rag_module as rag_runtime
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
@@ -1020,7 +1018,7 @@ class AgentApproveRequest(BaseModel):
 _load_pending_actions()
 
 
-from fastapi import APIRouter
+from fastapi import APIRouter  # noqa: E402,I001
 agent_router = APIRouter()
 
 @agent_router.post("/v1/agent/execute")

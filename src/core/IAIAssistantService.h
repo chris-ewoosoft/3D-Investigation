@@ -33,6 +33,7 @@ public:
     virtual void restartModel() = 0;
     virtual void restartRAG() = 0;
     virtual void restartAgent() = 0;
+    virtual void restartServer() = 0;
 
     // Session management
     virtual void newChat() = 0;

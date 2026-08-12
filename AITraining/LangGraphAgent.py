@@ -15,12 +15,12 @@ from langgraph.graph import END, START, StateGraph
 
 
 class AgentState(TypedDict):
-    messages: list[dict[str, str]]
-    steps: list[dict[str, Any]]
-    iteration: int
-    temperature: float
-    done: bool
-    pending_tool: dict[str, Any] | None
+    messages: list[dict[str, str]] # Message của user và assistant 
+    steps: list[dict[str, Any]] # Step là gì ?
+    iteration: int # Lặp mấy lần
+    temperature: float # Độ ngẫu nhiên của model
+    done: bool # Đã xong chưa
+    pending_tool: dict[str, Any] | None # Tool cần được phê duyệt
 
 
 Completion = Callable[[list[dict[str, str]], float], str]
@@ -40,14 +40,14 @@ class LocalAgentGraph:
         self._needs_approval = needs_approval
         self._max_iterations = max_iterations
 
-        builder = StateGraph(AgentState)
+        builder = StateGraph(AgentState) # State là AgentState
         builder.add_node("reason", self._reason) # Node để model sinh ra câu trả lời và tool_call
         builder.add_node("tool", self._tool) # Node để thực thi tool
         builder.add_edge(START, "reason") # Bắt đầu từ node reason
         builder.add_conditional_edges("reason", self._after_reason, # Điều kiện để chuyển sang tool hoặc end
                                       {"tool": "tool", "end": END})
         builder.add_edge("tool", "reason") # Sau khi thực thi tool thì quay lại reason
-        self._graph = builder.compile(checkpointer=MemorySaver())
+        self._graph = builder.compile(checkpointer=MemorySaver()) # Lưu lại trạng thái
 
     def run(self, messages: list[dict[str, str]], session_id: str,
             temperature: float, steps: list[dict[str, Any]] | None = None,
