@@ -104,10 +104,36 @@ void SettingsDialog::setupUi()
                                              m_navList);
         navItem0->setSizeHint(QSize(0, 48));
     }
-    auto *navItem1 = new QListWidgetItem(makeNavIcon("🎨", QColor("#ec4899"), QColor("#db2777")),
+    auto *navItem = new QListWidgetItem(makeNavIcon("🎨", QColor("#ec4899"), QColor("#db2777")),
                                          UserAuthPlugin::translate("menu.theme"),
                                          m_navList);
-    navItem1->setSizeHint(QSize(0, 48));
+    navItem->setSizeHint(QSize(0, 48));
+
+    navItem = new QListWidgetItem(makeNavIcon("👁", QColor("#f04d4d"), QColor("#9c1717")),
+                                        UserAuthPlugin::translate("menu.view"),
+                                        m_navList);
+    navItem->setSizeHint(QSize(0, 48));
+
+    navItem = new QListWidgetItem(makeNavIcon("🏗", QColor("#d1bc43"), QColor("#9c8817")),
+                                  UserAuthPlugin::translate("menu.reconstruction"),
+                                  m_navList);
+    navItem->setSizeHint(QSize(0, 48));
+
+    navItem = new QListWidgetItem(makeNavIcon("🪄", QColor("#64d143"), QColor("#39a11a")),
+                                  UserAuthPlugin::translate("menu.ai_tool"),
+                                  m_navList);
+    navItem->setSizeHint(QSize(0, 48));
+
+    navItem = new QListWidgetItem(makeNavIcon("🤖", QColor("#42c8d4"), QColor("#1a96a1")),
+                                  UserAuthPlugin::translate("menu.ai_assistant"),
+                                  m_navList);
+    navItem->setSizeHint(QSize(0, 48));
+
+    navItem = new QListWidgetItem(makeNavIcon("📩", QColor("#8d42d4"), QColor("#52138f")),
+                                  UserAuthPlugin::translate("menu.mail"),
+                                  m_navList);
+    navItem->setSizeHint(QSize(0, 48));
+
 
     // ── Layout assembly ───────────────────────────────────────────────────────
     root->addWidget(m_navList);
@@ -117,8 +143,11 @@ void SettingsDialog::setupUi()
         int row = m_navList->row(item);
         if (m_isAdmin && row == 0) {
             m_stack->setCurrentWidget(adminPage);
-        } else {
+        } else if (row == 1){
             m_stack->setCurrentWidget(themePage);
+        }
+        else{
+
         }
     });
 
