@@ -278,35 +278,35 @@ void MainWindow::loadPlugins() {
 void MainWindow::discoverPlugins() {
   QDir pluginsDir(qApp->applicationDirPath());
 
-#if defined(Q_OS_WIN)
-  const QString dirName = pluginsDir.dirName();
-  if (dirName.toLower() == "debug" || dirName.toLower() == "release") {
-    // MSBuild puts plugins in build/plugins/Release
-    QDir buildDir = pluginsDir;
-    buildDir.cdUp();
-    if (buildDir.exists("plugins/" + dirName)) {
-      pluginsDir = buildDir;
-      pluginsDir.cd("plugins");
-      pluginsDir.cd(dirName);
-    } else {
-      pluginsDir.cdUp();
-      if (!pluginsDir.cd("plugins")) {
-        qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
-        return;
-      }
-    }
+  if (pluginsDir.exists("plugins")) {
+    pluginsDir.cd("plugins");
   } else {
-    if (!pluginsDir.cd("plugins")) {
+#if defined(Q_OS_WIN)
+    const QString dirName = pluginsDir.dirName();
+    if (dirName.toLower() == "debug" || dirName.toLower() == "release") {
+      // MSBuild puts plugins in build/plugins/Release
+      QDir buildDir = pluginsDir;
+      buildDir.cdUp();
+      if (buildDir.exists("plugins/" + dirName)) {
+        pluginsDir = buildDir;
+        pluginsDir.cd("plugins");
+        pluginsDir.cd(dirName);
+      } else {
+        pluginsDir.cdUp();
+        if (!pluginsDir.cd("plugins")) {
+          qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
+          return;
+        }
+      }
+    } else {
       qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
       return;
     }
-  }
 #else
-  if (!pluginsDir.cd("plugins")) {
     qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
     return;
-  }
 #endif
+  }
 
   for (const QString &fileName : pluginsDir.entryList(QDir::Files)) {
     if (!QLibrary::isLibrary(fileName))

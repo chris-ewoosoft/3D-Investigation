@@ -64,7 +64,6 @@ void AIAssistant::startServerProcess(int modelIndex) {
         aiServerProcess->setProcessEnvironment(env);
         
         aiServerProcess->setWorkingDirectory(AppConfig::instance().aiTrainingDir());
-        // aiServerProcess->startDetached("python", QStringList() << "-u" << sp << QString::number(modelIndex));
         aiServerProcess->start("python", QStringList() << "-u" << sp << QString::number(modelIndex));
     } else {
         emit errorOccurred(LM_TR("ai.missing_script"));

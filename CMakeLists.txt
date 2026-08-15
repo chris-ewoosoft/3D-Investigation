@@ -176,8 +176,8 @@ set(VTK_MODULE_ENABLE_VTK_RenderingVulkan NO)
 # Prefer caller-provided package locations. Local defaults are applied only
 # when the conventional install path exists, so fresh machines can rely on
 # CMAKE_PREFIX_PATH, vcpkg, or explicit -D*_DIR values without editing this file.
-if(NOT DEFINED VTK_DIR AND EXISTS "C:/Program Files/VTK/lib/cmake/vtk-9.6")
-    set(VTK_DIR "C:/Program Files/VTK/lib/cmake/vtk-9.6" CACHE PATH "Path to VTK")
+if(NOT VTK_DIR AND EXISTS "C:/Program Files/VTK/lib/cmake/vtk-9.6")
+    set(VTK_DIR "C:/Program Files/VTK/lib/cmake/vtk-9.6" CACHE PATH "Path to VTK" FORCE)
 endif()
 find_package(VTK REQUIRED COMPONENTS
     CommonCore
@@ -202,20 +202,23 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/plugins)
 
 # ─── 5b. Build Optimizations ───────────────────────────────────────────────────
 # ─── 3. OpenCV ────────────────────────────────────────────────────────────────
-if(NOT DEFINED OpenCV_DIR AND EXISTS "C:/opencv/build")
-    set(OpenCV_DIR "C:/opencv/build" CACHE PATH "Path to OpenCV CMake files")
+if(NOT OpenCV_DIR AND EXISTS "C:/opencv/build")
+    set(OpenCV_DIR "C:/opencv/build" CACHE PATH "Path to OpenCV CMake files" FORCE)
 endif()
 find_package(OpenCV REQUIRED)
 
 # ─── 4. PCL ───────────────────────────────────────────────────────────────────
 # Suppress MSVC-unsupported developer warning emitted by PCL's FindPCL.cmake
 set(PCL_DISABLE_MSVC_DEPRECATION_WARNINGS ON)
-if(NOT DEFINED PCL_DIR AND EXISTS "C:/Program Files/PCL 1.15.1/cmake")
-    set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files")
+if(NOT PCL_DIR AND EXISTS "C:/Program Files/PCL 1.15.1/cmake")
+    set(PCL_DIR "C:/Program Files/PCL 1.15.1/cmake" CACHE PATH "Path to PCL CMake files" FORCE)
 endif()
 find_package(PCL REQUIRED COMPONENTS common filters io)
 
 # ─── 4b. Eigen (dùng cho MultiViewTriangulator) ──────────────────────────────
+if(NOT Eigen3_DIR AND EXISTS "C:/Program Files/PCL 1.15.1/3rdParty/Eigen3/share/eigen3/cmake")
+    set(Eigen3_DIR "C:/Program Files/PCL 1.15.1/3rdParty/Eigen3/share/eigen3/cmake" CACHE PATH "Path to Eigen3 CMake files" FORCE)
+endif()
 find_package(Eigen3 CONFIG REQUIRED)
 
 # ─── 5. ONNX Runtime ─────────────────────────────────────────────────────────
