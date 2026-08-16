@@ -173,6 +173,14 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             onToggleChatbot();
         } else if (action == "assistant.close" && !m_dockUI->dockWidget()->isHidden()) {
             onToggleChatbot();
+        } else if (action == "assistant.reload_model") {
+            m_aiAssistant->restartModel();
+        } else if (action == "assistant.reload_rag") {
+            m_aiAssistant->restartRAG();
+        } else if (action == "assistant.reload_agent") {
+            m_aiAssistant->restartAgent();
+        } else if (action == "assistant.reload_server") {
+            m_aiAssistant->restartServer();
         }
     });
     

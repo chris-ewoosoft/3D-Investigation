@@ -96,6 +96,15 @@ void UserAuthPlugin::initialize(IAppContext* context) {
             onChangePassword();
         } else if (action == "admin.logout") {
             onLogout();
+        } else if (action == "admin.login") {
+            QString errorMsg;
+            UserManager::instance()->logout();
+            if (UserManager::instance()->login(parameters.value("username", "Admin").toString(), parameters.value("password", "1").toString(), errorMsg)) {
+                m_currentUser = UserManager::instance()->currentUsername();
+                loadUserSettings();
+                checkLicense();
+                setupMenus();
+            }
         } else if (action == "help.about") {
             onAbout();
         }

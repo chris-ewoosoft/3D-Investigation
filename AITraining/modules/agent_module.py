@@ -127,12 +127,15 @@ AGENT_TOOLS = [
     },
     {
         "name": "app_action_general",
-        "description": "Run general application actions: opening/closing AI assistant, mail, settings, language, and logout. "
-                       "Supported actions: assistant.open, assistant.close, mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout. "
+        "description": "Run general application actions: opening/closing AI assistant, reloading assistant components, mail, settings, language, and authentication. "
+                       "Supported actions: assistant.open, assistant.close, assistant.reload_model, assistant.reload_rag, assistant.reload_agent, assistant.reload_server, "
+                       "mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout, admin.login. "
                        "Use language.change with language='vi' or language='en'.",
         "parameters": {
             "action": {"type": "string", "description": "One of the supported general actions", "required": True},
             "language": {"type": "string", "description": "Only for language.change: 'vi' or 'en'", "required": False},
+            "username": {"type": "string", "description": "Only for admin.login", "required": False},
+            "password": {"type": "string", "description": "Only for admin.login", "required": False},
         },
     },
     {
@@ -530,9 +533,11 @@ _DESKTOP_ACTIONS = {
     "reconstruction.view_3d_model", "reconstruction.close_3d_model",
     "ai.run_detection", "ai.run_segmentation", "ai.video_tracking",
     "ai.hide_results", "ai.training_model", "ai.view_training_charts",
-    "assistant.open", "assistant.close", "mail.open", "mail.close", "mail.settings",
+    "assistant.open", "assistant.close", "assistant.reload_model",
+    "assistant.reload_rag", "assistant.reload_agent", "assistant.reload_server",
+    "mail.open", "mail.close", "mail.settings",
     "help.about", "language.change", "admin.settings", "admin.change_avatar",
-    "admin.change_password", "admin.logout",
+    "admin.change_password", "admin.logout", "admin.login",
 }
 
 # Small local models occasionally invent a close-but-invalid action name.  Keep
@@ -585,10 +590,10 @@ def _normalise_agent_task(text: str) -> str:
 _UI_ACTION_HINT_WORDS = (
     "ngon ngu", "doi ngon ngu", "sang tieng viet", "sang tieng anh",
     "sang english", "language", "mail", "avatar", "mat khau", "password",
-    "dang xuat", "logout", "reconstruction", "tai tao", "detection",
+    "dang xuat", "logout", "dang nhap", "login", "reconstruction", "tai tao", "detection",
     "nhan dien", "segmentation", "phan doan", "tracking", "theo doi video",
     "dicom", "3d model", "training", "huan luyen", "bieu do", "gioi thieu",
-    "cai dat", "assistant", "2d", "3d", "hinh anh",
+    "cai dat", "assistant", "2d", "3d", "hinh anh", "tai lai", "reload", "hop thu",
 )
 
 
@@ -608,15 +613,25 @@ def _match_desktop_action(task: str) -> dict | None:
         return {"action": "admin.change_avatar"}
     if "change password" in text or "doi mat khau" in text:
         return {"action": "admin.change_password"}
+    if "dang nhap" in text or "login" in text:
+        return {"action": "admin.login", "username": "Admin", "password": "1"}
     if "logout" in text or "dang xuat" in text:
         return {"action": "admin.logout"}
     if "mail settings" in text or "cai dat mail" in text:
         return {"action": "mail.settings"}
     if ("open mail" in text or "open email" in text or "mo mail" in text
-            or "mo email" in text or "open inbox" in text or "mo inbox" in text):
+            or "mo email" in text or "open inbox" in text or "mo inbox" in text or "hop thu" in text or "mo hop thu" in text):
         return {"action": "mail.open"}
     if "close mail" in text or "dong mail" in text:
         return {"action": "mail.close"}
+    if "tai lai model" in text or "reload model" in text:
+        return {"action": "assistant.reload_model"}
+    if "tai lai rag" in text or "reload rag" in text:
+        return {"action": "assistant.reload_rag"}
+    if "tai lai agent" in text or "reload agent" in text:
+        return {"action": "assistant.reload_agent"}
+    if "tai lai server" in text or "reload server" in text:
+        return {"action": "assistant.reload_server"}
     if "open ai assistant" in text or "mo ai assistant" in text:
         return {"action": "assistant.open"}
     if "close ai assistant" in text or "dong ai assistant" in text:

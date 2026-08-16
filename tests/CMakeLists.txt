@@ -102,3 +102,10 @@ target_link_libraries(TestReconstructionPipeline PRIVATE
 )
 target_compile_definitions(TestReconstructionPipeline PRIVATE APP_LIBRARY)
 add_test(NAME TestReconstructionPipeline COMMAND TestReconstructionPipeline)
+
+# Test Agent Actions
+qt_add_executable(TestAgentActions TestAgentActions.cpp ../src/core/SignalBus.cpp)
+target_include_directories(TestAgentActions PRIVATE ../src/core ../src/utils)
+target_link_libraries(TestAgentActions PRIVATE Qt6::Test Qt6::Core)
+target_compile_definitions(TestAgentActions PRIVATE APP_LIBRARY)
+add_test(NAME TestAgentActions COMMAND TestAgentActions)
