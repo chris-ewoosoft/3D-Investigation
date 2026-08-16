@@ -10,6 +10,7 @@
 #include "LanguageManager.h"
 #include "../../utils/CustomProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
+#include <QMessageBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QApplication>
@@ -39,6 +40,7 @@
 #include <QStyle>
 #include "ReconstructionRibbonUI.h"
 #include "AppConfig.h"
+#include "UserManager.h"
 
 void ReconstructionPlugin::initialize(IAppContext* context) {
     m_ctx = context;
@@ -56,8 +58,8 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
     QMenu* reconMenu = m_ctx->getMenu("recon_menu");
     reconMenu->clear();
 
-    QAction *loadAct = reconMenu->addAction(m_ctx->translate("recon.load_images"), this, &ReconstructionPlugin::onLoadMultipleImages);
-    QAction *runAct  = reconMenu->addAction(m_ctx->translate("recon.start"), this, &ReconstructionPlugin::onRunReconstruction);
+    reconMenu->addAction(m_ctx->translate("recon.load_images"), this, &ReconstructionPlugin::onLoadMultipleImages);
+    reconMenu->addAction(m_ctx->translate("recon.start"), this, &ReconstructionPlugin::onRunReconstruction);
     reconMenu->addSeparator();
     m_toggleCloudAct = reconMenu->addAction(m_ctx->translate("recon.view_model"), this, &ReconstructionPlugin::onTogglePointCloud);
 
@@ -131,11 +133,11 @@ void ReconstructionPlugin::onLoadMultipleImages() {
 
     m_ctx->settings()->setLastUsedPath("recon", QFileInfo(fileNames.first()).absolutePath());
     QStringList stdFiles;
-    for (const QString& f : fileNames) {
+    for (const QString& f : qAsConst(fileNames)) {
         stdFiles.push_back(QDir::toNativeSeparators(f));
     }
     std::vector<QString> paths;
-    for (const auto &f : stdFiles) paths.push_back(f);
+    for (const auto &f : qAsConst(stdFiles)) paths.push_back(f);
 
     // Dùng IReconstructionService interface — không biết ReconstructionPipeline
     if (m_reconSvc) m_reconSvc->setImages(stdFiles);
@@ -148,7 +150,7 @@ void ReconstructionPlugin::onLoadMultipleImages() {
     
     // Push file list to viewer service. ViewerPlugin will automatically show the thumbnail list.
     QStringList filenamesOnly;
-    for (const QString& f : fileNames) {
+    for (const QString& f : qAsConst(fileNames)) {
         filenamesOnly.append(QFileInfo(f).fileName());
     }
     m_ctx->viewer()->setCurrent2DImagePath(fileNames.first());
@@ -235,6 +237,16 @@ void ReconstructionPlugin::onRunReconstruction() {
     // Lấy IReconstructionService interface thay vì pipeline cụ thể
     if (!m_reconSvc) return;
 
+    // Apply configuration from Settings
+    auto* um = UserManager::instance();
+    if (um) {
+        QString username = um->currentUsername();
+        int density = um->getUserPref(username, "recon_density", "1").toInt();
+        bool autoClean = um->getUserPref(username, "recon_auto_clean", "true") == "true";
+        int maxFeatures = um->getUserPref(username, "recon_max_features", "10000").toInt();
+        m_reconSvc->configure(density, maxFeatures, autoClean);
+    }
+
     m_currentReconstructThread = new ReconstructThread(m_reconSvc, this);
     QPointer<CustomProgressDialog> progressPtr(m_progressDialog);
     connect(m_currentReconstructThread, &QThread::finished, this, [this, progressPtr]() {
@@ -277,7 +289,12 @@ void ReconstructionPlugin::onShowPointCloud() {
     if (!m_reconSvc) return;
     auto pts    = m_reconSvc->getPointCloud();
     auto colors = m_reconSvc->getPointColors();
-    if (pts.empty()) return;
+    if (pts.empty()) {
+        QMessageBox::warning(m_ctx->mainWindow(), 
+                             m_ctx->translate("recon.failed_title"), 
+                             m_ctx->translate("recon.no_model_error"));
+        return;
+    }
 
     m_ctx->scene()->clear3DModel();
     m_ctx->scene()->clearPointCloud();

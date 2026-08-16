@@ -100,13 +100,49 @@ AGENT_TOOLS = [
         },
     },
     {
-        "name": "application_action",
-        "description": "Run a 3D-Reconstruction desktop UI action. Use this instead of source-code tools when the user asks to operate the application. "
-                       "Supported actions: viewer.load_2d, viewer.load_3d, viewer.load_dicom, reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model, ai.run_detection, ai.run_segmentation, ai.video_tracking, ai.hide_results, ai.training_model, ai.view_training_charts, assistant.open, assistant.close, mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout. "
-                       "Use language.change with language='vi' or language='en'. The desktop client performs the action using its configured sample paths.",
+        "name": "app_action_viewer",
+        "description": "Run a Viewer desktop action. Use this EXACTLY when the user wants to OPEN or LOAD a pre-existing 3D model, 2D image, or DICOM series from disk. "
+                       "Supported actions: viewer.load_2d, viewer.load_3d, viewer.load_dicom. "
+                       "DO NOT use this tool for viewing reconstructed models. Use it for loading/opening external static files.",
         "parameters": {
-            "action": {"type": "string", "description": "One supported desktop action name", "required": True},
-            "language": {"type": "string", "description": "Only for language.change: vi or en", "required": False},
+            "action": {"type": "string", "description": "One of: viewer.load_2d, viewer.load_3d, viewer.load_dicom", "required": True},
+        },
+    },
+    {
+        "name": "app_action_reconstruction",
+        "description": "Run a 3D Reconstruction desktop action. Use this when the user wants to perform 3D reconstruction tasks: load source images for reconstruction, start the reconstruction process, or view/close the RESULTING 3D point cloud model. "
+                       "Supported actions: reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model. "
+                       "NOTE: reconstruction.view_3d_model is ONLY for showing the generated reconstruction result, NOT for loading a 3D file from disk.",
+        "parameters": {
+            "action": {"type": "string", "description": "One of: reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model", "required": True},
+        },
+    },
+    {
+        "name": "app_action_ai",
+        "description": "Run an AI / Deep Learning desktop action. Use this for AI detection, segmentation, video tracking, hiding results, training a model, or viewing training charts. "
+                       "Supported actions: ai.run_detection, ai.run_segmentation, ai.video_tracking, ai.hide_results, ai.training_model, ai.view_training_charts.",
+        "parameters": {
+            "action": {"type": "string", "description": "One of the supported ai.* actions", "required": True},
+        },
+    },
+    {
+        "name": "app_action_general",
+        "description": "Run general application actions: opening/closing AI assistant, mail, settings, language, and logout. "
+                       "Supported actions: assistant.open, assistant.close, mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout. "
+                       "Use language.change with language='vi' or language='en'.",
+        "parameters": {
+            "action": {"type": "string", "description": "One of the supported general actions", "required": True},
+            "language": {"type": "string", "description": "Only for language.change: 'vi' or 'en'", "required": False},
+        },
+    },
+    {
+        "name": "rag_search",
+        "description": "Search project documentation and source code using semantic similarity. "
+                       "Use this to find relevant technical information, APIs, patterns, or code examples "
+                       "before reading specific files. More efficient than read_file when you don't know exactly which file to look at.",
+        "parameters": {
+            "query": {"type": "string", "description": "The question or topic to search for", "required": True},
+            "top_k": {"type": "integer", "description": "Max number of results to return (default 5, max 10)", "required": False},
         },
     },
 ]
@@ -552,7 +588,7 @@ _UI_ACTION_HINT_WORDS = (
     "dang xuat", "logout", "reconstruction", "tai tao", "detection",
     "nhan dien", "segmentation", "phan doan", "tracking", "theo doi video",
     "dicom", "3d model", "training", "huan luyen", "bieu do", "gioi thieu",
-    "cai dat", "assistant",
+    "cai dat", "assistant", "2d", "3d", "hinh anh",
 )
 
 
@@ -601,15 +637,15 @@ def _match_desktop_action(task: str) -> dict | None:
         return {"action": "reconstruction.start_reconstruction"}
     if "close view 3d model" in text or "close 3d model" in text or "dong 3d model" in text:
         return {"action": "reconstruction.close_3d_model"}
-    if "view 3d model" in text or "show point cloud" in text or "xem 3d model" in text:
+    if "view 3d model" in text or "show point cloud" in text or "xem 3d model" in text or re.search(r"xem.*mo hinh.*tai tao", text):
         return {"action": "reconstruction.view_3d_model"}
-    if "load dicom" in text or "dicom series" in text:
+    if "load dicom" in text or "dicom series" in text or "tai dicom" in text or "anh dicom" in text:
         return {"action": "viewer.load_dicom"}
-    if "load images" in text or "tai anh tai tao" in text:
+    if "load images" in text or "tai anh tai tao" in text or "anh tai tao" in text:
         return {"action": "reconstruction.load_images"}
-    if "load 3d" in text or "tai 3d" in text:
+    if "load 3d" in text or "tai 3d" in text or "hinh anh 3d" in text or "anh 3d" in text or re.search(r"tai.*mo hinh 3d", text) or re.search(r"mo.*file 3d", text):
         return {"action": "viewer.load_3d"}
-    if "load 2d" in text or "tai 2d" in text:
+    if "load 2d" in text or "tai 2d" in text or "hinh anh 2d" in text or "anh 2d" in text:
         return {"action": "viewer.load_2d"}
     if text == "about" or text.startswith("about ") or "gioi thieu" in text:
         return {"action": "help.about"}
@@ -665,15 +701,41 @@ def _execute_approved_create_directory(params: dict) -> dict:
         return {"error": f"Unable to create directory: {error}"}
 
 
+def tool_rag_search(params: dict) -> dict:
+    """Dynamic RAG search tool — called by the agent at runtime."""
+    query = params.get("query", "").strip()
+    if not query:
+        return {"error": "Query không được để trống."}
+    top_k = min(int(params.get("top_k", 5)), 10)
+    if not rag_runtime.knowledge_chunks:
+        return {"error": "RAG index chưa sẵn sàng."}
+    try:
+        doc_ctx, code_ctx, _ = rag_runtime.get_context(query)
+        results = []
+        if doc_ctx:
+            results.append({"source": "documentation", "content": doc_ctx[:3000]})
+        if code_ctx:
+            results.append({"source": "source_code", "content": code_ctx[:3000]})
+        if not results:
+            return {"query": query, "found": False, "message": "Không tìm thấy kết quả phù hợp."}
+        return {"query": query, "found": True, "top_k": top_k, "results": results}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Lỗi RAG search: {e}"}
+
+
 _TOOL_EXECUTORS = {
-    "read_file": tool_read_file,
-    "list_directory": tool_list_directory,
-    "search_text": tool_search_text,
-    "analyze_code": tool_analyze_code,
+    "read_file":         tool_read_file,
+    "list_directory":    tool_list_directory,
+    "search_text":       tool_search_text,
+    "analyze_code":      tool_analyze_code,
     "get_project_status": tool_get_project_status,
-    "validate_file": tool_validate_file,
-    "application_action": tool_application_action,
-    # write_file and run_command are handled specially (require approval)
+    "validate_file":             tool_validate_file,
+    "app_action_viewer":         tool_application_action,
+    "app_action_reconstruction": tool_application_action,
+    "app_action_ai":             tool_application_action,
+    "app_action_general":        tool_application_action,
+    "rag_search":                tool_rag_search,
+    # write_file, run_command, patch_file, create_directory require approval
 }
 
 _TOOLS_REQUIRING_APPROVAL = {"write_file", "run_command", "patch_file", "create_directory"}
@@ -791,7 +853,7 @@ Bạn có khả năng THỰC THI các tác vụ trên project bằng cách gọi
 
 ## HOW TO CALL TOOLS:
 
-Khi cần sử dụng tool, trả lời CHÍNH XÁC theo format JSON sau (KHÔNG kèm text khác):
+Khi cần sử dụng tool, bạn LUÔN PHẢI giải thích ngắn gọn suy nghĩ/lý do của mình (Chain-of-thought) trước, sau đó GỌI TOOL BẰNG CÁCH trả lời CHÍNH XÁC theo format JSON sau:
 
 ```tool_call
 {{"tool": "tool_name", "params": {{"param1": "value1", "param2": "value2"}}}}
@@ -799,7 +861,7 @@ Khi cần sử dụng tool, trả lời CHÍNH XÁC theo format JSON sau (KHÔNG
 
 ## RULES:
 
-1. Phân tích yêu cầu người dùng, lên kế hoạch các bước cần thực hiện.
+1. Quan sát yêu cầu người dùng, xác định mục tiêu rõ ràng trước khi hành động.
 2. Gọi tool từng bước một. Sau mỗi kết quả tool, phân tích và quyết định bước tiếp.
 3. Khi đã có đủ thông tin, trả lời người dùng bằng text bình thường (KHÔNG gọi tool).
 4. Luôn đọc file trước khi sửa — KHÔNG viết file mà chưa đọc nội dung gốc.
@@ -809,13 +871,16 @@ Khi cần sử dụng tool, trả lời CHÍNH XÁC theo format JSON sau (KHÔNG
 8. Sử dụng Markdown formatting cho câu trả lời cuối cùng.
 9. Nếu task quá lớn hoặc nguy hiểm, hãy giải thích và hỏi lại trước khi thực hiện.
 10. Scope: chỉ làm việc trong thư mục project — không truy cập file ngoài project.
+12. Dùng rag_search TRƯỚC khi dùng read_file khi chưa biết file nào chứa thông tin cần tìm.
+13. DỪNG NGAY khi task đã hoàn thành — KHÔNG gọi thêm tool nếu kết quả đã rõ ràng.
 
-11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action. Do not substitute source-code tools. Call it once for each requested UI action. This overrides rule 3 — even if you already have relevant text in context (including RELEVANT DOCUMENTATION below), a request to change the app language is a UI action, NOT a request to translate that text. Never respond with a translated passage when the user is asking to switch the interface language.
+11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action ONCE. After the action succeeds, immediately provide a short confirmation message — do NOT call any more tools. This overrides rule 3.
 
 ## EXAMPLE:
 
 User: đổi project sang tiếng việt giúp tôi
 Assistant:
+Tôi sẽ gọi tool application_action để thay đổi ngôn ngữ giao diện sang tiếng Việt.
 ```tool_call
 {{"tool": "application_action", "params": {{"action": "language.change", "language": "vi"}}}}
 ```
@@ -1062,17 +1127,18 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # Build initial messages
     system_prompt = _build_agent_system_prompt(request.language)
 
-    # [FIX-12] Add RAG context if available — nhưng bỏ qua khi task có vẻ là
-    # một lệnh điều khiển UI mà fast-path (_match_desktop_action) không nhận
-    # diện được trọn vẹn. Nhồi tài liệu RAG không liên quan vào những câu như
-    # "đổi project sang tiếng việt" từng khiến model dịch nhầm nội dung RAG
-    # thay vì gọi application_action.
+    # RAG nay duoc cung cap nhu mot tool dong (rag_search) thay vi inject vao system prompt.
+    # Chi inject mot luong nho context khi task KHONG phai UI action va RAG san sang,
+    # de tranh lam day context window voi thong tin khong lien quan.
     if ENABLE_RAG and rag_runtime.knowledge_chunks and not _looks_like_ui_action(_normalise_agent_task(task)):
-        doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
-        if doc_ctx:
-            system_prompt += f"\n\n## RELEVANT DOCUMENTATION:\n{doc_ctx[:3000]}"
-        if code_ctx:
-            system_prompt += f"\n\n## RELEVANT CODE:\n{code_ctx[:3000]}"
+        try:
+            doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
+            if doc_ctx:
+                system_prompt += f"\n\n## RELEVANT DOCUMENTATION (tu khoa tim kiem: {task[:60]}):\n{doc_ctx[:1500]}"
+            if code_ctx:
+                system_prompt += f"\n\n## RELEVANT CODE (tu khoa tim kiem: {task[:60]}):\n{code_ctx[:1500]}"
+        except Exception:  # noqa: BLE001
+            pass
 
     if use_langgraph:
         return _run_langgraph_agent(system_prompt, task, session_id,
@@ -1144,6 +1210,15 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 "content": answer,
             })
             break
+
+        think_text = answer
+        if "```tool_call" in answer:
+            think_text = answer.split("```tool_call")[0].strip()
+        elif "{" in answer:
+            think_text = answer.split("{")[0].strip()
+            
+        if think_text:
+            steps.append({"type": "thinking", "content": think_text, "iteration": iteration})
 
         # It's a tool call
         steps.append({
@@ -1375,6 +1450,15 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         if tool_name_next is None:
             steps.append({"type": "final_answer", "content": answer})
             break
+
+        think_text = answer
+        if "```tool_call" in answer:
+            think_text = answer.split("```tool_call")[0].strip()
+        elif "{" in answer:
+            think_text = answer.split("{")[0].strip()
+            
+        if think_text:
+            steps.append({"type": "thinking", "content": think_text, "iteration": iteration})
 
         steps.append({
             "type": "tool_call",

@@ -126,7 +126,7 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
     return inputImage;
   }
 
-  const float SCORE_THRESHOLD = 0.5f;
+  const float SCORE_THRESHOLD = m_confidenceThreshold;
   const float NMS_THRESHOLD = 0.45f;
   const int INPUT_WIDTH = 640;
   const int INPUT_HEIGHT = 640;

@@ -5,6 +5,25 @@
 #include "Image2DLoader.h"
 #include "PanStyle.h"
 #include "SignalBus.h"
+#include "UserManager.h"
+
+#include <vtkRenderWindow.h>
+#include <vtkLight.h>
+#include <vtkCornerAnnotation.h>
+#include <vtkTextProperty.h>
+#include <vtkPoints.h>
+#include <vtkCellArray.h>
+#include <vtkPolyData.h>
+#include <vtkCoordinate.h>
+#include <vtkPolyDataMapper2D.h>
+#include <vtkActor2D.h>
+#include <vtkProperty2D.h>
+#include <vtkAxesActor.h>
+#include <vtkOrientationMarkerWidget.h>
+#include <vtkPlaneSource.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkProperty.h>
+#include <vtkActor.h>
 #include <QFileDialog>
 #include "../utils/ModernMessageBox.h"
 #include <vtkRenderWindow.h>
@@ -230,4 +249,79 @@ void SceneService::setupCrosshairInteractor() {
     m_crosshairStyle = style;
 
     m_vtkWidget->renderWindow()->GetInteractor()->SetInteractorStyle(m_crosshairStyle);
+}
+
+void SceneService::applyViewSettings(const QString& username) {
+    if (!m_renderer || !m_vtkWidget || !m_vtkWidget->renderWindow()) return;
+
+    auto* um = UserManager::instance();
+    if (!um) return;
+
+    // ── 1. Background color ─────────────────────────────────────────────────
+    int bgColorIdx = um->getUserPref(username, "view_bg_color", "0").toInt();
+    switch (bgColorIdx) {
+    case 1: // Light
+        m_renderer->SetBackground(0.85, 0.87, 0.90);
+        m_renderer->SetBackground2(1.0, 1.0, 1.0);
+        m_renderer->GradientBackgroundOn();
+        break;
+    case 2: // Gray
+        m_renderer->SetBackground(0.45, 0.45, 0.48);
+        m_renderer->SetBackground2(0.60, 0.60, 0.63);
+        m_renderer->GradientBackgroundOn();
+        break;
+    default: // Dark (0)
+        m_renderer->SetBackground(0.06, 0.06, 0.08);
+        m_renderer->SetBackground2(0.14, 0.14, 0.18);
+        m_renderer->GradientBackgroundOn();
+        break;
+    }
+
+    // 2. Axes
+    bool showAxes = um->getUserPref(username, "view_show_axes", "true") == "true";
+    if (showAxes) {
+        if (!m_axesWidget) {
+            auto axesActor = vtkSmartPointer<vtkAxesActor>::New();
+            m_axesWidget = vtkOrientationMarkerWidget::New();
+            m_axesWidget->SetOutlineColor(0.93, 0.57, 0.13);
+            m_axesWidget->SetOrientationMarker(axesActor);
+            m_axesWidget->SetInteractor(m_vtkWidget->renderWindow()->GetInteractor());
+            m_axesWidget->SetViewport(0.0, 0.0, 0.18, 0.22);
+            m_axesWidget->EnabledOn();
+            m_axesWidget->InteractiveOff();
+        } else {
+            m_axesWidget->EnabledOn();
+        }
+    } else {
+        if (m_axesWidget) m_axesWidget->EnabledOff();
+    }
+
+    // 3. Grid
+    bool showGrid = um->getUserPref(username, "view_show_grid", "true") == "true";
+    if (showGrid && !m_gridActor) {
+        // Build a large grid-plane slightly below the scene origin
+        vtkNew<vtkPlaneSource> plane;
+        plane->SetXResolution(20);
+        plane->SetYResolution(20);
+        plane->SetOrigin(-10.0, -10.0, -0.01);
+        plane->SetPoint1( 10.0, -10.0, -0.01);
+        plane->SetPoint2(-10.0,  10.0, -0.01);
+        plane->Update();
+
+        vtkNew<vtkPolyDataMapper> gridMapper;
+        gridMapper->SetInputConnection(plane->GetOutputPort());
+
+        m_gridActor = vtkSmartPointer<vtkActor>::New();
+        m_gridActor->SetMapper(gridMapper);
+        m_gridActor->GetProperty()->SetRepresentationToWireframe();
+        m_gridActor->GetProperty()->SetColor(0.35, 0.35, 0.38);
+        m_gridActor->GetProperty()->SetOpacity(0.5);
+        m_gridActor->GetProperty()->LightingOff();
+        m_renderer->AddActor(m_gridActor);
+    } else if (!showGrid && m_gridActor) {
+        m_renderer->RemoveActor(m_gridActor);
+        m_gridActor = nullptr;
+    }
+
+    m_vtkWidget->renderWindow()->Render();
 }

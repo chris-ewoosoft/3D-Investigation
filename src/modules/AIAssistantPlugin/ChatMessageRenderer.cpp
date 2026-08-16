@@ -114,7 +114,21 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
         for (int i = priorStepCount; i < steps.size(); ++i) {
             QJsonObject step = steps[i].toObject();
             QString type = step["type"].toString();
-            if (type == "tool_call") {
+            if (type == "thinking") {
+                QString title = ctx->translate("ai.agent_thinking");
+                if (title == "ai.agent_thinking") title = "🤔 " + ctx->translate("ai.thinking");
+                if (title == "🤔 ai.thinking") title = "🤔 Thinking...";
+                html += ChatTemplates::AGENT_THINKING.arg(title, step["content"].toString().toHtmlEscaped());
+            } else if (type == "plan") {
+                const QJsonArray planSteps = step["steps"].toArray();
+                QString planHtml;
+                for (int pi = 0; pi < planSteps.size(); ++pi) {
+                    planHtml += QString("<div style='margin:2px 0;'><span style='color:#8b5cf6; font-weight:bold;'>%1.</span> %2</div>")
+                        .arg(pi + 1)
+                        .arg(planSteps[pi].toString().toHtmlEscaped());
+                }
+                html += ChatTemplates::AGENT_THINKING.arg("📌 Kế hoạch", planHtml);
+            } else if (type == "tool_call") {
                 QString toolName = step["tool"].toString();
                 QString paramsStr = QString::fromUtf8(QJsonDocument(step["params"].toObject()).toJson(QJsonDocument::Compact));
                 html += ChatTemplates::AGENT_TOOL_CALL.arg("🔧", toolName, paramsStr.toHtmlEscaped());

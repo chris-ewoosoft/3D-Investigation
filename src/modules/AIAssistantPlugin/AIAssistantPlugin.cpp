@@ -79,6 +79,12 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             auto *btn = m_ribbonUI->btnRestartModel();
             btn->setEnabled(false);
             btn->setText(m_ctx->translate("ai.reloading"));
+            if (m_progressDialog) {
+                m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_model"));
+                m_progressDialog->setRange(0, 0);
+                m_progressDialog->show();
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+            }
             m_aiAssistant->restartModel();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -90,6 +96,12 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             auto *btn = m_ribbonUI->btnRestartRAG();
             btn->setEnabled(false);
             btn->setText(m_ctx->translate("ai.reloading"));
+            if (m_progressDialog) {
+                m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_rag"));
+                m_progressDialog->setRange(0, 0);
+                m_progressDialog->show();
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+            }
             m_aiAssistant->restartRAG();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -98,6 +110,12 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         });
         connect(m_ribbonUI->btnRestartAgent(), &QToolButton::clicked, this, [this]() {
             if (!m_aiAssistant) return;
+            if (m_progressDialog) {
+                m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_agent"));
+                m_progressDialog->setRange(0, 0);
+                m_progressDialog->show();
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+            }
             m_aiAssistant->restartAgent();
         });
         connect(m_ribbonUI->btnRestartServer(), &QToolButton::clicked, this, [this]() {
@@ -105,6 +123,12 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             auto *btn = m_ribbonUI->btnRestartServer();
             btn->setEnabled(false);
             btn->setText(m_ctx->translate("ai.reloading"));
+            if (m_progressDialog) {
+                m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_server"));
+                m_progressDialog->setRange(0, 0);
+                m_progressDialog->show();
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+            }
             m_aiAssistant->restartServer();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -466,7 +490,7 @@ void AIAssistantPlugin::onAssistantStatusChanged(const QString &status) {
     if (!m_dockUI) return;
     if (status == m_ctx->translate("ai.starting_server")) return;
     
-    if (status == m_ctx->translate("ai.server_ready")) {
+    if (status == m_ctx->translate("ai.server_ready") || status.startsWith(QString::fromUtf8("✅ "))) {
         m_isStartingServer = false;
         if (m_progressDialog) m_progressDialog->hide();
         m_dockUI->chatHistory()->append("<font color='#00A36C'><b>" + status + "</b></font>");
@@ -484,10 +508,8 @@ void AIAssistantPlugin::onAssistantError(const QString &error) {
     if (!m_dockUI) return;
     m_dockUI->chatHistory()->append("<font color='red'>" + error + "</font>");
     m_dockUI->chatHistory()->moveCursor(QTextCursor::End);
-    if (m_isStartingServer) {
-        m_isStartingServer = false;
-        if (m_progressDialog) m_progressDialog->hide();
-    }
+    m_isStartingServer = false;
+    if (m_progressDialog) m_progressDialog->hide();
 }
 
 void AIAssistantPlugin::onAttachImage() {

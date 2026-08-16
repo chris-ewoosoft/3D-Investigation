@@ -1,4 +1,4 @@
-#ifndef CHAT_TEMPLATES_H
+﻿#ifndef CHAT_TEMPLATES_H
 #define CHAT_TEMPLATES_H
 
 #include <QString>
@@ -98,6 +98,14 @@ namespace ChatTemplates {
     const QString FILE_ATTACHMENT = R"(
         <div style='margin-bottom:4px;'><a href='%1' style='color:#10a37f; text-decoration:none;'>📎 %2</a></div>
     )";
+
+    const QString AGENT_THINKING = R"(
+        <div style='background-color:#202026; border-left: 3px solid #8b5cf6; border-radius: 4px; padding: 8px; margin-bottom: 8px;'>
+            <div style='color:#8b5cf6; font-weight:bold; font-size:12px; margin-bottom:4px;'>%1</div>
+            <div style='color:#bbb; font-style:italic; font-size:12px; white-space:pre-wrap;'>%2</div>
+        </div>
+    )";
+
     const QString AGENT_TOOL_CALL = R"(
         <div style='background-color:#2f3037; border-left: 3px solid #3b82f6; border-radius: 4px; padding: 8px; margin-bottom: 8px;'>
             <div style='color:#3b82f6; font-weight:bold; font-size:12px; margin-bottom:4px;'>%1 %2</div>

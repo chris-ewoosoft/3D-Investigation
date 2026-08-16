@@ -345,7 +345,10 @@ QJsonObject AIAssistant::buildCompletionPayload(const QList<QJsonObject> &messag
 
     QJsonObject js;
     js["messages"]    = msgs;
-    js["temperature"] = AppConstants::AIServer::DEFAULT_TEMPERATURE;
+
+    auto *userManager = UserManager::instance();
+    double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", QString::number(AppConstants::AIServer::DEFAULT_TEMPERATURE)).toDouble() : AppConstants::AIServer::DEFAULT_TEMPERATURE;
+    js["temperature"] = temp;
     js["max_tokens"]  = AppConstants::AIServer::DEFAULT_MAX_TOKENS;
     return js;
 }
@@ -522,9 +525,12 @@ void AIAssistant::retryAgentTask(const QString &sessionId, int msgIndex) {
     request.sessionId = sessionId;
     request.isAgent = true;
     request.insertAfterIndex = msgIndex;
+    auto *userManager = UserManager::instance();
+    double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", "0.3").toDouble() : 0.3;
+    
     request.payload["task"] = msg["content"].toString();
     request.payload["session_id"] = sessionId;
-    request.payload["temperature"] = 0.3;
+    request.payload["temperature"] = temp;
     request.payload["language"] = LanguageManager::instance().currentLanguage();
     m_queuedRequests.append(request);
     m_isThinking = true;
@@ -575,10 +581,13 @@ void AIAssistant::executeAgentTask(const QString &sessionId, const QString &task
     saveAllSessions();
     emit historyChanged();
 
+    auto *userManager = UserManager::instance();
+    double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", "0.3").toDouble() : 0.3;
+
     QJsonObject payload;
     payload["task"] = task;
     payload["session_id"] = targetSessionId;
-    payload["temperature"] = 0.3;
+    payload["temperature"] = temp;
     payload["language"] = LanguageManager::instance().currentLanguage();
 
     QueuedCompletionRequest request;
