@@ -211,6 +211,35 @@ class TxtLoader(BaseDocumentLoader):
         return self._sliding_window_chunks(content, fp, label="Tai lieu TXT")
 
 
+class EmailLoader(BaseDocumentLoader):
+    """Extract readable text from saved .eml project correspondence."""
+    def can_handle(self, fp: str) -> bool: return fp.lower().endswith(".eml")
+
+    def load(self, fp: str) -> list:
+        from email import policy
+        from email.parser import BytesParser
+
+        with open(fp, "rb") as handle:
+            message = BytesParser(policy=policy.default).parse(handle)
+        parts = []
+        subject = str(message.get("subject", "")).strip()
+        if subject:
+            parts.append(f"Subject: {subject}")
+        for part in message.walk():
+            if part.get_content_disposition() == "attachment" or part.get_content_type() != "text/plain":
+                continue
+            try:
+                body = part.get_content().strip()
+            except (LookupError, UnicodeError):
+                body = ""
+            if body:
+                parts.append(body)
+        content = "\n\n".join(parts)
+        if len(content) < self.MIN_CHUNK_CHARS:
+            raise ValueError(f"Email rong hoac khong co text: {fp}")
+        return self._sliding_window_chunks(content, fp, label="Email")
+
+
 class MarkdownLoader(BaseDocumentLoader):
     HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
 
@@ -380,6 +409,7 @@ def build_registry() -> DocumentLoaderRegistry:
         .register(DocxLoader())
         .register(PdfLoader())
         .register(TxtLoader())
+        .register(EmailLoader())
         .register(MarkdownLoader())
         .register(CppHeaderLoader())
         .register(ImageLoader())
@@ -393,27 +423,31 @@ EXCLUDED_DIRS  = {
     ".github", ".prompts", ".review", ".tasks", "scripts"
 }
 SCANNABLE_EXTS = {".cpp", ".h", ".py", ".md", ".cmake", ".jpg", ".jpeg", ".png", ".webp"}
-DOC_EXTS_GLOB  = ("*.docx", "*.pdf", "*.txt", "*.jpg", "*.jpeg", "*.png", "*.webp")
+DOC_EXTS = {".docx", ".pdf", ".txt", ".eml", ".jpg", ".jpeg", ".png", ".webp"}
 
 
 def load_documents() -> list:
     registry   = build_registry()
     all_chunks: list = []
-    stats = {"docx":0,"pdf":0,"txt":0,"md":0,"source":0,"errors":0,"files":0}
+    stats = {"docx":0,"pdf":0,"txt":0,"eml":0,"md":0,"source":0,"errors":0,"files":0}
 
-    if os.path.isdir(DOCS_DIR):
-        for pattern in DOC_EXTS_GLOB:
-            for fp in sorted(glob.glob(os.path.join(DOCS_DIR, pattern))):
-                stats["files"] += 1
-                results = registry.load_file(fp)
-                if not results:
-                    stats["errors"] += 1
-                    continue
-                for r in results:
-                    all_chunks.append(r)
-                    ext = os.path.splitext(fp)[1].lower().lstrip(".")
-                    if ext in stats:
-                        stats[ext] += 1
+    for docs_dir in dict.fromkeys(RAG_DOCUMENT_DIRS):
+        if os.path.isdir(docs_dir):
+            for root, _, files in os.walk(docs_dir):
+                for filename in sorted(files):
+                    if os.path.splitext(filename)[1].lower() not in DOC_EXTS:
+                        continue
+                    fp = os.path.join(root, filename)
+                    stats["files"] += 1
+                    results = registry.load_file(fp)
+                    if not results:
+                        stats["errors"] += 1
+                        continue
+                    for r in results:
+                        all_chunks.append(r)
+                        ext = os.path.splitext(fp)[1].lower().lstrip(".")
+                        if ext in stats:
+                            stats[ext] += 1
 
     for root, dirs, files in os.walk(PROJECT_DIR):
         dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS)
@@ -436,7 +470,7 @@ def load_documents() -> list:
         stats["md"], stats["source"], stats["errors"]
     )
     print(f"       files={stats['files']}  chunks={len(all_chunks)}"
-          f"  (docx={stats['docx']} pdf={stats['pdf']} txt={stats['txt']}"
+          f"  (docx={stats['docx']} pdf={stats['pdf']} txt={stats['txt']} eml={stats['eml']}"
           f" md={stats['md']} src={stats['source']} err={stats['errors']})")
     return all_chunks
 
@@ -444,8 +478,10 @@ def load_documents() -> list:
 # ─── 12. Cache management ─────────────────────────────────────────────────────
 def get_file_system_hash() -> str:
     entries = []
-    if os.path.isdir(DOCS_DIR):
-        for root, _, files in os.walk(DOCS_DIR):
+    for docs_dir in dict.fromkeys(RAG_DOCUMENT_DIRS):
+        if not os.path.isdir(docs_dir):
+            continue
+        for root, _, files in os.walk(docs_dir):
             for f in sorted(files):
                 path = os.path.join(root, f)
                 try:
@@ -550,10 +586,12 @@ def build_index_from_scratch(chunks: list, embed_model):
     image_items = []
 
     for i, c in enumerate(chunks):
-        if getattr(c, "is_image", False):
+        if getattr(c, "is_image", False) and EMBEDDING_SUPPORTS_IMAGES:
             image_items.append((i, c.source_path))
         else:
-            texts.append(getattr(c, "text", str(c)))
+            # multilingual-e5 requires passage/query prefixes.  Omitting them
+            # noticeably reduces retrieval quality, especially for Vietnamese.
+            texts.append(EMBEDDING_PASSAGE_PREFIX + getattr(c, "text", str(c)))
             text_indices.append(i)
 
     final_embeddings = [None] * len(chunks)
@@ -648,6 +686,9 @@ def build_index_from_scratch(chunks: list, embed_model):
         _faiss.normalize_L2(normed)
         index.train(normed)
         index.add(normed)
+        # IVF defaults to probing one cluster, which trades away recall.  RAG
+        # answers value recall at this stage; reranking handles precision later.
+        index.nprobe = min(16, nlist)
 
     logger.info("FAISS built: ntotal=%d dim=%d", index.ntotal, dim)
 
@@ -727,13 +768,28 @@ _reranker        = None   # Cross-encoder, load lúc startup nếu USE_RERANKER=
 is_vision_model  = False  # True khi chạy Qwen2.5-VL (vision model)
 
 
-def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 14, final_k: int = 10) -> list:
+def _rrf_fuse(rankings: list[list[int]], weights: list[float], k: int = 60) -> list[tuple[int, float]]:
+    """Fuse ranked lists without query-dependent score normalization.
+
+    Min/max normalization makes a weak result look strong whenever every
+    candidate has a similar score. Reciprocal-rank fusion preserves agreement
+    between lexical and semantic retrievers and is robust across queries.
+    """
+    scores: dict[int, float] = {}
+    for ranking, weight in zip(rankings, weights):
+        for rank, chunk_id in enumerate(ranking, 1):
+            if chunk_id >= 0:
+                scores[chunk_id] = scores.get(chunk_id, 0.0) + weight / (k + rank)
+    return sorted(scores.items(), key=lambda item: item[1], reverse=True)
+
+
+def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 30, final_k: int = 12) -> list:
     """
     Hybrid semantic (text/image) + BM25 (text only) retrieval.
     """
     import numpy as np
 
-    if knowledge_index is None or not knowledge_chunks:
+    if knowledge_index is None or not knowledge_chunks or (not query.strip() and not query_image_b64):
         return []
 
     if embed_model_ref is None:
@@ -746,45 +802,37 @@ def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 14,
     n = min(k, len(knowledge_chunks))
 
     # Semantic search with query text or query image
-    if query_image_b64:
+    if query_image_b64 and EMBEDDING_SUPPORTS_IMAGES:
         import io
 
         from PIL import Image
         img_data = base64.b64decode(query_image_b64.split(",")[1])
         qv_input = [Image.open(io.BytesIO(img_data)).convert("RGB")]
     else:
-        qv_input = [query]
+        qv_input = [EMBEDDING_QUERY_PREFIX + query]
 
     qv = embed_model_ref.encode(qv_input, normalize_embeddings=True)
     sem_raw, sem_idx = knowledge_index.search(np.array(qv, dtype="float32"), n)
     sem_raw = sem_raw[0]
     sem_idx = sem_idx[0]
 
-    sem_min, sem_max = sem_raw.min(), sem_raw.max()
-    sem_range = sem_max - sem_min if sem_max != sem_min else 1.0
-    sem_norm  = {int(i): (s-sem_min)/sem_range for i, s in zip(sem_idx, sem_raw) if i >= 0}
+    sem_idx_list = [int(i) for i in sem_idx if i >= 0]
+    sem_scores = {int(i): float(s) for i, s in zip(sem_idx, sem_raw) if i >= 0}
 
     # [FIX-6] BM25 với Vietnamese tokenizer
-    if query_image_b64:
+    if query_image_b64 and EMBEDDING_SUPPORTS_IMAGES:
         # BM25 is not used for image queries
-        combined = [(cid, float(sem_raw[list(sem_idx).index(cid)])) for cid in sem_idx if cid >= 0]
+        combined = [(cid, sem_scores[cid]) for cid in sem_idx_list]
     else:
         bm25_raw     = np.array(bm25_index.get_scores(_tokenize_vn(query)))
         bm25_top_idx = np.argsort(bm25_raw)[::-1][:n]
-        b_scores     = bm25_raw[bm25_top_idx]
-        b_min, b_max = b_scores.min(), b_scores.max()
-        b_range      = b_max - b_min if b_max != b_min else 1.0
-        bm25_norm    = {int(i): (s-b_min)/b_range for i, s in zip(bm25_top_idx, b_scores)}
+        bm25_idx_list = [int(i) for i in bm25_top_idx if bm25_raw[int(i)] > 0]
 
-        sem_idx_list = list(sem_idx)
-        combined = []
-        for cid in set(sem_norm) | set(bm25_norm):
-            s = sem_norm.get(cid, 0.0)
-            b = bm25_norm.get(cid, 0.0)
-            raw_cos = float(sem_raw[sem_idx_list.index(cid)]) if cid in sem_norm else 0.0
-            if raw_cos < SIMILARITY_THRESHOLD and b < 0.3:
-                continue
-            combined.append((cid, 0.55*s + 0.45*b))
+        # Do not manufacture context for an unrelated question: a candidate
+        # needs either meaningful lexical evidence or semantic similarity.
+        semantic_ranked = [cid for cid in sem_idx_list
+                           if sem_scores[cid] >= SIMILARITY_THRESHOLD]
+        combined = _rrf_fuse([semantic_ranked, bm25_idx_list], [0.55, 0.45])
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [knowledge_chunks[cid] for cid, _ in combined[:final_k]]
@@ -832,20 +880,23 @@ def _format_context_block(chunks: list, section_title: str) -> str:
     return "\n".join(lines)
 
 
-def get_context(query: str, query_image_b64: str | None = None) -> tuple:
+def get_context(query: str, query_image_b64: str | None = None, result_k: int = RERANKER_TOP_K) -> tuple:
     if not ENABLE_RAG:
         return "", "", []
 
     # Bước 1: Hybrid retrieve
-    candidates = hybrid_retrieve(query, query_image_b64=query_image_b64, k=14, final_k=10)
+    candidates = hybrid_retrieve(query, query_image_b64=query_image_b64, k=30, final_k=12)
 
     # Bước 2: Cross-encoder re-rank
     if USE_RERANKER and query:
         candidates = _rerank(query, candidates)
         candidates = candidates[:RERANKER_TOP_K]
+    else:
+        candidates = candidates[:12]
 
     # Bước 3: Source dedup
     candidates = _dedup_by_source(candidates, max_per_source=2)
+    candidates = candidates[:max(1, min(result_k, RERANKER_TOP_K))]
 
     # Bước 4: Phân loại + cắt theo ngân sách context
     doc_chunks   = []

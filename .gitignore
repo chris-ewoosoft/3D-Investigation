@@ -101,6 +101,7 @@ CMakeLists.txt.user*
 /Doxygen/latex/
 /AITraining/Cache/
 /AITraining/logs/
+/AITraining/pending_agent_actions.json
 /AITraining/Docs/
 /AITraining/Models/*.onnx
 /Config/chat_sessions*.json

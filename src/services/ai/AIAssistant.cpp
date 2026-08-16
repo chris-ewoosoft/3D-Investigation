@@ -1,4 +1,5 @@
 #include "AIAssistant.h"
+#include "AgentActionManifest.h"
 #include "ChatSessionStore.h"
 #include <QStandardPaths>
 #include "AppConfig.h"
@@ -404,7 +405,9 @@ void AIAssistant::processNextQueuedRequest() {
 
     QString urlStr = AppConstants::AIServer::apiEndpoint();
     if (request.isAgent) {
-        if (request.isApproval) {
+        if (request.isUiActionAck) {
+            urlStr = urlStr.replace("/chat/completions", "/agent/ui-action-result");
+        } else if (request.isApproval) {
             urlStr = urlStr.replace("/chat/completions", "/agent/approve");
         } else {
             urlStr = urlStr.replace("/chat/completions", "/agent/execute");
@@ -635,6 +638,21 @@ void AIAssistant::rejectAgentAction(const QString &sessionId, const QString &act
     processNextQueuedRequest();
 }
 
+void AIAssistant::reportUiActionResult(const QString &requestId, bool success, const QVariantMap &result) {
+    if (requestId.isEmpty()) return;
+    QueuedCompletionRequest request;
+    request.sessionId = m_pendingUiActionSessions.take(requestId);
+    if (request.sessionId.isEmpty()) request.sessionId = m_currentSessionId;
+    request.isAgent = true;
+    request.isUiActionAck = true;
+    request.payload["request_id"] = requestId;
+    request.payload["success"] = success;
+    request.payload["result"] = QJsonObject::fromVariantMap(result);
+    m_queuedRequests.append(request);
+    m_isThinking = true;
+    processNextQueuedRequest();
+}
+
 // ── Process callbacks ─────────────────────────────────────────────────────────
 
 void AIAssistant::onProcessReadyRead() {
@@ -756,10 +774,18 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
                     step.value("tool").toString() != "application_action") {
                     continue;
                 }
-                const QJsonObject params = step.value("params").toObject();
-                const QString action = params.value("action").toString();
+                QJsonObject params = step.value("params").toObject();
+                QString action = params.value("action").toString();
                 if (action.isEmpty()) continue;
-                emit agentUiActionRequested(action, params.toVariantMap());
+                const QString requestId = params.value("request_id").toString();
+                if (!requestId.isEmpty()) m_pendingUiActionSessions.insert(requestId, sessionId);
+                QString manifestError;
+                QVariantMap actionParams = params.toVariantMap();
+                if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {
+                    reportUiActionResult(requestId, false, QVariantMap{{"error", manifestError}});
+                    continue;
+                }
+                emit agentUiActionRequested(action, actionParams);
             }
             
             // Append agent step message to history to keep it
@@ -780,7 +806,7 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
             
             if (res.value("status").toString() == "pending_approval") {
                 emit agentApprovalRequired(sessionId, res);
-            } else {
+            } else if (res.value("status").toString() != "pending_ui_action") {
                 emit agentTaskCompleted(sessionId, "");
             }
             emit agentStepReceived(sessionId, res);

@@ -1,11 +1,24 @@
 # ruff: noqa: I001
 import fnmatch
+import queue
 import subprocess
+from collections.abc import Callable
 
 from .config import *
 from .config import _safe_relpath
 from . import llm_module as llm_runtime
 from . import rag_module as rag_runtime
+from .action_manifest import (
+    canonicalise_action_params,
+    looks_like_ui_action as _manifest_looks_like_ui_action,
+    match_action_intent as _manifest_match_action_intent,
+    normalise_text as _normalise_agent_task,
+    validate_action_params,
+)
+from .tool_contract import build_tool_models, grammar_schema, openai_tools, validate_tool_call
+from .sandbox import run as run_sandboxed_command, write_file as write_sandboxed_file
+from .observability import record_tool, span
+from .inference import backend_mode, openai_compatible_completion
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
@@ -149,6 +162,23 @@ AGENT_TOOLS = [
         },
     },
 ]
+
+# ``application_action`` is the sole public UI tool.  The former category
+# names remain parser aliases for old conversations, but are not model tools.
+AGENT_TOOLS = [tool for tool in AGENT_TOOLS if not tool["name"].startswith("app_action_")]
+AGENT_TOOLS.append({
+    "name": "application_action",
+    "description": "Execute a canonical desktop action from the shared action manifest.",
+    "parameters": {
+        "action": {"type": "string", "description": "Canonical desktop action id", "required": True},
+        "language": {"type": "string", "description": "Required only for language.change: vi or en", "required": False},
+        "username": {"type": "string", "description": "Optional login username", "required": False},
+        "password": {"type": "string", "description": "Optional login password", "required": False},
+    },
+})
+_TOOL_PARAM_MODELS = build_tool_models(AGENT_TOOLS)
+_LLAMA_CPP_TOOLS = openai_tools(AGENT_TOOLS)
+_TOOL_GRAMMAR_SCHEMA = grammar_schema(AGENT_TOOLS)
 
 # ── Safety: các thư mục/file cấm truy cập ────────────────────────────────────
 _AGENT_BLOCKED_DIRS = {".git", "build", "__pycache__", ".vs", "node_modules"}
@@ -527,158 +557,30 @@ def tool_validate_file(params: dict) -> dict:
         return {"success": False, "path": path, "error": str(error)}
 
 
-_DESKTOP_ACTIONS = {
-    "viewer.load_2d", "viewer.load_3d", "viewer.load_dicom",
-    "reconstruction.load_images", "reconstruction.start_reconstruction",
-    "reconstruction.view_3d_model", "reconstruction.close_3d_model",
-    "ai.run_detection", "ai.run_segmentation", "ai.video_tracking",
-    "ai.hide_results", "ai.training_model", "ai.view_training_charts",
-    "assistant.open", "assistant.close", "assistant.reload_model",
-    "assistant.reload_rag", "assistant.reload_agent", "assistant.reload_server",
-    "mail.open", "mail.close", "mail.settings",
-    "help.about", "language.change", "admin.settings", "admin.change_avatar",
-    "admin.change_password", "admin.logout", "admin.login",
-}
-
-# Small local models occasionally invent a close-but-invalid action name.  Keep
-# the server-to-Qt contract canonical instead of letting such an alias trigger
-# unnecessary source-code searches and consume the agent context window.
-_DESKTOP_ACTION_ALIASES = {
-    "reconstruction.load_3d_model": "viewer.load_3d",
-    "viewer.load_3d_model": "viewer.load_3d",
-    "reconstruction.load_2d_image": "viewer.load_2d",
-    "viewer.load_2d_image": "viewer.load_2d",
-    "viewer.load_dicom_series": "viewer.load_dicom",
-    "reconstruction.load_dicom_series": "viewer.load_dicom",
-    "reconstruction.run": "reconstruction.start_reconstruction",
-    "reconstruction.start": "reconstruction.start_reconstruction",
-    "reconstruction.toggle_3d_model": "reconstruction.view_3d_model",
-    "ai.detection": "ai.run_detection",
-    "ai.segmentation": "ai.run_segmentation",
-    "ai.tracking": "ai.video_tracking",
-    "language.set": "language.change",
-    "language.changed": "language.change",
-    "mail.inbox": "mail.open",
-    "mail.open_inbox": "mail.open",
-}
-
-
 def _canonical_desktop_action(params: dict) -> dict | None:
-    """Return canonical action parameters, or None for an unknown action."""
-    canonical = _DESKTOP_ACTION_ALIASES.get(params.get("action", ""), params.get("action", ""))
-    if canonical not in _DESKTOP_ACTIONS:
-        return None
-    result = dict(params)
-    result["action"] = canonical
-    return result
-
-
-def _normalise_agent_task(text: str) -> str:
-    normalized = unicodedata.normalize("NFD", text.casefold())
-    normalized = "".join(c for c in normalized if unicodedata.category(c) != "Mn")
-    normalized = normalized.replace("đ", "d")
-    # Vietnamese đ is not decomposed by NFD, so normalize it explicitly.
-    normalized = normalized.replace("đ", "d")
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-# Từ khóa gợi ý đây là lệnh điều khiển UI — dùng để (a) tắt bơm RAG context
-# không liên quan khi request rơi xuống LangGraph, và (b) làm tín hiệu cho
-# bước self-correction trong _run_langgraph_agent khi model bỏ lỡ tool_call
-# ở lượt suy luận đầu tiên. Đây KHÔNG phải một fast-path bypass — quyết định
-# gọi tool cuối cùng vẫn hoàn toàn do model đưa ra qua LangGraph.
-_UI_ACTION_HINT_WORDS = (
-    "ngon ngu", "doi ngon ngu", "sang tieng viet", "sang tieng anh",
-    "sang english", "language", "mail", "avatar", "mat khau", "password",
-    "dang xuat", "logout", "dang nhap", "login", "reconstruction", "tai tao", "detection",
-    "nhan dien", "segmentation", "phan doan", "tracking", "theo doi video",
-    "dicom", "3d model", "training", "huan luyen", "bieu do", "gioi thieu",
-    "cai dat", "assistant", "2d", "3d", "hinh anh", "tai lai", "reload", "hop thu",
-)
+    """Compatibility wrapper around the shared action manifest."""
+    return canonicalise_action_params(params)
 
 
 def _looks_like_ui_action(text: str) -> bool:
-    return any(hint in text for hint in _UI_ACTION_HINT_WORDS)
+    return _manifest_looks_like_ui_action(text)
 
 
 def _match_desktop_action(task: str) -> dict | None:
-    """Recognise the fixed desktop commands without relying on LLM tool calling."""
-    text = _normalise_agent_task(task)
-
-    if "doi sang english" in text or "change to english" in text or "switch to english" in text:
-        return {"action": "language.change", "language": "en"}
-    if "doi sang tieng viet" in text or "change to vietnamese" in text or "switch to vietnamese" in text:
-        return {"action": "language.change", "language": "vi"}
-    if "change avatar" in text or "doi anh dai dien" in text or "doi avatar" in text:
-        return {"action": "admin.change_avatar"}
-    if "change password" in text or "doi mat khau" in text:
-        return {"action": "admin.change_password"}
-    if "dang nhap" in text or "login" in text:
-        return {"action": "admin.login", "username": "Admin", "password": "1"}
-    if "logout" in text or "dang xuat" in text:
-        return {"action": "admin.logout"}
-    if "mail settings" in text or "cai dat mail" in text:
-        return {"action": "mail.settings"}
-    if ("open mail" in text or "open email" in text or "mo mail" in text
-            or "mo email" in text or "open inbox" in text or "mo inbox" in text or "hop thu" in text or "mo hop thu" in text):
-        return {"action": "mail.open"}
-    if "close mail" in text or "dong mail" in text:
-        return {"action": "mail.close"}
-    if "tai lai model" in text or "reload model" in text:
-        return {"action": "assistant.reload_model"}
-    if "tai lai rag" in text or "reload rag" in text:
-        return {"action": "assistant.reload_rag"}
-    if "tai lai agent" in text or "reload agent" in text:
-        return {"action": "assistant.reload_agent"}
-    if "tai lai server" in text or "reload server" in text:
-        return {"action": "assistant.reload_server"}
-    if "open ai assistant" in text or "mo ai assistant" in text:
-        return {"action": "assistant.open"}
-    if "close ai assistant" in text or "dong ai assistant" in text:
-        return {"action": "assistant.close"}
-    if "view training charts" in text or "training charts" in text or "bieu do training" in text:
-        return {"action": "ai.view_training_charts"}
-    if "training model" in text or "train model" in text or "huan luyen model" in text:
-        return {"action": "ai.training_model"}
-    if "video tracking" in text or "theo doi video" in text:
-        return {"action": "ai.video_tracking"}
-    if "run segmentation" in text or "segmentation" in text or "phan doan" in text:
-        return {"action": "ai.run_segmentation"}
-    if "run detection" in text or "detection" in text or "nhan dien" in text:
-        return {"action": "ai.run_detection"}
-    if "hide results" in text or "an ket qua" in text:
-        return {"action": "ai.hide_results"}
-    if "start reconstruction" in text or "run reconstruction" in text or "bat dau tai tao" in text:
-        return {"action": "reconstruction.start_reconstruction"}
-    if "close view 3d model" in text or "close 3d model" in text or "dong 3d model" in text:
-        return {"action": "reconstruction.close_3d_model"}
-    if "view 3d model" in text or "show point cloud" in text or "xem 3d model" in text or re.search(r"xem.*mo hinh.*tai tao", text):
-        return {"action": "reconstruction.view_3d_model"}
-    if "load dicom" in text or "dicom series" in text or "tai dicom" in text or "anh dicom" in text:
-        return {"action": "viewer.load_dicom"}
-    if "load images" in text or "tai anh tai tao" in text or "anh tai tao" in text:
-        return {"action": "reconstruction.load_images"}
-    if "load 3d" in text or "tai 3d" in text or "hinh anh 3d" in text or "anh 3d" in text or re.search(r"tai.*mo hinh 3d", text) or re.search(r"mo.*file 3d", text):
-        return {"action": "viewer.load_3d"}
-    if "load 2d" in text or "tai 2d" in text or "hinh anh 2d" in text or "anh 2d" in text:
-        return {"action": "viewer.load_2d"}
-    if text == "about" or text.startswith("about ") or "gioi thieu" in text:
-        return {"action": "help.about"}
-    if text == "settings" or "admin settings" in text or "cai dat" in text:
-        return {"action": "admin.settings"}
-    return None
+    return _manifest_match_action_intent(task)
 
 
 def tool_application_action(params: dict) -> dict:
-    """Acknowledge a UI action that is executed by the connected Qt client."""
-    canonical_params = _canonical_desktop_action(params)
-    if canonical_params is None:
-        return {"error": f"Unsupported desktop action: {params.get('action', '')}"}
-    action = canonical_params["action"]
-    if action == "language.change" and canonical_params.get("language") not in {"vi", "en"}:
-        return {"error": "language.change requires language 'vi' or 'en'"}
-    return {"success": True, "action": action,
-            "message": "Action delegated to the connected Qt desktop client."}
+    """Create a UI-action request; success is only reported after Qt ACKs it."""
+    canonical_params, error = validate_action_params(params)
+    if error:
+        return {"error": error}
+    return {
+        "pending_ui_ack": True,
+        "action": canonical_params["action"],
+        "request_id": canonical_params.get("request_id", ""),
+        "message": "Action is awaiting acknowledgement from the Qt desktop client.",
+    }
 
 
 def _execute_approved_patch_file(params: dict) -> dict:
@@ -725,7 +627,7 @@ def tool_rag_search(params: dict) -> dict:
     if not rag_runtime.knowledge_chunks:
         return {"error": "RAG index chưa sẵn sàng."}
     try:
-        doc_ctx, code_ctx, _ = rag_runtime.get_context(query)
+        doc_ctx, code_ctx, _ = rag_runtime.get_context(query, result_k=top_k)
         results = []
         if doc_ctx:
             results.append({"source": "documentation", "content": doc_ctx[:3000]})
@@ -745,6 +647,7 @@ _TOOL_EXECUTORS = {
     "analyze_code":      tool_analyze_code,
     "get_project_status": tool_get_project_status,
     "validate_file":             tool_validate_file,
+    "application_action":         tool_application_action,
     "app_action_viewer":         tool_application_action,
     "app_action_reconstruction": tool_application_action,
     "app_action_ai":             tool_application_action,
@@ -797,13 +700,7 @@ def _execute_approved_write_file(params: dict) -> dict:
     if abs_path is None:
         return {"error": f"Đường dẫn không hợp lệ: {path}"}
 
-    try:
-        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-        with open(abs_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        return {"success": True, "path": path, "bytes_written": len(content.encode("utf-8"))}
-    except Exception as e:
-        return {"error": f"Lỗi ghi file: {e}"}
+    return write_sandboxed_file(abs_path, content, PROJECT_DIR)
 
 
 def _execute_approved_run_command(params: dict) -> dict:
@@ -819,30 +716,7 @@ def _execute_approved_run_command(params: dict) -> dict:
     if abs_cwd is None:
         abs_cwd = PROJECT_DIR
 
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=abs_cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        stdout = proc.stdout[:5000] if proc.stdout else ""
-        stderr = proc.stderr[:2000] if proc.stderr else ""
-        return {
-            "command": command,
-            "return_code": proc.returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {"error": f"Command timed out after {timeout}s: {command}"}
-    except Exception as e:
-        return {"error": f"Lỗi chạy command: {e}"}
+    return run_sandboxed_command(command, abs_cwd, timeout)
 
 
 # ── Agent System Prompt ───────────────────────────────────────────────────────
@@ -866,13 +740,12 @@ Bạn có khả năng THỰC THI các tác vụ trên project bằng cách gọi
 
 {tools_block}
 
-## HOW TO CALL TOOLS:
+## RESPONSE CONTRACT (STRICT):
 
-Khi cần sử dụng tool, bạn LUÔN PHẢI giải thích ngắn gọn suy nghĩ/lý do của mình (Chain-of-thought) trước, sau đó GỌI TOOL BẰNG CÁCH trả lời CHÍNH XÁC theo format JSON sau:
-
-```tool_call
-{{"tool": "tool_name", "params": {{"param1": "value1", "param2": "value2"}}}}
-```
+The server uses llama.cpp grammar-constrained decoding. Return EXACTLY one JSON
+object and no Markdown or reasoning.  To call a tool use
+{{"kind":"tool","tool":"tool_name","params":{{...}}}}.  For the final
+answer use {{"kind":"final","content":"your concise answer"}}.
 
 ## RULES:
 
@@ -886,19 +759,27 @@ Khi cần sử dụng tool, bạn LUÔN PHẢI giải thích ngắn gọn suy ng
 8. Sử dụng Markdown formatting cho câu trả lời cuối cùng.
 9. Nếu task quá lớn hoặc nguy hiểm, hãy giải thích và hỏi lại trước khi thực hiện.
 10. Scope: chỉ làm việc trong thư mục project — không truy cập file ngoài project.
+11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action ONCE. After the action succeeds, immediately provide a short confirmation message — do NOT call any more tools. This overrides rule 3.
 12. Dùng rag_search TRƯỚC khi dùng read_file khi chưa biết file nào chứa thông tin cần tìm.
 13. DỪNG NGAY khi task đã hoàn thành — KHÔNG gọi thêm tool nếu kết quả đã rõ ràng.
-
-11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action ONCE. After the action succeeds, immediately provide a short confirmation message — do NOT call any more tools. This overrides rule 3.
+14. Với câu trả lời về project, chỉ khẳng định điều có bằng chứng từ RAG/tool. Nếu kết quả không đủ bằng chứng, nói rõ không tìm thấy thay vì suy đoán. Khi cần chi tiết chính xác, dùng read_file để xác minh đoạn nguồn trước khi kết luận.
 
 ## EXAMPLE:
 
 User: đổi project sang tiếng việt giúp tôi
-Assistant:
-Tôi sẽ gọi tool application_action để thay đổi ngôn ngữ giao diện sang tiếng Việt.
-```tool_call
-{{"tool": "application_action", "params": {{"action": "language.change", "language": "vi"}}}}
-```
+Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"language.change","language":"vi"}}}}
+
+User: tải ảnh chụp và tái tạo 3d
+Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"reconstruction.load_images"}}}}
+
+User: mở hộp thư
+Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"mail.open"}}}}
+
+User: bắt đầu tái tạo 3D
+Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"reconstruction.start_reconstruction"}}}}
+
+User: chạy nhận diện đối tượng
+Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"ai.run_detection"}}}}
 
 ## PROJECT INFORMATION:
 - Project root: {_safe_relpath(PROJECT_DIR, PROJECT_DIR)} (thư mục gốc)
@@ -911,42 +792,106 @@ Respond to the user in {"Vietnamese" if language == "vi" else "English"}. Keep t
 
 
 def _parse_tool_call(response_text: str) -> tuple:
-    """
-    Parse tool_call from LLM response.
-    Returns (tool_name, params_dict) or (None, None) if not a tool call.
-    """
-    # Look for ```tool_call ... ``` block
-    match = re.search(r"```tool_call\s*\n?\s*(\{.*?\})\s*\n?\s*```", response_text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group(1))
-            tool_name = data.get("tool")
-            params = data.get("params", {})
-            if tool_name and isinstance(params, dict):
-                return tool_name, params
-        except (json.JSONDecodeError, KeyError):
-            pass
+    """Decode the JSON envelope emitted by llama.cpp constrained decoding.
 
-    # Fallback: try to parse the entire response as JSON
-    stripped = response_text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        try:
-            data = json.loads(stripped)
-            tool_name = data.get("tool")
-            params = data.get("params", {})
-            if tool_name and isinstance(params, dict):
-                return tool_name, params
-        except (json.JSONDecodeError, KeyError):
-            pass
+    This intentionally no longer searches prose with regex.  The fallback
+    accepts only a whole JSON object, so invalid/partial model output cannot
+    accidentally execute a tool.
+    """
+    _TOOL_NAME_ALIASES = {
+        "app_action_reconstruction": "application_action",
+        "app_action_general":        "application_action",
+        "app_action_ai":             "application_action",
+        "app_action_viewer":         "application_action",
+        "application_actions":       "application_action",
+        "app_action":                "application_action",
+        "desktop_action":            "application_action",
+        "ui_action":                 "application_action",
+    }
 
-    return None, None
+    def _normalise_tool_name(name: str) -> str:
+        return _TOOL_NAME_ALIASES.get(name, name)
+
+    try:
+        data = json.loads(response_text.strip())
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(data, dict) or data.get("kind") != "tool":
+        return None, None
+    tool_name = _normalise_tool_name(str(data.get("tool", "")))
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return None, None
+    validated, error = validate_tool_call(tool_name, params, _TOOL_PARAM_MODELS)
+    if error:
+        logger.warning("Rejected invalid constrained tool call %s: %s", tool_name, error)
+        return None, None
+    return tool_name, validated
+
+
+def _constrained_agent_completion(messages: list[dict], max_tokens: int, temperature: float) -> str:
+    """Generate exactly one final/tool envelope with llama.cpp grammar.
+
+    Grammar is the default because it works with local models that do not
+    implement a native function-calling chat template. Set
+    ``AGENT_NATIVE_TOOL_CALLS=1`` to use llama-cpp-python's OpenAI ``tools``
+    interface instead; both paths pass through the same Pydantic validation.
+    """
+    try:
+        if backend_mode() != "llama_cpp":
+            response = openai_compatible_completion(
+                messages, max_tokens=max_tokens, temperature=temperature,
+                tools=_LLAMA_CPP_TOOLS, tool_choice="auto",
+                response_format={"type": "json_object"},
+            )
+            message = response.get("choices", [{}])[0].get("message", {})
+            if message.get("tool_calls"):
+                call = message["tool_calls"][0]["function"]
+                return json.dumps({"kind": "tool", "tool": call["name"],
+                                   "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+            content = message.get("content", "")
+            # Remote deployments are expected to return the same envelope.
+            return content
+        from llama_cpp import LlamaGrammar  # imported lazily for testability
+        kwargs = {
+            "messages": messages, "max_tokens": max_tokens,
+            "temperature": temperature, "repeat_penalty": 1.1, "stream": False,
+        }
+        native_tools = os.getenv("AGENT_NATIVE_TOOL_CALLS", "0") == "1"
+        if native_tools:
+            kwargs.update({"tools": _LLAMA_CPP_TOOLS, "tool_choice": "auto"})
+        else:
+            kwargs["grammar"] = LlamaGrammar.from_json_schema(_TOOL_GRAMMAR_SCHEMA)
+        with llm_runtime.llm_lock:
+            response = llm_runtime.llm.create_chat_completion(**kwargs)
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"Constrained tool decoding failed: {error}") from error
+
+    message = response.get("choices", [{}])[0].get("message", {})
+    if message.get("tool_calls"):
+        call = message["tool_calls"][0]["function"]
+        return json.dumps({"kind": "tool", "tool": call["name"],
+                           "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+    content = message.get("content", "")
+    if not isinstance(content, str):
+        raise RuntimeError("Constrained decoder returned no text content")
+    try:
+        envelope = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Constrained decoder returned invalid JSON") from error
+    if envelope.get("kind") == "final" and isinstance(envelope.get("content"), str):
+        return envelope["content"]
+    if envelope.get("kind") == "tool":
+        return json.dumps(envelope, ensure_ascii=False)
+    raise RuntimeError("Constrained decoder returned an unsupported envelope")
 
 
 def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                          temperature: float, language: str, request_started: float,
                          initial_messages: list[dict[str, str]] | None = None,
                          initial_steps: list[dict] | None = None,
-                         initial_iteration: int = 0) -> dict:
+                         initial_iteration: int = 0,
+                         event_sink: Callable[[dict], None] | None = None) -> dict:
     """Run the tool loop through LangGraph while preserving the Qt API response."""
     if not LANGGRAPH_AVAILABLE or LocalAgentGraph is None:
         raise HTTPException(
@@ -962,20 +907,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         max_tokens = min(2048, max(512, LLM_N_CTX - estimated_tokens - 400))
 
         def call(msgs: list[dict[str, str]]) -> str:
-            with llm_runtime.llm_lock:
-                response_iter = llm_runtime.llm.create_chat_completion(
-                    messages=msgs,
-                    max_tokens=max_tokens,
-                    temperature=current_temperature,
-                    repeat_penalty=1.1,
-                    stream=True,
-                )
-                text = ""
-                for chunk in response_iter:
-                    delta = chunk["choices"][0].get("delta", {})
-                    if "content" in delta:
-                        text += delta["content"]
-                return text
+            return _constrained_agent_completion(msgs, max_tokens, current_temperature)
 
         logger.info("LangGraph gọi Model (messages: %d, estimated_tokens: %d)", len(messages), estimated_tokens)
         answer = call(messages)
@@ -1014,15 +946,19 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
 
     def execute(tool_name: str, params: dict) -> dict:
         if tool_name == "application_action":
-            canonical_params = _canonical_desktop_action(params)
-            if canonical_params is None:
-                return {"error": f"Unsupported desktop action: {params.get('action', '')}"}
+            canonical_params, error = validate_action_params(params)
+            if error:
+                return {"error": error}
+            canonical_params["request_id"] = _generate_action_id()
             params.clear()
             params.update(canonical_params)
         executor = _TOOL_EXECUTORS.get(tool_name)
         if executor is None:
             return {"error": f"Tool không tồn tại: {tool_name}"}
-        return executor(params)
+        with span("agent.tool", tool=tool_name, session_id=session_id):
+            result = executor(params)
+        record_tool(tool_name, "error" not in result)
+        return result
 
     logger.info("Khởi động LangGraph vòng lặp thực thi tool (session: %s)", session_id)
     graph = LocalAgentGraph(
@@ -1031,20 +967,25 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         execute=execute,        # Thực thi tool
         needs_approval=lambda tool_name: tool_name in _TOOLS_REQUIRING_APPROVAL, # Kiểm tra xem có cần approval không
         max_iterations=_AGENT_MAX_ITERATIONS, # Số lần lặp tối đa
+        emit=event_sink,
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
     state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration)
-    pending_status = "pending_approval" if state.get("pending_tool") else "completed"
+    pending_state = state.get("pending_tool") or {}
+    pending_status = ("pending_ui_action" if pending_state.get("ui_ack")
+                      else "pending_approval" if pending_state else "completed")
     logger.info("LangGraph hoàn thành vòng lặp execution (iteration: %d, status: %s)", state.get("iteration", 0), pending_status)
     steps = state["steps"]
     pending = state.get("pending_tool")
     if pending:
         action_id = _generate_action_id()
+        is_ui_ack = bool(pending.get("ui_ack"))
+        request_id = pending["params"].get("request_id", action_id)
         with _pending_lock:
-            _pending_actions[action_id] = {
+            _pending_actions[request_id if is_ui_ack else action_id] = {
                 "tool": pending["tool"],
                 "params": pending["params"],
                 "session_id": session_id,
@@ -1055,8 +996,17 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                 "temperature": temperature,
                 "language": language,
                 "created_at": time.time(),
+                "ui_ack": is_ui_ack,
             }
             _save_pending_actions()
+        if is_ui_ack:
+            return {
+                "status": "pending_ui_action", "session_id": session_id,
+                "steps": steps, "request_id": request_id,
+                "ui_action": {"request_id": request_id, "action": pending["params"]["action"],
+                              "params": pending["params"]},
+                "total_ms": round((time.monotonic() - request_started) * 1000),
+            }
         steps.append({
             "type": "pending_approval",
             "action_id": action_id,
@@ -1093,13 +1043,65 @@ class AgentApproveRequest(BaseModel):
     session_id: str = Field(default="")
 
 
+class AgentUiActionResultRequest(BaseModel):
+    request_id: str = Field(..., min_length=1)
+    success: bool
+    result: dict = Field(default_factory=dict)
+
+
 # ── Agent Endpoints ───────────────────────────────────────────────────────────
 
 _load_pending_actions()
 
 
 from fastapi import APIRouter  # noqa: E402,I001
+from fastapi.responses import StreamingResponse  # noqa: E402,I001
 agent_router = APIRouter()
+
+
+def _agent_response(payload: dict, request: Request):
+    """Negotiate JSON (Qt compatibility) or SSE on the same execute URL."""
+    if "text/event-stream" not in request.headers.get("accept", ""):
+        return payload
+
+    def events():
+        yield f"event: status\ndata: {json.dumps({'status': payload.get('status'), 'session_id': payload.get('session_id')})}\n\n"
+        for step in payload.get("steps", []):
+            yield f"event: step\ndata: {json.dumps(step, ensure_ascii=False)}\n\n"
+        yield f"event: done\ndata: {json.dumps({key: value for key, value in payload.items() if key != 'steps'}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _stream_langgraph_execution(run: Callable[[Callable[[dict], None]], dict]):
+    """Stream LangGraph node/tool steps as they happen over SSE."""
+    events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def worker() -> None:
+        try:
+            events.put(("result", run(lambda step: events.put(("step", step)))))
+        except Exception as error:  # noqa: BLE001
+            events.put(("error", str(error)))
+
+    threading.Thread(target=worker, daemon=True, name="agent-sse").start()
+
+    def stream():
+        yield "event: status\ndata: {\"status\": \"running\"}\n\n"
+        while True:
+            kind, value = events.get()
+            if kind == "step":
+                yield f"event: step\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
+            elif kind == "result":
+                payload = value
+                yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                return
+            else:
+                yield f"event: error\ndata: {json.dumps({'detail': value}, ensure_ascii=False)}\n\n"
+                return
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @agent_router.post("/v1/agent/execute")
 def agent_execute(request: AgentExecuteRequest, http_req: Request):
@@ -1122,22 +1124,29 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # still returns normal agent steps for the Qt client to dispatch.
     desktop_params = _match_desktop_action(task)
     if desktop_params:
-        action = desktop_params["action"]
-        result = tool_application_action(desktop_params)
-        message = (f"Đã gửi lệnh tự động: {action}."
-                   if request.language == "vi"
-                   else f"Desktop command dispatched: {action}.")
-        return {
-            "status": "completed",
+        desktop_params, error = validate_action_params(desktop_params)
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+        request_id = _generate_action_id()
+        desktop_params["request_id"] = request_id
+        with _pending_lock:
+            _pending_actions[request_id] = {
+                "tool": "application_action", "params": desktop_params,
+                "session_id": session_id, "task": task, "messages": [], "steps": [],
+                "iteration": 0, "temperature": request.temperature, "language": request.language,
+                "created_at": time.time(), "ui_ack": True,
+            }
+            _save_pending_actions()
+        return _agent_response({
+            "status": "pending_ui_action",
             "session_id": session_id,
             "steps": [
                 {"type": "tool_call", "tool": "application_action", "params": desktop_params, "iteration": 0},
-                {"type": "tool_result", "tool": "application_action", "result": result, "iteration": 0},
-                {"type": "final_answer", "content": message},
             ],
-            "iterations": 0,
+            "request_id": request_id,
+            "ui_action": {"request_id": request_id, "action": desktop_params["action"], "params": desktop_params},
             "total_ms": round((time.monotonic() - req_start) * 1000),
-        }
+        }, http_req)
 
     # Build initial messages
     system_prompt = _build_agent_system_prompt(request.language)
@@ -1156,8 +1165,13 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             pass
 
     if use_langgraph:
-        return _run_langgraph_agent(system_prompt, task, session_id,
-                                    request.temperature, request.language, req_start)
+        if "text/event-stream" in http_req.headers.get("accept", ""):
+            return _stream_langgraph_execution(
+                lambda sink: _run_langgraph_agent(system_prompt, task, session_id,
+                                                   request.temperature, request.language, req_start,
+                                                   event_sink=sink))
+        return _agent_response(_run_langgraph_agent(system_prompt, task, session_id,
+                               request.temperature, request.language, req_start), http_req)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -1187,19 +1201,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         logger.info("Agent iter %d/%d | tokens≈%d", iteration, _AGENT_MAX_ITERATIONS, estimated_tokens)
 
         try:
-            with llm_runtime.llm_lock:
-                response_iter = llm_runtime.llm.create_chat_completion(
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=request.temperature,
-                    repeat_penalty=1.1,
-                    stream=True,
-                )
-                answer = ""
-                for chunk in response_iter:
-                    delta = chunk["choices"][0].get("delta", {})
-                    if "content" in delta:
-                        answer += delta["content"]
+            answer = _constrained_agent_completion(messages, max_tokens, request.temperature)
         except Exception as e:
             logger.error("Agent LLM error at iter %d: %s", iteration, e)
             steps.append({"type": "error", "content": f"Lỗi LLM: {e}"})
@@ -1243,6 +1245,21 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             "iteration": iteration,
         })
 
+        if tool_name == "application_action":
+            tool_params["request_id"] = _generate_action_id()
+            request_id = tool_params["request_id"]
+            with _pending_lock:
+                _pending_actions[request_id] = {
+                    "tool": tool_name, "params": tool_params, "session_id": session_id,
+                    "task": task, "messages": messages.copy(), "steps": steps.copy(),
+                    "iteration": iteration, "temperature": request.temperature,
+                    "language": request.language, "created_at": time.time(), "ui_ack": True,
+                }
+                _save_pending_actions()
+            return _agent_response({"status": "pending_ui_action", "session_id": session_id,
+                "request_id": request_id, "steps": steps,
+                "ui_action": {"request_id": request_id, "action": tool_params["action"], "params": tool_params}}, http_req)
+
         # Check if tool requires approval
         if tool_name in _TOOLS_REQUIRING_APPROVAL:
             action_id = _generate_action_id()
@@ -1272,13 +1289,13 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             # Return immediately — client must approve/reject
             total_ms = (time.monotonic() - req_start) * 1000
             logger.info("Agent paused for approval | action=%s tool=%s | %.0fms", action_id, tool_name, total_ms)
-            return {
+            return _agent_response({
                 "status": "pending_approval",
                 "session_id": session_id,
                 "steps": steps,
                 "action_id": action_id,
                 "total_ms": round(total_ms),
-            }
+            }, http_req)
 
         # Execute safe tool
         if tool_name in _TOOL_EXECUTORS:
@@ -1322,13 +1339,35 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         iteration, len(steps), total_ms,
     )
 
-    return {
+    return _agent_response({
         "status": "completed",
         "session_id": session_id,
         "steps": steps,
         "iterations": iteration,
         "total_ms": round(total_ms),
-    }
+    }, http_req)
+
+
+@agent_router.post("/v1/agent/ui-action-result")
+def agent_ui_action_result(request: AgentUiActionResultRequest):
+    """Close the desktop-action loop after the Qt slot has run."""
+    _cleanup_pending_actions()
+    with _pending_lock:
+        action = _pending_actions.pop(request.request_id, None)
+        _save_pending_actions()
+    if action is None or not action.get("ui_ack"):
+        raise HTTPException(status_code=404, detail="Unknown or expired UI action request")
+
+    params = action["params"]
+    result = {"success": request.success, "action": params["action"], **request.result}
+    steps = list(action.get("steps", []))
+    steps.append({"type": "tool_result", "tool": "application_action", "request_id": request.request_id,
+                  "result": result, "iteration": action.get("iteration", 0)})
+    content = (f"Đã thực thi {params['action']}." if request.success
+               else f"Không thể thực thi {params['action']}: {result.get('error', 'unknown error')}")
+    steps.append({"type": "final_answer", "content": content})
+    return {"status": "completed" if request.success else "failed", "session_id": action["session_id"],
+            "request_id": request.request_id, "steps": steps}
 
 
 @agent_router.post("/v1/agent/approve")
@@ -1434,19 +1473,7 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             break
 
         try:
-            with llm_runtime.llm_lock:
-                response_iter = llm_runtime.llm.create_chat_completion(
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    repeat_penalty=1.1,
-                    stream=True,
-                )
-                answer = ""
-                for chunk in response_iter:
-                    delta = chunk["choices"][0].get("delta", {})
-                    if "content" in delta:
-                        answer += delta["content"]
+            answer = _constrained_agent_completion(messages, max_tokens, temperature)
         except Exception as e:
             steps.append({"type": "error", "content": f"Lỗi LLM: {e}"})
             break

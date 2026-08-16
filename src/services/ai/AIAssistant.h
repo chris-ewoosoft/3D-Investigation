@@ -37,6 +37,8 @@ public:
     void executeAgentTask(const QString &sessionId, const QString &task) override;
     void approveAgentAction(const QString &sessionId, const QString &actionId) override;
     void rejectAgentAction(const QString &sessionId, const QString &actionId) override;
+    void reportUiActionResult(const QString &requestId, bool success,
+                              const QVariantMap &result = QVariantMap()) override;
 
     // Session management
     void newChat() override;                              // Create new session (keep old)
@@ -68,6 +70,7 @@ private:
         int retryCount = 0;
         bool isAgent = false;
         bool isApproval = false;
+        bool isUiActionAck = false;
         int insertAfterIndex = -1;
     };
 
@@ -77,6 +80,7 @@ private:
     QString m_currentSessionId;
     QMap<QNetworkReply*, QueuedCompletionRequest> m_pendingRequests;
     QList<QueuedCompletionRequest> m_queuedRequests;
+    QMap<QString, QString> m_pendingUiActionSessions;
     bool m_isThinking = false;
     bool m_serverReadyEmitted = false;
     int m_currentModelIndex = 0;

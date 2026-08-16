@@ -17,8 +17,10 @@ import json
 from collections.abc import Callable
 from typing import Any, TypedDict
 
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+
+from modules.checkpointing import build_checkpointer
+from modules.observability import span
 
 # Completion-signal tools: ngay sau khi success -> done=True, khong lap lai
 _COMPLETION_TOOLS = {"application_action"}
@@ -47,17 +49,20 @@ class LocalAgentGraph:
     """ReAct + Plan-and-Execute graph cho local llama.cpp model."""
 
     def __init__(self, complete: Completion, parse: Parser, execute: Executor,
-                 needs_approval: NeedsApproval, max_iterations: int) -> None:
+                 needs_approval: NeedsApproval, max_iterations: int,
+                 emit: Callable[[dict[str, Any]], None] | None = None) -> None:
         self._complete       = complete
         self._parse          = parse
         self._execute        = execute
         self._needs_approval = needs_approval
         self._max_iterations = max_iterations
+        self._emit = emit
+        self._emitted_steps = 0
 
         builder = StateGraph(AgentState)
-        builder.add_node("plan",   self._plan)
-        builder.add_node("reason", self._reason)
-        builder.add_node("tool",   self._tool)
+        builder.add_node("plan",   self._traced("plan", self._plan))
+        builder.add_node("reason", self._traced("reason", self._reason))
+        builder.add_node("tool",   self._traced("tool", self._tool))
 
         builder.add_edge(START, "plan")
         builder.add_conditional_edges("plan", self._after_plan,
@@ -66,13 +71,26 @@ class LocalAgentGraph:
                                       {"tool": "tool", "end": END})
         builder.add_edge("tool", "reason")
 
-        self._graph = builder.compile(checkpointer=MemorySaver())
+        self._graph = builder.compile(checkpointer=build_checkpointer())
+
+    def _traced(self, name: str, handler: Callable[[AgentState], dict[str, Any]]) -> Callable[[AgentState], dict[str, Any]]:
+        def invoke(state: AgentState) -> dict[str, Any]:
+            with span(f"agent.{name}", iteration=str(state.get("iteration", 0))):
+                result = handler(state)
+            if self._emit and result.get("steps"):
+                steps = result["steps"]
+                for step in steps[self._emitted_steps:]:
+                    self._emit(step)
+                self._emitted_steps = len(steps)
+            return result
+        return invoke
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def run(self, messages: list[dict[str, str]], session_id: str,
             temperature: float, steps: list[dict[str, Any]] | None = None,
             iteration: int = 0) -> AgentState:
+        self._emitted_steps = len(steps or [])
         return self._graph.invoke(
             {
                 "messages":        messages,
@@ -254,6 +272,16 @@ class LocalAgentGraph:
         steps = list(state["steps"])
         steps.append({"type": "tool_result", "tool": tool_name,
                       "result": result, "iteration": state["iteration"]})
+
+        # Desktop actions are executed by Qt, outside this process.  Stop the
+        # graph until the client explicitly acknowledges the request instead
+        # of treating dispatch as success.
+        if result.get("pending_ui_ack"):
+            return {
+                "steps": steps,
+                "pending_tool": {"tool": tool_name, "params": params, "ui_ack": True},
+                "done": True,
+            }
 
         result_text = json.dumps(result, ensure_ascii=False, indent=2)
         if len(result_text) > 8000:

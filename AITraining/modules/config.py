@@ -109,6 +109,9 @@ BASE_DIR    = os.path.abspath(os.path.join(MODULES_DIR, ".."))
 PROJECT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 APP_DATA_DIR = os.environ.get("APP_DATA_DIR", PROJECT_DIR)
 DOCS_DIR    = os.path.join(PROJECT_DIR, "Docs")
+AI_TRAINING_DOCS_DIR = os.path.join(BASE_DIR, "Docs")
+# All folders whose user-authored documents are indexed by RAG.
+RAG_DOCUMENT_DIRS = (DOCS_DIR, AI_TRAINING_DOCS_DIR)
 
 
 def _existing_data_path(name: str) -> str:
@@ -146,18 +149,24 @@ def _safe_relpath(path: str, start: str) -> str:
         return os.path.abspath(path)
 
 # ─── 3. Cấu hình RAG — chỉnh tại đây ─────────────────────────────────────────
-# [FIX-8] Đổi sang model đa ngôn ngữ — hỗ trợ tiếng Việt tốt hơn all-MiniLM-L6-v2
-# Kích thước: ~470MB (so với ~80MB), nhưng độ chính xác retrieval tăng rõ rệt.
-# Nếu muốn giữ model cũ (tiết kiệm RAM/disk): đổi lại "all-MiniLM-L6-v2" hoặc "paraphrase-multilingual-MiniLM-L12-v2"
-EMBED_MODEL_NAME = "clip-ViT-B-32"
-RAG_CACHE_VERSION = 3
+# E5 is a text-retrieval model trained for multilingual query/passage matching.
+# CLIP was useful for image similarity, but is not a reliable embedding model for
+# Vietnamese project documents and source-code questions.  The prefixes below are
+# part of the E5 contract and must be applied consistently while indexing/querying.
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-small"
+EMBEDDING_QUERY_PREFIX = "query: "
+EMBEDDING_PASSAGE_PREFIX = "passage: "
+# Keep image analysis with the vision LLM.  This text model deliberately does
+# not accept PIL images, so image attachments fall back to their textual query.
+EMBEDDING_SUPPORTS_IMAGES = False
+RAG_CACHE_VERSION = 5
 
 # [FIX-7] Cross-encoder re-ranking — bật/tắt tùy tài nguyên
 # True  = kết quả chính xác hơn, latency tăng ~100-300ms/request
 # False = tắt hoàn toàn, hành vi như v2.1
 USE_RERANKER    = True
-RERANKER_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # ~80MB
-RERANKER_TOP_K  = 8    # Tăng lên 8 để lấy thêm context
+RERANKER_MODEL  = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+RERANKER_TOP_K  = 8
 
 # [FIX-9] Chunk nhỏ hơn → embedding signal tập trung, ít nhiễu
 # 1200 thay vì 1800: mỗi chunk mang một ý chính, không pha trộn nhiều chủ đề
@@ -168,10 +177,10 @@ CHUNK_CHARS     = 1200
 OVERLAP_CHARS   = 300  # Tăng lên 300 để giữ liên kết tiếng Việt
 
 # v2.1 constants (giữ nguyên)
-SIMILARITY_THRESHOLD = 0.25
+SIMILARITY_THRESHOLD = 0.30
 MAX_CONTEXT_CHARS    = 9000 # Tăng lên 9000 để chứa đủ chi tiết tiếng Việt
 CHARS_PER_TOKEN      = 2.2   # Việt+code, tránh underestimate
-LLM_N_CTX            = 8192
+LLM_N_CTX            = 8192 # Token context
 
 # ─── 4. Logging ───────────────────────────────────────────────────────────────
 def setup_logging():
@@ -232,6 +241,11 @@ def startup_step(name: str):
 
 # ─── 6. Model list ────────────────────────────────────────────────────────────
 MODELS = [
+    {
+        "repo_id":  "Qwen/Qwen3-8B-GGUF",
+        "filename": "Qwen3-8B-Q4_K_M.gguf",
+        "desc":     "Qwen3-8B (Q4_K_M) — Text / Agent / Coder",
+    },
     {
         "repo_id":  "bartowski/Qwen2.5-7B-Instruct-GGUF",
         "filename": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",

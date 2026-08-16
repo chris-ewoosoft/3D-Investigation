@@ -73,21 +73,30 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
     connect(m_ctx->signalBus(), &SignalBus::stateChanged, this, &ReconstructionPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ReconstructionPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
-            [this](const QString &action, const QVariantMap &) {
+            [this](const QString &action, const QVariantMap &parameters) {
         const QString sampleFolder = QDir(AppConfig::instance().projectRootDir())
                                          .filePath("3DRecontruction/templeRing");
+        bool handled = false;
         if (action == "reconstruction.load_images") {
             m_agentImageFolder = sampleFolder;
             onLoadMultipleImages();
+            handled = true;
         } else if (action == "reconstruction.start_reconstruction") {
             m_agentImageFolder = sampleFolder;
             onLoadMultipleImages();
             onRunReconstruction();
+            handled = true;
         } else if (action == "reconstruction.view_3d_model") {
             onTogglePointCloud(true);
+            handled = true;
         } else if (action == "reconstruction.close_3d_model") {
             onHidePointCloud();
+            handled = true;
         }
+        const QString requestId = parameters.value("request_id").toString();
+        if (!requestId.isEmpty() && action.startsWith("reconstruction."))
+            emit m_ctx->signalBus()->agentUiActionCompleted(requestId, handled,
+                QVariantMap{{"action", action}, {"error", handled ? "" : "Action was not handled"}});
     });
 
     updateActions();

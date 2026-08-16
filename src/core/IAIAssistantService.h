@@ -54,6 +54,8 @@ public:
     virtual void executeAgentTask(const QString &sessionId, const QString &task) = 0;
     virtual void approveAgentAction(const QString &sessionId, const QString &actionId) = 0;
     virtual void rejectAgentAction(const QString &sessionId, const QString &actionId) = 0;
+    virtual void reportUiActionResult(const QString &requestId, bool success,
+                                      const QVariantMap &result = QVariantMap()) = 0;
 
 signals:
     void historyChanged();

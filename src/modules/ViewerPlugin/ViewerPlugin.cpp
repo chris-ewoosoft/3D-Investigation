@@ -94,18 +94,25 @@ void ViewerPlugin::initialize(IAppContext* context) {
     connect(m_ctx->signalBus(), &SignalBus::stateChanged, this, &ViewerPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ViewerPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
-            [this](const QString &action, const QVariantMap &) {
+            [this](const QString &action, const QVariantMap &parameters) {
         const QDir root(AppConfig::instance().projectRootDir());
+        bool handled = false;
         if (action == "viewer.load_2d") {
             const QDir images(root.filePath("3DRecontruction/templeRing"));
             const QStringList files = images.entryList({"*.png", "*.jpg", "*.jpeg", "*.bmp"},
                                                        QDir::Files, QDir::Name);
-            if (!files.isEmpty()) load2DImageFromPath(images.absoluteFilePath(files.first()));
+            if (!files.isEmpty()) { load2DImageFromPath(images.absoluteFilePath(files.first())); handled = true; }
         } else if (action == "viewer.load_3d") {
             load3DModelFromPath(root.filePath("3DModels/FinalBaseMesh.obj"));
+            handled = true;
         } else if (action == "viewer.load_dicom") {
             loadDicomFromDirectory(root.filePath("Dicom/HippocampalMRISlices/01"));
+            handled = true;
         }
+        const QString requestId = parameters.value("request_id").toString();
+        if (!requestId.isEmpty() && action.startsWith("viewer."))
+            emit m_ctx->signalBus()->agentUiActionCompleted(requestId, handled,
+                QVariantMap{{"action", action}, {"error", handled ? "" : "No matching input data"}});
     });
     
     updateActions();

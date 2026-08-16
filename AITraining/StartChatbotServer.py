@@ -56,7 +56,7 @@ async def lifespan(_: FastAPI):
     logger.info("Server shutdown after %.1fs", time.monotonic() - _SERVER_START_TIME)
 
 
-app = FastAPI(title="3D-Reconstruction AI Server", version="2.3.0", lifespan=lifespan)
+app = FastAPI(title="3D-Reconstruction AI Server", version="2.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["POST", "GET"], allow_headers=["*"],
 )
@@ -65,7 +65,7 @@ app.include_router(agent_module.agent_router)
 
 def _refresh_agent_routes() -> None:
     """Replace FastAPI's old Agent handlers after reloading agent_module."""
-    agent_paths = {"/v1/agent/execute", "/v1/agent/approve"}
+    agent_paths = {"/v1/agent/execute", "/v1/agent/approve", "/v1/agent/ui-action-result"}
     app.router.routes[:] = [route for route in app.router.routes
                             if getattr(route, "path", None) not in agent_paths]
     app.include_router(agent_module.agent_router)
@@ -235,6 +235,18 @@ async def health():
         "max_context": rag_module.MAX_CONTEXT_CHARS, "model": llm_module.active_model_desc,
         "is_vision": llm_module.is_vision_model,
     }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus exposition endpoint; enabled with AGENT_OBSERVABILITY=1."""
+    from fastapi.responses import Response
+
+    from modules.observability import prometheus_payload
+    payload = prometheus_payload()
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Observability is disabled")
+    return Response(payload, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/v1/models")

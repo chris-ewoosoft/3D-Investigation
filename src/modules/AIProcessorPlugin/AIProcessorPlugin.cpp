@@ -190,8 +190,9 @@ void AIProcessorPlugin::setupConnections() {
   connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &AIProcessorPlugin::updateActions);
   connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this, &AIProcessorPlugin::onImageChanged);
   connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
-          [this](const QString &action, const QVariantMap &) {
+          [this](const QString &action, const QVariantMap &parameters) {
       const QDir root(AppConfig::instance().projectRootDir());
+      bool handled = false;
       if (action == "ai.run_detection" || action == "ai.run_segmentation") {
           const QDir images(root.filePath("3DRecontruction/templeRing"));
           const QStringList files = images.entryList({"*.png", "*.jpg", "*.jpeg", "*.bmp"},
@@ -200,6 +201,7 @@ void AIProcessorPlugin::setupConnections() {
           m_ctx->viewer()->setCurrent2DImagePath(images.absoluteFilePath(files.first()));
           if (action == "ai.run_detection") onObjectDetection();
           else onSegmentation();
+          handled = true;
       } else if (action == "ai.video_tracking") {
           const QDir videos(root.filePath("VideoTracking"));
           const QStringList files = videos.entryList({"*.mp4", "*.avi", "*.mkv"},
@@ -207,14 +209,22 @@ void AIProcessorPlugin::setupConnections() {
           if (!files.isEmpty()) {
               m_agentVideoPath = videos.absoluteFilePath(files.first());
               onObjectTracking();
+              handled = true;
           }
       } else if (action == "ai.hide_results") {
           onHideAIResults();
+          handled = true;
       } else if (action == "ai.training_model") {
           if (m_trainDock) m_trainDock->startTraining(true);
+          handled = m_trainDock != nullptr;
       } else if (action == "ai.view_training_charts") {
           onViewCharts();
+          handled = true;
       }
+      const QString requestId = parameters.value("request_id").toString();
+      if (!requestId.isEmpty() && action.startsWith("ai."))
+          emit m_ctx->signalBus()->agentUiActionCompleted(requestId, handled,
+              QVariantMap{{"action", action}, {"error", handled ? "" : "Required AI input is unavailable"}});
   });
 }
 

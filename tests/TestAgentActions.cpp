@@ -119,6 +119,21 @@ private slots:
         QCOMPARE(spy.count(), 1);
         QCOMPARE(spy.takeFirst().at(0).toString(), QString("help.about"));
     }
+
+    void testActionAcknowledgement() {
+        SignalBus bus;
+        QSignalSpy spy(&bus, &SignalBus::agentUiActionCompleted);
+
+        QVariantMap result;
+        result["action"] = "mail.open";
+        emit bus.agentUiActionCompleted("request-42", true, result);
+
+        QCOMPARE(spy.count(), 1);
+        const QList<QVariant> args = spy.takeFirst();
+        QCOMPARE(args.at(0).toString(), QString("request-42"));
+        QCOMPARE(args.at(1).toBool(), true);
+        QCOMPARE(args.at(2).toMap().value("action").toString(), QString("mail.open"));
+    }
 };
 
 QTEST_MAIN(TestAgentActions)

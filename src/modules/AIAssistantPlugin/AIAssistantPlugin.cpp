@@ -68,6 +68,10 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 [this](const QString &action, const QVariantMap &parameters) {
             emit m_ctx->signalBus()->agentUiActionRequested(action, parameters);
         });
+        connect(m_ctx->signalBus(), &SignalBus::agentUiActionCompleted, this,
+                [this](const QString &requestId, bool success, const QVariantMap &result) {
+            m_aiAssistant->reportUiActionResult(requestId, success, result);
+        });
     }
     
     // Inject AI Assistant button into tab.ai_assistant panel
@@ -167,21 +171,37 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         updateChatUI();
     });
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
-            [this](const QString &action, const QVariantMap &) {
-        if (!m_dockUI) return;
+            [this](const QString &action, const QVariantMap &parameters) {
+        if (!m_dockUI) {
+            const QString requestId = parameters.value("request_id").toString();
+            if (!requestId.isEmpty() && action.startsWith("assistant."))
+                emit m_ctx->signalBus()->agentUiActionCompleted(requestId, false, QVariantMap{{"error", "Assistant UI is unavailable"}});
+            return;
+        }
+        bool handled = false;
         if (action == "assistant.open" && m_dockUI->dockWidget()->isHidden()) {
             onToggleChatbot();
+            handled = true;
         } else if (action == "assistant.close" && !m_dockUI->dockWidget()->isHidden()) {
             onToggleChatbot();
+            handled = true;
         } else if (action == "assistant.reload_model") {
             m_aiAssistant->restartModel();
+            handled = true;
         } else if (action == "assistant.reload_rag") {
             m_aiAssistant->restartRAG();
+            handled = true;
         } else if (action == "assistant.reload_agent") {
             m_aiAssistant->restartAgent();
+            handled = true;
         } else if (action == "assistant.reload_server") {
             m_aiAssistant->restartServer();
+            handled = true;
         }
+        const QString requestId = parameters.value("request_id").toString();
+        if (!requestId.isEmpty() && action.startsWith("assistant."))
+            emit m_ctx->signalBus()->agentUiActionCompleted(requestId, handled,
+                QVariantMap{{"action", action}, {"error", handled ? "" : "Action was not handled"}});
     });
     
     m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());

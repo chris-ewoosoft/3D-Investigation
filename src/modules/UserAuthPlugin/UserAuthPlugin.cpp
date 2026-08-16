@@ -82,20 +82,26 @@ void UserAuthPlugin::initialize(IAppContext* context) {
             this, &UserAuthPlugin::onLanguageChanged);
     connect(m_context->signalBus(), &SignalBus::agentUiActionRequested, this,
             [this](const QString &action, const QVariantMap &parameters) {
+        bool handled = false;
         if (action == "language.change") {
             const QString language = parameters.value("language").toString();
             if (language == "vi" || language == "en") {
                 m_context->setLanguage(language);
                 saveUserPref("language", language);
+                handled = true;
             }
         } else if (action == "admin.settings") {
             onOpenSettings();
+            handled = true;
         } else if (action == "admin.change_avatar") {
             onChangeAvatar();
+            handled = true;
         } else if (action == "admin.change_password") {
             onChangePassword();
+            handled = true;
         } else if (action == "admin.logout") {
             onLogout();
+            handled = true;
         } else if (action == "admin.login") {
             QString errorMsg;
             UserManager::instance()->logout();
@@ -104,10 +110,16 @@ void UserAuthPlugin::initialize(IAppContext* context) {
                 loadUserSettings();
                 checkLicense();
                 setupMenus();
+                handled = true;
             }
         } else if (action == "help.about") {
             onAbout();
+            handled = true;
         }
+        const QString requestId = parameters.value("request_id").toString();
+        if (!requestId.isEmpty())
+            emit m_context->signalBus()->agentUiActionCompleted(
+                requestId, handled, QVariantMap{{"action", action}, {"error", handled ? "" : "Desktop action was not handled"}});
     });
 }
 
