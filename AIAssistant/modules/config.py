@@ -16,7 +16,7 @@ StartChatbotServer.py — 3D-Reconstruction AI Server v2.2
   Sentence-aware chunking, source dedup ≤2/file, rule #8 system prompt
 
 Cấu trúc thư mục:
-  AITraining/
+  AIAssistant/
   ├── StartChatbotServer.py
   ├── requirements.txt
   ├── Cache/
@@ -109,15 +109,15 @@ BASE_DIR    = os.path.abspath(os.path.join(MODULES_DIR, ".."))
 PROJECT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
 APP_DATA_DIR = os.environ.get("APP_DATA_DIR", PROJECT_DIR)
 DOCS_DIR    = os.path.join(PROJECT_DIR, "Docs")
-AI_TRAINING_DOCS_DIR = os.path.join(BASE_DIR, "Docs")
+AI_ASSISTANT_DOCS_DIR = os.path.join(BASE_DIR, "Docs")
 # All folders whose user-authored documents are indexed by RAG.
-RAG_DOCUMENT_DIRS = (DOCS_DIR, AI_TRAINING_DOCS_DIR)
+RAG_DOCUMENT_DIRS = (DOCS_DIR, AI_ASSISTANT_DOCS_DIR)
 
 
 def _existing_data_path(name: str) -> str:
     """Use old duplicate AppData storage only while a user has not migrated it."""
-    primary = os.path.join(APP_DATA_DIR, "AITraining", name)
-    legacy = os.path.join(APP_DATA_DIR, "3D-Reconstruction", "AITraining", name)
+    primary = os.path.join(APP_DATA_DIR, "AIAssistant", name)
+    legacy = os.path.join(APP_DATA_DIR, "AITraining", name)
     if not os.path.exists(primary) and os.path.exists(legacy):
         return legacy
     return primary
@@ -125,7 +125,7 @@ def _existing_data_path(name: str) -> str:
 
 MODELS_DIR  = _existing_data_path("Models")
 CACHE_DIR   = _existing_data_path("Cache")
-LOGS_DIR    = os.path.join(APP_DATA_DIR, "AITraining", "logs")
+LOGS_DIR    = os.path.join(APP_DATA_DIR, "AIAssistant", "logs")
 EMBED_CACHE = os.path.join(CACHE_DIR, "embed_model")
 
 for _d in (CACHE_DIR, LOGS_DIR, EMBED_CACHE, MODELS_DIR):
@@ -153,13 +153,14 @@ def _safe_relpath(path: str, start: str) -> str:
 # CLIP was useful for image similarity, but is not a reliable embedding model for
 # Vietnamese project documents and source-code questions.  The prefixes below are
 # part of the E5 contract and must be applied consistently while indexing/querying.
-EMBED_MODEL_NAME = "intfloat/multilingual-e5-small"
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
 EMBEDDING_QUERY_PREFIX = "query: "
 EMBEDDING_PASSAGE_PREFIX = "passage: "
 # Keep image analysis with the vision LLM.  This text model deliberately does
 # not accept PIL images, so image attachments fall back to their textual query.
 EMBEDDING_SUPPORTS_IMAGES = False
-RAG_CACHE_VERSION = 5
+EMBEDDING_DIMENSION = 768
+RAG_CACHE_VERSION = 6
 
 # [FIX-7] Cross-encoder re-ranking — bật/tắt tùy tài nguyên
 # True  = kết quả chính xác hơn, latency tăng ~100-300ms/request

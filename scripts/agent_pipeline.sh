@@ -7,7 +7,7 @@ cmake --build build
 ctest --output-on-failure
 
 # Lint Python
-ruff check AITraining/ --output-format=github
+ruff check AIAssistant/ --output-format=github
 
 # Commit and push
 git add .

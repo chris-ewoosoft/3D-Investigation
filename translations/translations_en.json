@@ -202,7 +202,7 @@
     "common.loading": "Loading...",
     "common.language": "Language",
     "file.select_2d": "Select 2D Image",
-    "file.select_3d": "Select OBJ File",
+    "file.select_3d": "Select 3D Model",
     "file.select_dicom": "Select DICOM",
     "file.select_recon": "Select Images for Reconstruction",
     "file.select_camera": "Select Camera Parameters",

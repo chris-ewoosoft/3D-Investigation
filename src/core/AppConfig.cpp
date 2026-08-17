@@ -65,7 +65,7 @@ QString AppConfig::logsDir() const {
 
 QString AppConfig::modelsDir() const {
     std::shared_lock lock(m_mutex);
-    return QDir::cleanPath(m_projectRoot + "/AITraining/Models");
+    return QDir::cleanPath(m_projectRoot + "/AIComputerVision/Models");
 }
 
 QString AppConfig::predictDir(const QString& type) const {
@@ -73,9 +73,14 @@ QString AppConfig::predictDir(const QString& type) const {
     return QDir::cleanPath(m_dataRoot + "/Predict/" + type);
 }
 
-QString AppConfig::aiTrainingDir() const {
+QString AppConfig::aiAssistantDir() const {
     std::shared_lock lock(m_mutex);
-    return QDir::cleanPath(m_projectRoot + "/AITraining");
+    return QDir::cleanPath(m_projectRoot + "/AIAssistant");
+}
+
+QString AppConfig::aiComputerVisionDir() const {
+    std::shared_lock lock(m_mutex);
+    return QDir::cleanPath(m_projectRoot + "/AIComputerVision");
 }
 
 QString AppConfig::uploadDir() const {

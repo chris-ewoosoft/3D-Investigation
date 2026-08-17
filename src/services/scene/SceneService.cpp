@@ -24,6 +24,8 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkActor.h>
+#include <algorithm>
+#include <limits>
 #include <QFileDialog>
 #include "../utils/ModernMessageBox.h"
 #include <vtkRenderWindow.h>
@@ -127,7 +129,19 @@ void SceneService::loadOBJwithMTL(const QString &objPath, const QString &mtlPath
         m_modelActors.push_back(a);
         m_renderer->AddActor(a);
     }
-    m_renderer->ResetCamera();
+    // Resetting from just the model keeps a large decorative grid from shifting
+    // the subject away from the centre of the viewport.
+    const double max = std::numeric_limits<double>::max();
+    double bounds[6] = { max, -max, max, -max, max, -max };
+    for (const auto &actor : m_modelActors) {
+        double actorBounds[6];
+        actor->GetBounds(actorBounds);
+        for (int i = 0; i < 3; ++i) {
+            bounds[2 * i] = std::min(bounds[2 * i], actorBounds[2 * i]);
+            bounds[2 * i + 1] = std::max(bounds[2 * i + 1], actorBounds[2 * i + 1]);
+        }
+    }
+    if (!m_modelActors.empty()) m_renderer->ResetCamera(bounds);
     m_vtkWidget->renderWindow()->Render();
 }
 
@@ -152,6 +166,10 @@ void SceneService::onLoadDicom(const QString &path) {
 
     setupDicomRenderers(volume);
     setupCrosshairInteractor();
+
+    // The orientation marker uses window-normalised coordinates.  Keep it in
+    // the lower-left corner of the DICOM 3D quadrant rather than the whole UI.
+    if (m_axesWidget) m_axesWidget->SetViewport(0.51, 0.01, 0.61, 0.13);
 
     m_axialRenderer->ResetCamera();
     m_sagittalRenderer->ResetCamera();
@@ -286,7 +304,9 @@ void SceneService::applyViewSettings(const QString& username) {
             m_axesWidget->SetOutlineColor(0.93, 0.57, 0.13);
             m_axesWidget->SetOrientationMarker(axesActor);
             m_axesWidget->SetInteractor(m_vtkWidget->renderWindow()->GetInteractor());
-            m_axesWidget->SetViewport(0.0, 0.0, 0.18, 0.22);
+            const bool dicomLayout = m_axialRenderer && m_sagittalRenderer && m_coronalRenderer;
+            m_axesWidget->SetViewport(dicomLayout ? 0.51 : 0.02, 0.01,
+                                      dicomLayout ? 0.61 : 0.18, dicomLayout ? 0.13 : 0.22);
             m_axesWidget->EnabledOn();
             m_axesWidget->InteractiveOff();
         } else {

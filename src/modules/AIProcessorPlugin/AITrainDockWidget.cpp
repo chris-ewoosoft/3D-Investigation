@@ -94,7 +94,7 @@ AITrainDockWidget::~AITrainDockWidget() {
 void AITrainDockWidget::startTraining(bool autoConfirm) {
     show();
     if (trainProcess->state() == QProcess::NotRunning) {
-        QString scriptPath = AppConfig::instance().aiTrainingDir() + "/TrainModel.py";
+        QString scriptPath = AppConfig::instance().aiComputerVisionDir() + "/TrainModel.py";
         QString modelsPath = AppConfig::instance().modelsDir();
         bool modelExists = QFile::exists(modelsPath + "/yolo11n.onnx") || QFile::exists(modelsPath + "/yolo11n-seg.onnx") || QFile::exists(modelsPath + "/yolo11n-tracking.onnx");
         

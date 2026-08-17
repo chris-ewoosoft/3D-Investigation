@@ -125,7 +125,7 @@ bash ./scripts/agent_pipeline.sh
    - `git pull` - Fetch latest changes
    - `cmake --build build --config Release` - Build project (C++)
    - `ctest --output-on-failure` - Run local tests (C++)
-   - `ruff check AITraining/` - Run Python linting
+   - `ruff check AIAssistant/` - Run Python linting
    - `git add .` - Stage changes
    - `git commit -m "Agent task completed"` - Commit
    - `git push` - Push to remote (Triggers `ci.yml` and `python-ci.yml`)

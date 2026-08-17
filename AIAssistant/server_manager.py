@@ -11,10 +11,10 @@ PORT     = 8080
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # APP_DATA_DIR được Qt truyền qua env — config.py dùng cùng biến này
-# Nếu không có env var thì fallback về AITraining/ (chạy tay)
+# Nếu không có env var thì fallback về AIAssistant/ (chạy tay)
 _app_data = os.environ.get("APP_DATA_DIR", "")
 if _app_data:
-    LOGS_DIR = os.path.join(_app_data, "AITraining", "logs")
+    LOGS_DIR = os.path.join(_app_data, "AIAssistant", "logs")
 else:
     LOGS_DIR = os.path.join(BASE_DIR, "logs")
 

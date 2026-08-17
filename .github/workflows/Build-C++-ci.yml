@@ -12,7 +12,8 @@ on:
       - "**.md"
       - "Docs/**"
       - "Doxygen/**"
-      - "AITraining/**"
+      - "AIAssistant/**"
+      - "AIComputerVision/**"
       - ".prompts/**"
       - ".review/**"
       - ".tasks/**"
@@ -25,7 +26,8 @@ on:
       - "**.md"
       - "Docs/**"
       - "Doxygen/**"
-      - "AITraining/**"
+      - "AIAssistant/**"
+      - "AIComputerVision/**"
       - ".prompts/**"
       - ".review/**"
       - ".tasks/**"
@@ -48,7 +50,7 @@ env:
 jobs:
   build-and-test:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 150
 
     steps:
       - name: Checkout
@@ -101,6 +103,13 @@ jobs:
         with:
           vcpkgGitCommitId: "9432c416e5c543eded0b4df35a4d347b2e669208"
           vcpkgJsonGlob: "vcpkg.json"
+
+      - name: Report restored dependency cache
+        shell: pwsh
+        run: |
+          $installed = Join-Path $env:VCPKG_INSTALLED_DIR "x64-windows"
+          Write-Host "vcpkg installed tree exists: $(Test-Path $installed)"
+          if (Test-Path $installed) { Get-ChildItem $installed | Select-Object -First 20 Name }
 
       # ── Overlay port: redirect libaec from blocked GitLab → GitHub mirror ─
       - name: Create libaec overlay port (GitHub mirror)
@@ -187,7 +196,7 @@ jobs:
       # ── Build ─────────────────────────────────────────────────────────
       - name: Build
         shell: pwsh
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel 2
 
       # ── Test ──────────────────────────────────────────────────────────
       - name: Run Tests

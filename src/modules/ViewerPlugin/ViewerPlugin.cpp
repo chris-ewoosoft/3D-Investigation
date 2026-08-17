@@ -8,6 +8,7 @@
 #include "Image2DLoader.h"
 #include "Model3DLoader.h"
 #include "DicomLoader.h"
+#include "AppConstants.h"
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -129,7 +130,8 @@ void ViewerPlugin::onLoad2DImages() {
 
 void ViewerPlugin::onLoad3DImages() {
   QString lastUsedPath = m_ctx->settings()->getLastUsedPath("viewer_3d");
-  QString obj = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("file.select_3d"), lastUsedPath, "OBJ Files (*.obj)"); 
+  QString obj = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("file.select_3d"), lastUsedPath,
+                                              AppConstants::FileFilter::objFiles());
   if (!obj.isEmpty()) load3DModelFromPath(obj);
 }
 

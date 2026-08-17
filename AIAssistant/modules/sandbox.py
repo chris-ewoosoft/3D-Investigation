@@ -16,7 +16,7 @@ from typing import Any
 _ALLOWED = {"cmake", "ctest", "python", "pytest", "ruff", "git"}
 _FORBIDDEN = {"&&", "||", ";", "|", ">", "<", "rm", "del", "format", "shutdown"}
 _WRITE_ROOTS = {part.strip() for part in os.getenv(
-    "AGENT_WRITE_ALLOWLIST", "src,AITraining,Config,Docs,tests").split(",") if part.strip()}
+    "AGENT_WRITE_ALLOWLIST", "src,AIAssistant,AIComputerVision,Config,Docs,tests").split(",") if part.strip()}
 
 
 def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:

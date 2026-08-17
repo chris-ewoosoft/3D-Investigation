@@ -202,7 +202,7 @@
     "common.loading": "Đang tải...",
     "common.language": "Ngôn ngữ",
     "file.select_2d": "Chọn ảnh 2D",
-    "file.select_3d": "Chọn tệp OBJ",
+    "file.select_3d": "Chọn mô hình 3D",
     "file.select_dicom": "Chọn DICOM",
     "file.select_recon": "Chọn ảnh để Tái tạo",
     "file.select_camera": "Chọn Tham số Camera",

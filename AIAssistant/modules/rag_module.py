@@ -1,6 +1,33 @@
 from .config import *  # noqa: I001
 from .config import _safe_relpath
 
+
+class _E5LlamaEmbedding:
+    """Adapter that lets LlamaIndex use the application's E5 encoder/prefixes."""
+
+    def __init__(self, model):
+        from llama_index.core.embeddings import BaseEmbedding
+
+        class E5Embedding(BaseEmbedding):
+            model: object
+
+            def _get_query_embedding(self, query: str):
+                return self.model.encode(EMBEDDING_QUERY_PREFIX + query,
+                                         normalize_embeddings=True).tolist()
+
+            async def _aget_query_embedding(self, query: str):
+                return self._get_query_embedding(query)
+
+            def _get_text_embedding(self, text: str):
+                return self.model.encode(EMBEDDING_PASSAGE_PREFIX + text,
+                                         normalize_embeddings=True).tolist()
+
+            def _get_text_embeddings(self, texts: list[str]):
+                return self.model.encode([EMBEDDING_PASSAGE_PREFIX + text for text in texts],
+                                         normalize_embeddings=True).tolist()
+
+        self.value = E5Embedding(model=model)
+
 # ─── 7. BM25 tokenizer hỗ trợ tiếng Việt ─────────────────────────────────────
 # [FIX-6] CRITICAL: regex cũ r"[a-z0-9_]+" chỉ bắt Latin → bỏ sót TOÀN BỘ
 # từ tiếng Việt trong BM25. Hệ quả: hybrid_retrieve = semantic search thuần,
@@ -520,7 +547,8 @@ def is_cache_valid() -> bool:
         with open(CACHE_METADATA, "r", encoding="utf-8") as f:
             meta = json.load(f)
         current_hash = get_file_system_hash()
-        valid = meta.get("fs_hash") == current_hash
+        valid = (meta.get("fs_hash") == current_hash
+                 and meta.get("embedding_dimension") == EMBEDDING_DIMENSION)
         if not valid:
             logger.info("Cache stale (built_at=%s)", meta.get("built_at", "?"))
         else:
@@ -546,6 +574,7 @@ def save_cache(index, chunks: list, bm25) -> None:
         "built_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "model_idx":   MODEL_IDX,
         "embed_model": EMBED_MODEL_NAME,
+        "embedding_dimension": EMBEDDING_DIMENSION,
         "chunk_chars": CHUNK_CHARS,
         "cache_version": RAG_CACHE_VERSION,
     }
@@ -560,6 +589,8 @@ def load_cache(embed_model):
     t = time.monotonic()
     try:
         index = _faiss.read_index(CACHE_INDEX)
+        if index.d != EMBEDDING_DIMENSION:
+            raise ValueError(f"FAISS dimension {index.d} does not match {EMBEDDING_DIMENSION}")
         with open(CACHE_CHUNKS, "rb") as f:
             chunks = pickle.load(f)
         with open(CACHE_BM25, "rb") as f:
@@ -673,6 +704,8 @@ def build_index_from_scratch(chunks: list, embed_model):
 
     emb  = np.array(embeddings, dtype="float32")
     dim, n = emb.shape[1], len(emb)
+    if dim != EMBEDDING_DIMENSION:
+        raise ValueError(f"Embedding model returned {dim} dimensions; expected {EMBEDDING_DIMENSION}")
 
     if n < 1000:
         index = _faiss.IndexFlatIP(dim)
@@ -716,15 +749,39 @@ def load_or_build_index(chunks: list, embed_model):
 # ─── 13. RAG retrieval ────────────────────────────────────────────────────────
 knowledge_index  = None
 rag_lock = threading.RLock()
+vector_retriever = None
+bm25_retriever = None
+
+
+def build_llamaindex_runtime(chunks: list, encoder):
+    """Build the persistent dense FAISS + sparse BM25 retrievers through LlamaIndex."""
+    import faiss
+    from llama_index.core import StorageContext, VectorStoreIndex
+    from llama_index.core.schema import TextNode
+    from llama_index.retrievers.bm25 import BM25Retriever
+    from llama_index.vector_stores.faiss import FaissVectorStore
+
+    nodes = [TextNode(text=chunk.text, metadata={"chunk_index": index})
+             for index, chunk in enumerate(chunks) if not chunk.is_image]
+    vector_store = FaissVectorStore(faiss_index=faiss.IndexFlatIP(EMBEDDING_DIMENSION))
+    storage = StorageContext.from_defaults(vector_store=vector_store)
+    index = VectorStoreIndex(nodes, storage_context=storage,
+                             embed_model=_E5LlamaEmbedding(encoder).value,
+                             show_progress=False)
+    storage.persist(persist_dir=os.path.join(CACHE_DIR, "llamaindex"))
+    return index, index.as_retriever(similarity_top_k=30), BM25Retriever.from_defaults(
+        docstore=index.docstore, similarity_top_k=30, tokenizer=_tokenize_vn,
+        skip_stemming=True)
 
 
 def initialize_rag(force_rebuild: bool = False, enable_reranker: bool = True) -> int:
     """Load embeddings and atomically publish a complete RAG runtime."""
-    global knowledge_index, knowledge_chunks, bm25_index, embed_model_ref, _reranker
+    global knowledge_index, knowledge_chunks, bm25_index, embed_model_ref, _reranker, vector_retriever, bm25_retriever
 
     if not ENABLE_RAG:
         with rag_lock:
             knowledge_index, knowledge_chunks, bm25_index = None, [], None
+            vector_retriever, bm25_retriever = None, None
             embed_model_ref, _reranker = None, None
         return 0
 
@@ -743,14 +800,15 @@ def initialize_rag(force_rebuild: bool = False, enable_reranker: bool = True) ->
         raw_chunks = load_documents()
     if raw_chunks:
         with startup_step("Rebuilding RAG index" if force_rebuild else "Loading/building RAG index"):
-            index, chunks, bm25 = (build_index_from_scratch(raw_chunks, embed_model)
-                                   if force_rebuild else load_or_build_index(raw_chunks, embed_model))
+            index, dense, sparse = build_llamaindex_runtime(raw_chunks, embed_model)
+            chunks, bm25 = raw_chunks, sparse
     else:
-        index, chunks, bm25 = None, [], None
+        index, chunks, bm25, dense, sparse = None, [], None, None, None
         logger.warning("No documents found; RAG context will be empty")
 
     with rag_lock:
         knowledge_index, knowledge_chunks, bm25_index = index, chunks, bm25
+        vector_retriever, bm25_retriever = dense, sparse
         embed_model_ref, _reranker = embed_model, reranker
     return len(chunks)
 
@@ -763,6 +821,8 @@ def release_embedding_for_vision() -> None:
     _release_ml_memory()
 knowledge_chunks = []
 bm25_index       = None
+vector_retriever = None
+bm25_retriever   = None
 embed_model_ref  = None
 _reranker        = None   # Cross-encoder, load lúc startup nếu USE_RERANKER=True
 is_vision_model  = False  # True khi chạy Qwen2.5-VL (vision model)
@@ -787,52 +847,15 @@ def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 30,
     """
     Hybrid semantic (text/image) + BM25 (text only) retrieval.
     """
-    import numpy as np
-
-    if knowledge_index is None or not knowledge_chunks or (not query.strip() and not query_image_b64):
+    if vector_retriever is None or bm25_retriever is None or not knowledge_chunks or (not query.strip() and not query_image_b64):
         return []
 
-    if embed_model_ref is None:
-        if bm25_index is None or not query:
-            return []
-        bm25_raw = np.array(bm25_index.get_scores(_tokenize_vn(query)))
-        bm25_top_idx = np.argsort(bm25_raw)[::-1][:final_k]
-        return [knowledge_chunks[int(i)] for i in bm25_top_idx if i >= 0 and bm25_raw[int(i)] > 0]
-
-    n = min(k, len(knowledge_chunks))
-
-    # Semantic search with query text or query image
-    if query_image_b64 and EMBEDDING_SUPPORTS_IMAGES:
-        import io
-
-        from PIL import Image
-        img_data = base64.b64decode(query_image_b64.split(",")[1])
-        qv_input = [Image.open(io.BytesIO(img_data)).convert("RGB")]
-    else:
-        qv_input = [EMBEDDING_QUERY_PREFIX + query]
-
-    qv = embed_model_ref.encode(qv_input, normalize_embeddings=True)
-    sem_raw, sem_idx = knowledge_index.search(np.array(qv, dtype="float32"), n)
-    sem_raw = sem_raw[0]
-    sem_idx = sem_idx[0]
-
-    sem_idx_list = [int(i) for i in sem_idx if i >= 0]
-    sem_scores = {int(i): float(s) for i, s in zip(sem_idx, sem_raw) if i >= 0}
-
-    # [FIX-6] BM25 với Vietnamese tokenizer
-    if query_image_b64 and EMBEDDING_SUPPORTS_IMAGES:
-        # BM25 is not used for image queries
-        combined = [(cid, sem_scores[cid]) for cid in sem_idx_list]
-    else:
-        bm25_raw     = np.array(bm25_index.get_scores(_tokenize_vn(query)))
-        bm25_top_idx = np.argsort(bm25_raw)[::-1][:n]
-        bm25_idx_list = [int(i) for i in bm25_top_idx if bm25_raw[int(i)] > 0]
-
-        # Do not manufacture context for an unrelated question: a candidate
-        # needs either meaningful lexical evidence or semantic similarity.
-        semantic_ranked = [cid for cid in sem_idx_list
-                           if sem_scores[cid] >= SIMILARITY_THRESHOLD]
-        combined = _rrf_fuse([semantic_ranked, bm25_idx_list], [0.55, 0.45])
+    dense = vector_retriever.retrieve(query)
+    sparse = bm25_retriever.retrieve(query)
+    dense_ids = [item.node.metadata["chunk_index"] for item in dense
+                 if item.score is None or item.score >= SIMILARITY_THRESHOLD]
+    sparse_ids = [item.node.metadata["chunk_index"] for item in sparse]
+    combined = _rrf_fuse([dense_ids, sparse_ids], [0.55, 0.45])
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [knowledge_chunks[cid] for cid, _ in combined[:final_k]]

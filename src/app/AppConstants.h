@@ -80,7 +80,9 @@ namespace AppConstants {
         inline QString trainScript()            { return QStringLiteral("TrainModel.py"); }
 
         constexpr int    TENSORBOARD_PORT           = 6006;
-        constexpr int    TENSORBOARD_WAIT_SECONDS   = 12;
+        // Large training-log folders can take noticeably longer than a few
+        // seconds to index before TensorBoard begins listening on its port.
+        constexpr int    TENSORBOARD_WAIT_SECONDS   = 30;
 
         inline QString tensorboardUrl() {
             return QStringLiteral("http://localhost:%1/").arg(TENSORBOARD_PORT);
@@ -123,7 +125,7 @@ namespace AppConstants {
     // ── File Filters ─────────────────────────────────────────────────────────
     namespace FileFilter {
         inline QString images()     { return QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp)"); }
-        inline QString objFiles()   { return QStringLiteral("OBJ Files (*.obj)"); }
+        inline QString objFiles()   { return QStringLiteral("3D Models (*.obj *.stl *.ply *.vtk *.vtp)"); }
         inline QString allFiles()   { return QStringLiteral("All Files (*.*)"); }
     }
 

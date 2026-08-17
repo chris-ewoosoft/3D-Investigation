@@ -661,7 +661,7 @@ _TOOLS_REQUIRING_APPROVAL = {"write_file", "run_command", "patch_file", "create_
 # ── Pending actions storage (in-memory, per session) ──────────────────────────
 _pending_actions: dict = {}  # action_id -> {tool, params, session_id}
 _pending_lock = threading.Lock()
-_PENDING_ACTIONS_FILE = os.path.join(APP_DATA_DIR, "AITraining", "pending_agent_actions.json")
+_PENDING_ACTIONS_FILE = os.path.join(APP_DATA_DIR, "AIAssistant", "pending_agent_actions.json")
 
 
 def _save_pending_actions() -> None:
@@ -838,6 +838,7 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
     interface instead; both paths pass through the same Pydantic validation.
     """
     try:
+        logger.info("Constrained LLM messages: %s", json.dumps(messages, ensure_ascii=False, default=str))
         if backend_mode() != "llama_cpp":
             response = openai_compatible_completion(
                 messages, max_tokens=max_tokens, temperature=temperature,
@@ -847,10 +848,13 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
             message = response.get("choices", [{}])[0].get("message", {})
             if message.get("tool_calls"):
                 call = message["tool_calls"][0]["function"]
-                return json.dumps({"kind": "tool", "tool": call["name"],
-                                   "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+                content = json.dumps({"kind": "tool", "tool": call["name"],
+                                      "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+                logger.info("Constrained LLM response: %s", content)
+                return content
             content = message.get("content", "")
             # Remote deployments are expected to return the same envelope.
+            logger.info("Constrained LLM response: %s", content)
             return content
         from llama_cpp import LlamaGrammar  # imported lazily for testability
         kwargs = {
@@ -870,11 +874,14 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
     message = response.get("choices", [{}])[0].get("message", {})
     if message.get("tool_calls"):
         call = message["tool_calls"][0]["function"]
-        return json.dumps({"kind": "tool", "tool": call["name"],
-                           "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+        content = json.dumps({"kind": "tool", "tool": call["name"],
+                              "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
+        logger.info("Constrained LLM response: %s", content)
+        return content
     content = message.get("content", "")
     if not isinstance(content, str):
         raise RuntimeError("Constrained decoder returned no text content")
+    logger.info("Constrained LLM response: %s", content)
     try:
         envelope = json.loads(content)
     except json.JSONDecodeError as error:
@@ -896,7 +903,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     if not LANGGRAPH_AVAILABLE or LocalAgentGraph is None:
         raise HTTPException(
             status_code=503,
-            detail="LangGraph is required for Agent mode. Run: pip install -r AITraining/requirements.txt",
+            detail="LangGraph is required for Agent mode. Run: pip install -r AIAssistant/requirements.txt",
         )
 
     def complete(messages: list[dict[str, str]], current_temperature: float) -> str:

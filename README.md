@@ -256,7 +256,8 @@ MainWindow (Shell)
 │   │   TestServiceRegistry.cpp         ← Test đăng ký/tra cứu service type-safe
 │   └── TestSignalBus.cpp               ← Test Event Bus phát/nhận signal
 │
-├── AITraining/                 ← Hệ thống AI Server (Python)
+├── AIAssistant/                ← Hệ thống AI Server, Agent và RAG (Python)
+├── AIComputerVision/           ← Huấn luyện YOLO, models và kết quả training
 │   ├── StartChatbotServer.py   ← FastAPI server chạy LLM + RAG
 │   └── requirements.txt        ← Python dependencies
 │
@@ -298,7 +299,7 @@ MainWindow (Shell)
 2. **Build**: Dùng Kit **MSVC 2022 64-bit** — khuyến nghị **Release mode** để đạt hiệu suất GPU và render tốt nhất.
    > ⚠️ Nếu thay đổi bất kỳ file nào trong `src/core/`, hãy thực hiện **Clean & Rebuild** toàn bộ project.
 3. **Plugin output**: Sau khi build, các `.dll` plugin tự động được copy vào `plugins/` cạnh file thực thi.
-4. **AI Server**: Chạy `AITraining/StartChatbotServer.py` để khởi động server LLM trước khi dùng AI Assistant.
+4. **AI Server**: Chạy `AIAssistant/StartChatbotServer.py` để khởi động server LLM trước khi dùng AI Assistant.
 
 ---
 

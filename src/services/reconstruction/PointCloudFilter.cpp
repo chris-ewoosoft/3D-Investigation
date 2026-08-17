@@ -8,6 +8,7 @@
 
 #include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
@@ -117,6 +118,32 @@ void PointCloudFilter::radiusOutlier(std::vector<cv::Point3f> &pts,
     ror.filter(kept);
     applyIndices(kept, pts, cols);
     qDebug() << "ROR: kept" << pts.size() << "/" << n;
+}
+
+void PointCloudFilter::adaptiveRadiusOutlier(std::vector<cv::Point3f> &pts,
+                                              std::vector<cv::Vec3b> &cols,
+                                              float radiusMultiplier,
+                                              int minNeighbors)
+{
+    if (pts.size() < 16 || radiusMultiplier <= 0.f || minNeighbors < 1) return;
+    auto cloud = buildXYZCloud(pts);
+    pcl::KdTreeFLANN<pcl::PointXYZ> tree;
+    tree.setInputCloud(cloud);
+    std::vector<float> distances;
+    distances.reserve(pts.size());
+    std::vector<int> indices(2);
+    std::vector<float> squaredDistances(2);
+    for (const auto &point : cloud->points) {
+        if (tree.nearestKSearch(point, 2, indices, squaredDistances) == 2 && squaredDistances[1] > 0.f)
+            distances.push_back(std::sqrt(squaredDistances[1]));
+    }
+    if (distances.empty()) return;
+    const auto middle = distances.begin() + static_cast<std::ptrdiff_t>(distances.size() / 2);
+    std::nth_element(distances.begin(), middle, distances.end());
+    const float radius = *middle * radiusMultiplier;
+    if (!std::isfinite(radius) || radius <= 0.f) return;
+    qDebug() << "Adaptive ROR radius:" << radius;
+    radiusOutlier(pts, cols, radius, minNeighbors);
 }
 
 void PointCloudFilter::voxelGrid(std::vector<cv::Point3f> &pts,

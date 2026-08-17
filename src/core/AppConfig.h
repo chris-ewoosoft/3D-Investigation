@@ -20,7 +20,8 @@ public:
     QString logsDir() const;
     QString modelsDir() const;
     QString predictDir(const QString& type) const;
-    QString aiTrainingDir() const;
+    QString aiAssistantDir() const;
+    QString aiComputerVisionDir() const;
     QString uploadDir() const;
     QString thumbnailsDir() const;
     QString pluginsDir() const;

@@ -1,6 +1,6 @@
 # ─── 3D-Reconstruction AI Server — Dependencies ───────────────────────────────
 # Cài 1 lần duy nhất:
-#   pip install -r AITraining/requirements.txt
+#   pip install -r AIAssistant/requirements.txt
 #
 # Với GPU CUDA 12.2 (khuyến nghị):
 #   pip install llama-cpp-python[server] \
@@ -15,10 +15,15 @@ huggingface_hub>=0.23.0
 
 # ── Embedding & RAG ────────────────────────────────────────────────────────────
 sentence-transformers>=2.7.0
-faiss-gpu>=1.8.0  
+faiss-gpu>=1.8.0; platform_system != "Windows"
+faiss-cpu>=1.8.0; platform_system == "Windows"
 #faiss-cpu>=1.8.0              # Đổi thành faiss-gpu nếu muốn encode nhanh hơn
 rank_bm25>=0.2.2
 numpy>=1.26.0
+llama-index-core>=0.11.0
+llama-index-vector-stores-faiss>=0.3.0
+llama-index-embeddings-huggingface>=0.3.0
+llama-index-retrievers-bm25>=0.3.0
 
 # ── Document loaders ───────────────────────────────────────────────────────────
 python-docx>=1.1.0

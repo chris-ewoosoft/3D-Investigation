@@ -15,7 +15,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Lint Python code
-ruff check AITraining/ --output-format=github
+ruff check AIAssistant/ --output-format=github
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Python Lint failed"
     exit 1

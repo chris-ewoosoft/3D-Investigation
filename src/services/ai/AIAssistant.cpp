@@ -54,7 +54,7 @@ void AIAssistant::startServerProcess(int modelIndex) {
     connect(aiServerProcess, &QProcess::readyReadStandardError, this, &AIAssistant::onProcessError);
     connect(aiServerProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &AIAssistant::onProcessFinished);
 
-    QString sp = AppConfig::instance().aiTrainingDir() + "/" + AppConstants::AIServer::chatbotScript();
+    QString sp = AppConfig::instance().aiAssistantDir() + "/" + AppConstants::AIServer::chatbotScript();
     if (QFileInfo::exists(sp)) {
         emit serverStatusChanged(LM_TR("ai.starting_server"));
         
@@ -64,7 +64,7 @@ void AIAssistant::startServerProcess(int modelIndex) {
         env.insert("APP_DATA_DIR", QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
         aiServerProcess->setProcessEnvironment(env);
         
-        aiServerProcess->setWorkingDirectory(AppConfig::instance().aiTrainingDir());
+        aiServerProcess->setWorkingDirectory(AppConfig::instance().aiAssistantDir());
         aiServerProcess->start("python", QStringList() << "-u" << sp << QString::number(modelIndex));
     } else {
         emit errorOccurred(LM_TR("ai.missing_script"));

@@ -30,7 +30,7 @@
 #include <unordered_map>
 
 namespace {
-constexpr const char *kReconstructionCacheFileName = "recon_cache_quality_v2.ply";
+constexpr const char *kReconstructionCacheFileName = "recon_cache_quality_v3.ply";
 
 std::vector<cv::DMatch> filterMatchesByFundamental(
     const std::vector<cv::DMatch> &matches,
@@ -155,10 +155,10 @@ void ReconstructionPipeline::processPointCloud() {
         PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanK, f.sorStdDevMul);
         if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
         
-        // ROR relies on absolute distance thresholds which fails heavily on estimated 
-        // pose clouds where scale is arbitrary (due to recovering pose from Essential matrix).
-        // Therefore, we skip ROR for estimated pose. SOR + VoxelGrid is sufficient.
-        // PointCloudFilter::radiusOutlier(points3D, colors, f.rorRadius, f.rorMinNeighbors);
+        // The reconstruction scale is arbitrary here; derive the radius from
+        // nearest-neighbour spacing instead of a fixed world-space threshold.
+        PointCloudFilter::adaptiveRadiusOutlier(points3D, colors, 3.0f, f.rorMinNeighbors);
+        if (points3D.empty()) { qWarning() << "No points after adaptive ROR."; return; }
 
         PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSize);
     }

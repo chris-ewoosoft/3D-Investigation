@@ -1,7 +1,7 @@
 # ruff: noqa: I001, S101
 """Regression checks for grammar-constrained tool envelopes."""
 import sys
-sys.path.insert(0, '..')   # f:\PROJECTS\QT\3D-Reconstruction\AITraining is cwd
+sys.path.insert(0, '..')   # f:\PROJECTS\QT\3D-Reconstruction\AIAssistant is cwd
 sys.path.insert(0, '.')
 
 from modules.agent_module import _parse_tool_call

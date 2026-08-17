@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 
-# Add AITraining to python path
+# Add AIAssistant to python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from modules.agent_module import _match_desktop_action
 
