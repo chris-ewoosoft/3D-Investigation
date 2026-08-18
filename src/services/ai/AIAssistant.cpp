@@ -764,28 +764,38 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
             QJsonObject res = QJsonDocument::fromJson(reply->readAll()).object();
 
             // application_action is deliberately executed by the desktop app,
-            // not by the Python server.  This gives agent mode access to the
-            // same Qt slots as the ribbon buttons without exposing UI control
-            // to a subprocess.
-            const QJsonArray steps = res.value("steps").toArray();
-            for (const QJsonValue &value : steps) {
-                const QJsonObject step = value.toObject();
-                if (step.value("type").toString() != "tool_call" ||
-                    step.value("tool").toString() != "application_action") {
-                    continue;
+            // not by the Python server. A successful ACK may carry one new,
+            // sequential workflow action; dispatch only the request_id named
+            // by this response, never an earlier step included in its history.
+            const QString responseRequestId = res.value("request_id").toString();
+            const bool hasFollowUpUiAction = request.isUiActionAck &&
+                res.value("status").toString() == "pending_ui_action" &&
+                !responseRequestId.isEmpty() &&
+                responseRequestId != request.payload.value("request_id").toString();
+            if (!request.isUiActionAck || hasFollowUpUiAction) {
+                const QJsonArray steps = res.value("steps").toArray();
+                for (const QJsonValue &value : steps) {
+                    const QJsonObject step = value.toObject();
+                    if (step.value("type").toString() != "tool_call" ||
+                        step.value("tool").toString() != "application_action") {
+                        continue;
+                    }
+                    QJsonObject params = step.value("params").toObject();
+                    QString action = params.value("action").toString();
+                    if (action.isEmpty()) continue;
+                    const QString requestId = params.value("request_id").toString();
+                    if (!responseRequestId.isEmpty() && requestId != responseRequestId) {
+                        continue;
+                    }
+                    if (!requestId.isEmpty()) m_pendingUiActionSessions.insert(requestId, sessionId);
+                    QString manifestError;
+                    QVariantMap actionParams = params.toVariantMap();
+                    if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {
+                        reportUiActionResult(requestId, false, QVariantMap{{"error", manifestError}});
+                        continue;
+                    }
+                    emit agentUiActionRequested(action, actionParams);
                 }
-                QJsonObject params = step.value("params").toObject();
-                QString action = params.value("action").toString();
-                if (action.isEmpty()) continue;
-                const QString requestId = params.value("request_id").toString();
-                if (!requestId.isEmpty()) m_pendingUiActionSessions.insert(requestId, sessionId);
-                QString manifestError;
-                QVariantMap actionParams = params.toVariantMap();
-                if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {
-                    reportUiActionResult(requestId, false, QVariantMap{{"error", manifestError}});
-                    continue;
-                }
-                emit agentUiActionRequested(action, actionParams);
             }
             
             // Append agent step message to history to keep it

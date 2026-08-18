@@ -69,7 +69,13 @@ class LocalAgentGraph:
                                       {"reason": "reason", "end": END})
         builder.add_conditional_edges("reason", self._after_reason,
                                       {"tool": "tool", "end": END})
-        builder.add_edge("tool", "reason")
+        # A tool normally returns to the reasoning loop.  UI actions and
+        # approval-gated tools instead set ``done``/``pending_tool`` and must
+        # stop immediately: their result is completed asynchronously by the
+        # desktop client.  An unconditional edge here would call the model
+        # again and dispatch a second desktop action before the first ACK.
+        builder.add_conditional_edges("tool", self._after_tool,
+                                      {"reason": "reason", "end": END})
 
         self._graph = builder.compile(checkpointer=build_checkpointer())
 
@@ -246,6 +252,15 @@ class LocalAgentGraph:
             return "end"
         print("--- [LOG: ROUTER] -> Tool Node ---")
         return "tool"
+
+    @staticmethod
+    def _after_tool(state: AgentState) -> str:
+        """End after an asynchronous or approval-gated tool result."""
+        if state["done"] or state["pending_tool"] is not None:
+            print("--- [LOG: TOOL ROUTER] Ket thuc (cho ACK/phe duyet) ---")
+            return "end"
+        print("--- [LOG: TOOL ROUTER] -> Reason Node ---")
+        return "reason"
 
     # ── Node: tool ─────────────────────────────────────────────────────────────
 

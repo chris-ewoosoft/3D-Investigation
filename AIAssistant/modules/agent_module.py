@@ -12,6 +12,7 @@ from .action_manifest import (
     canonicalise_action_params,
     looks_like_ui_action as _manifest_looks_like_ui_action,
     match_action_intent as _manifest_match_action_intent,
+    match_action_sequence as _manifest_match_action_sequence,
     normalise_text as _normalise_agent_task,
     validate_action_params,
 )
@@ -570,6 +571,10 @@ def _match_desktop_action(task: str) -> dict | None:
     return _manifest_match_action_intent(task)
 
 
+def _match_desktop_action_sequence(task: str) -> list[dict] | None:
+    return _manifest_match_action_sequence(task)
+
+
 def tool_application_action(params: dict) -> dict:
     """Create a UI-action request; success is only reported after Qt ACKs it."""
     canonical_params, error = validate_action_params(params)
@@ -838,7 +843,7 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
     interface instead; both paths pass through the same Pydantic validation.
     """
     try:
-        logger.info("Constrained LLM messages: %s", json.dumps(messages, ensure_ascii=False, default=str))
+        # logger.info("Constrained LLM messages: %s", json.dumps(messages, ensure_ascii=False, default=str))
         if backend_mode() != "llama_cpp":
             response = openai_compatible_completion(
                 messages, max_tokens=max_tokens, temperature=temperature,
@@ -1129,7 +1134,12 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # Fixed UI commands do not need model reasoning. Handling them here makes
     # the assistant deterministic, avoids aliases invented by small models and
     # still returns normal agent steps for the Qt client to dispatch.
-    desktop_params = _match_desktop_action(task)
+    desktop_sequence = _match_desktop_action_sequence(task)
+    if desktop_sequence:
+        workflow_id = _generate_action_id()
+        for workflow_params in desktop_sequence:
+            workflow_params["workflow_id"] = workflow_id
+    desktop_params = (desktop_sequence or [_match_desktop_action(task)])[0]
     if desktop_params:
         desktop_params, error = validate_action_params(desktop_params)
         if error:
@@ -1142,6 +1152,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 "session_id": session_id, "task": task, "messages": [], "steps": [],
                 "iteration": 0, "temperature": request.temperature, "language": request.language,
                 "created_at": time.time(), "ui_ack": True,
+                "next_actions": (desktop_sequence or [])[1:],
             }
             _save_pending_actions()
         return _agent_response({
@@ -1367,9 +1378,32 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
 
     params = action["params"]
     result = {"success": request.success, "action": params["action"], **request.result}
-    steps = list(action.get("steps", []))
+    steps = []
     steps.append({"type": "tool_result", "tool": "application_action", "request_id": request.request_id,
                   "result": result, "iteration": action.get("iteration", 0)})
+
+    # A workflow advances only after the desktop has positively acknowledged
+    # the preceding action.  Each continuation has a fresh request_id, so the
+    # Qt client can dispatch it once without replaying the earlier step.
+    next_actions = action.get("next_actions", [])
+    if request.success and next_actions:
+        next_params, error = validate_action_params(next_actions[0])
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+        next_request_id = _generate_action_id()
+        next_params["request_id"] = next_request_id
+        next_action = {**action, "params": next_params,
+                       "next_actions": next_actions[1:], "created_at": time.time()}
+        with _pending_lock:
+            _pending_actions[next_request_id] = next_action
+            _save_pending_actions()
+        steps.append({"type": "tool_call", "tool": "application_action",
+                      "params": next_params, "iteration": action.get("iteration", 0) + 1})
+        return {"status": "pending_ui_action", "session_id": action["session_id"],
+                "request_id": next_request_id, "steps": steps,
+                "ui_action": {"request_id": next_request_id, "action": next_params["action"],
+                              "params": next_params}}
+
     content = (f"Đã thực thi {params['action']}." if request.success
                else f"Không thể thực thi {params['action']}: {result.get('error', 'unknown error')}")
     steps.append({"type": "final_answer", "content": content})

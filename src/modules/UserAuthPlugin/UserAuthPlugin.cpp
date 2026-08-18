@@ -117,7 +117,14 @@ void UserAuthPlugin::initialize(IAppContext* context) {
             handled = true;
         }
         const QString requestId = parameters.value("request_id").toString();
-        if (!requestId.isEmpty())
+        const bool ownsAction = action == "language.change" ||
+                                 action.startsWith("admin.") ||
+                                 action == "help.about";
+        // This plugin shares the global action bus.  It must only acknowledge
+        // actions it owns; otherwise an unrelated action (for example
+        // reconstruction.load_images) is prematurely reported as failed before
+        // its actual plugin can send the successful ACK.
+        if (!requestId.isEmpty() && ownsAction)
             emit m_context->signalBus()->agentUiActionCompleted(
                 requestId, handled, QVariantMap{{"action", action}, {"error", handled ? "" : "Desktop action was not handled"}});
     });

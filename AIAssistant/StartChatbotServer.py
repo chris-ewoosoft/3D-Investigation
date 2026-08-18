@@ -122,6 +122,11 @@ def reload_rag():
 def reload_agent():
     try:
         agent_module.reset_agent_state()
+        # agent_module imports LocalAgentGraph by name, so reload the graph
+        # module first; otherwise a running server keeps the previous routing
+        # implementation after an Agent reload.
+        import LangGraphAgent
+        importlib.reload(LangGraphAgent)
         importlib.reload(agent_module)
         _refresh_agent_routes()
         agent_module.reset_agent_state()

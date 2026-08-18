@@ -82,10 +82,12 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
             onLoadMultipleImages();
             handled = true;
         } else if (action == "reconstruction.start_reconstruction") {
-            m_agentImageFolder = sampleFolder;
-            onLoadMultipleImages();
+            // A workflow start follows reconstruction.load_images.  Suppress
+            // the interactive/default load fallback so the success dialog is
+            // not shown again for the same input set.
+            m_skipImageLoadForAgentRun = parameters.contains("workflow_id");
             onRunReconstruction();
-            handled = true;
+            handled = m_reconSvc && !m_reconSvc->getImageList().isEmpty();
         } else if (action == "reconstruction.view_3d_model") {
             onTogglePointCloud(true);
             handled = true;
@@ -221,8 +223,10 @@ void ReconstructionPlugin::onLoadMultipleImages() {
 }
 
 void ReconstructionPlugin::onRunReconstruction() {
+    const bool skipImageLoad = m_skipImageLoadForAgentRun;
+    m_skipImageLoadForAgentRun = false;
     if (!m_reconSvc || m_reconSvc->getImageList().isEmpty()) {
-        onLoadMultipleImages();
+        if (!skipImageLoad) onLoadMultipleImages();
     }
     if (!m_reconSvc || m_reconSvc->getImageList().isEmpty()) return;
 

@@ -96,5 +96,17 @@ def match_action_intent(text: str) -> dict[str, Any] | None:
     return None
 
 
+def match_action_sequence(text: str) -> list[dict[str, Any]] | None:
+    """Return a manifest-defined ordered UI workflow, if the text matches one."""
+    value = normalise_text(text)
+    for workflow in manifest().get("workflows", []):
+        if not any(normalise_text(phrase) in value for phrase in workflow.get("phrases", [])):
+            continue
+        actions = workflow.get("actions", [])
+        if all(canonical_action(action) is not None for action in actions):
+            return [{"action": action} for action in actions]
+    return None
+
+
 def action_ids() -> set[str]:
     return set(_index()[0])

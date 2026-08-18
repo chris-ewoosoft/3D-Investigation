@@ -4,7 +4,7 @@ import unittest
 
 # Add AIAssistant to python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from modules.agent_module import _match_desktop_action
+from modules.agent_module import _match_desktop_action, _match_desktop_action_sequence
 
 
 class TestAgentActions(unittest.TestCase):
@@ -55,6 +55,17 @@ class TestAgentActions(unittest.TestCase):
         self.assertEqual(_match_desktop_action("xem 3d model"), {"action": "reconstruction.view_3d_model"})
         self.assertEqual(_match_desktop_action("close 3d model"), {"action": "reconstruction.close_3d_model"})
         self.assertEqual(_match_desktop_action("tai anh tai tao"), {"action": "reconstruction.load_images"})
+
+    def test_reconstruction_load_then_start_workflow(self):
+        self.assertEqual(
+            _match_desktop_action_sequence(
+                "\u0054\u1ea3i \u1ea3nh ch\u1ee5p v\u00e0 t\u00e1i t\u1ea1o 3d."
+            ),
+            [
+                {"action": "reconstruction.load_images"},
+                {"action": "reconstruction.start_reconstruction"},
+            ],
+        )
 
     def test_viewer_actions(self):
         self.assertEqual(_match_desktop_action("tai 2d"), {"action": "viewer.load_2d"})
