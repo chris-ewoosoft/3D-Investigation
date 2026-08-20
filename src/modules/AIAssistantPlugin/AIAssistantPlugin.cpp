@@ -320,36 +320,24 @@ void AIAssistantPlugin::onSendChatMessage() {
         delete child;
     }
     m_dockUI->attachmentPreviewArea()->hide();
+    constexpr bool isAgentMode = true;
     
-    bool isAgentMode = m_dockUI->btnToggleAgentMode()->isChecked();
     qDebug() << "[AIAssistantPlugin] Mode đang sử dụng:" << (isAgentMode ? "Agent Model" : "Chat Model") << "| Nội dung:" << tx;
 
     // Get selected sessions (allow multi-select)
     QList<QListWidgetItem*> selectedItems = m_dockUI->sessionListWidget()->selectedItems();
     if (selectedItems.isEmpty()) {
         // If no selection, send to current session
-        if (isAgentMode) {
-            m_aiAssistant->executeAgentTask(m_aiAssistant->currentSessionId(), tx);
-        } else {
-            m_aiAssistant->sendMessage(tx, atts);
-        }
+        m_aiAssistant->executeAgentTask(m_aiAssistant->currentSessionId(), tx, atts);
     } else if (selectedItems.size() == 1) {
         // Single selection - send to that session
         QString sessionId = selectedItems[0]->data(Qt::UserRole).toString();
-        if (isAgentMode) {
-            m_aiAssistant->executeAgentTask(sessionId, tx);
-        } else {
-            m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
-        }
+        m_aiAssistant->executeAgentTask(sessionId, tx, atts);
     } else {
         // Multiple selections - send the same message to all selected sessions
         for (QListWidgetItem* item : selectedItems) {
             QString sessionId = item->data(Qt::UserRole).toString();
-            if (isAgentMode) {
-                m_aiAssistant->executeAgentTask(sessionId, tx);
-            } else {
-                m_aiAssistant->sendMessageToSession(sessionId, tx, atts);
-            }
+            m_aiAssistant->executeAgentTask(sessionId, tx, atts);
         }
     }
     
@@ -380,11 +368,7 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         QString path = url.path();
         if (path.startsWith("retry:")) {
             int msgIndex = path.mid(6).toInt();
-            if (m_dockUI && m_dockUI->btnToggleAgentMode()->isChecked()) {
-                m_aiAssistant->retryAgentTask(m_aiAssistant->currentSessionId(), msgIndex);
-            } else {
-                m_aiAssistant->retryMessage(m_aiAssistant->currentSessionId(), msgIndex);
-            }
+            m_aiAssistant->retryAgentTask(m_aiAssistant->currentSessionId(), msgIndex);
         } else if (path.startsWith("edit:")) {
             int msgIndex = path.mid(5).toInt();
             auto history = m_aiAssistant->getHistory();

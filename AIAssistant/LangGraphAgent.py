@@ -43,6 +43,8 @@ Completion    = Callable[[list[dict[str, str]], float], str]
 Parser        = Callable[[str], tuple[str | None, dict[str, Any] | None]]
 Executor      = Callable[[str, dict[str, Any]], dict[str, Any]]
 NeedsApproval = Callable[[str], bool]
+SelectSpecialist = Callable[[str, dict[str, Any]], dict[str, Any]]
+VerifyResult = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 class LocalAgentGraph:
@@ -50,13 +52,17 @@ class LocalAgentGraph:
 
     def __init__(self, complete: Completion, parse: Parser, execute: Executor,
                  needs_approval: NeedsApproval, max_iterations: int,
-                 emit: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 emit: Callable[[dict[str, Any]], None] | None = None,
+                 select_specialist: SelectSpecialist | None = None,
+                 verify_result: VerifyResult | None = None) -> None:
         self._complete       = complete
         self._parse          = parse
         self._execute        = execute
         self._needs_approval = needs_approval
         self._max_iterations = max_iterations
         self._emit = emit
+        self._select_specialist = select_specialist
+        self._verify_result = verify_result
         self._emitted_steps = 0
 
         builder = StateGraph(AgentState)
@@ -222,6 +228,11 @@ class LocalAgentGraph:
                           "iteration": iteration})
 
         params = tool_params or {}
+        if self._select_specialist:
+            delegation = self._select_specialist(tool_name, params)
+            steps.append({"type": "delegation", "agent": delegation.get("specialist", "supervisor"),
+                          "tool": tool_name, "idempotency_key": delegation.get("idempotency_key", ""),
+                          "iteration": iteration})
         print(f"[LOG: REASON NODE] Tool call: tool='{tool_name}', params={params}")
         steps.append({"type": "tool_call", "tool": tool_name,
                       "params": params, "iteration": iteration})
@@ -287,6 +298,10 @@ class LocalAgentGraph:
         steps = list(state["steps"])
         steps.append({"type": "tool_result", "tool": tool_name,
                       "result": result, "iteration": state["iteration"]})
+        if self._verify_result:
+            verification = self._verify_result(tool_name, params, result)
+            steps.append({"type": "verification", "tool": tool_name, "result": verification,
+                          "iteration": state["iteration"]})
 
         # Desktop actions are executed by Qt, outside this process.  Stop the
         # graph until the client explicitly acknowledges the request instead

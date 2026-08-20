@@ -168,6 +168,8 @@ QWidget* ChatBotDockWidget::createInputRow(QWidget* parent) {
 
     il->addWidget(m_btnAttach);
     il->addWidget(m_btnToggleAgentMode);
+    // Compatibility object only: Chat and Agent are now one unified mode.
+    m_btnToggleAgentMode->hide();
     il->addWidget(m_chatInput);
     il->addWidget(m_btnSendChat);
     

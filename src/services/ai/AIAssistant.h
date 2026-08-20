@@ -34,7 +34,8 @@ public:
     void restartServer() override;
 
     // Agent mode
-    void executeAgentTask(const QString &sessionId, const QString &task) override;
+    void executeAgentTask(const QString &sessionId, const QString &task,
+                          const QStringList &attachments = QStringList()) override;
     void approveAgentAction(const QString &sessionId, const QString &actionId) override;
     void rejectAgentAction(const QString &sessionId, const QString &actionId) override;
     void reportUiActionResult(const QString &requestId, bool success,
@@ -91,6 +92,8 @@ private:
     bool hasPendingWork() const;
     bool hasPendingRequestForSession(const QString &sessionId) const;
     QJsonObject buildCompletionPayload(const QList<QJsonObject> &messages) const;
+    QJsonObject buildAgentPayload(const QList<QJsonObject> &messages, const QString &task,
+                                  const QStringList &attachments) const;
     bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
     void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
     void startServerProcess(int modelIndex);

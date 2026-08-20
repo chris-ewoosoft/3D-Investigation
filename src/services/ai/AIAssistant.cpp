@@ -342,7 +342,12 @@ bool AIAssistant::hasPendingRequestForSession(const QString &sessionId) const {
 
 QJsonObject AIAssistant::buildCompletionPayload(const QList<QJsonObject> &messages) const {
     QJsonArray msgs;
-    for (const auto &m : messages) msgs.append(m);
+    for (const auto &m : messages) {
+        // ``assistant_agent`` is UI-only state and is not a valid chat role.
+        // Sending it to FastAPI was the source of HTTP 422 after changing mode.
+        const QString role = m.value("role").toString();
+        if (role == "user" || role == "assistant" || role == "system") msgs.append(m);
+    }
 
     QJsonObject js;
     js["messages"]    = msgs;
@@ -351,7 +356,41 @@ QJsonObject AIAssistant::buildCompletionPayload(const QList<QJsonObject> &messag
     double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", QString::number(AppConstants::AIServer::DEFAULT_TEMPERATURE)).toDouble() : AppConstants::AIServer::DEFAULT_TEMPERATURE;
     js["temperature"] = temp;
     js["max_tokens"]  = AppConstants::AIServer::DEFAULT_MAX_TOKENS;
+    js["language"] = LanguageManager::instance().currentLanguage();
     return js;
+}
+
+QJsonObject AIAssistant::buildAgentPayload(const QList<QJsonObject> &messages, const QString &task,
+                                            const QStringList &attachments) const {
+    QJsonArray history;
+    // The current user message is passed as ``task``. Keep only the portable
+    // conversational roles so Agent step JSON never contaminates model input.
+    for (int index = 0; index < messages.size() - 1; ++index) {
+        const QJsonObject &message = messages.at(index);
+        const QString role = message.value("role").toString();
+        if (role != "user" && role != "assistant") continue;
+        QJsonObject item;
+        item["role"] = role;
+        item["content"] = message.value("content").toString();
+        if (message.contains("attachments")) item["attachments"] = message.value("attachments");
+        history.append(item);
+    }
+
+    auto *userManager = UserManager::instance();
+    const double temperature = userManager
+        ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", "0.3").toDouble()
+        : 0.3;
+    QJsonObject payload;
+    payload["task"] = task;
+    payload["history"] = history;
+    payload["temperature"] = temperature;
+    payload["language"] = LanguageManager::instance().currentLanguage();
+    if (!attachments.isEmpty()) {
+        QJsonArray values;
+        for (const QString &attachment : attachments) values.append(attachment);
+        payload["attachments"] = values;
+    }
+    return payload;
 }
 
 bool AIAssistant::isRecoverableConnectionError(QNetworkReply::NetworkError error) const {
@@ -528,13 +567,10 @@ void AIAssistant::retryAgentTask(const QString &sessionId, int msgIndex) {
     request.sessionId = sessionId;
     request.isAgent = true;
     request.insertAfterIndex = msgIndex;
-    auto *userManager = UserManager::instance();
-    double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", "0.3").toDouble() : 0.3;
-    
-    request.payload["task"] = msg["content"].toString();
+    QList<QJsonObject> conversation;
+    for (int index = 0; index <= msgIndex; ++index) conversation.append(sess->messages.at(index));
+    request.payload = buildAgentPayload(conversation, msg["content"].toString(), {});
     request.payload["session_id"] = sessionId;
-    request.payload["temperature"] = temp;
-    request.payload["language"] = LanguageManager::instance().currentLanguage();
     m_queuedRequests.append(request);
     m_isThinking = true;
     processNextQueuedRequest();
@@ -555,8 +591,12 @@ void AIAssistant::editMessage(const QString &sessionId, int msgIndex, const QStr
 
 // ── Agent mode ────────────────────────────────────────────────────────────────
 
-void AIAssistant::executeAgentTask(const QString &sessionId, const QString &task) {
-    if (task.isEmpty()) return;
+void AIAssistant::executeAgentTask(const QString &sessionId, const QString &task,
+                                   const QStringList &attachments) {
+    if (task.isEmpty() && attachments.isEmpty()) return;
+    const QString effectiveTask = task.isEmpty()
+        ? QStringLiteral("Please analyze the attached files.")
+        : task;
     
     QString targetSessionId = sessionId;
     ChatSession *sess = getSession(targetSessionId);
@@ -571,27 +611,26 @@ void AIAssistant::executeAgentTask(const QString &sessionId, const QString &task
 
     QJsonObject um;
     um["role"]      = "user";
-    um["content"]   = task;
+    um["content"]   = effectiveTask;
     um["timestamp"] = QDateTime::currentDateTime().toString(AppConstants::Format::chatTimestamp());
     
+    if (!attachments.isEmpty()) {
+        QJsonArray values;
+        for (const QString &attachment : attachments) values.append(attachment);
+        um["attachments"] = values;
+    }
     sess->messages.append(um);
 
     if (sess->messages.size() == 1) {
-        sess->title = task.left(AppConstants::Chat::SESSION_TITLE_MAX_LENGTH) + (task.length() > AppConstants::Chat::SESSION_TITLE_MAX_LENGTH ? "..." : "");
+        sess->title = effectiveTask.left(AppConstants::Chat::SESSION_TITLE_MAX_LENGTH) + (effectiveTask.length() > AppConstants::Chat::SESSION_TITLE_MAX_LENGTH ? "..." : "");
         emit sessionsChanged();
     }
     
     saveAllSessions();
     emit historyChanged();
 
-    auto *userManager = UserManager::instance();
-    double temp = userManager ? userManager->getUserPref(userManager->currentUsername(), "ai_temperature", "0.3").toDouble() : 0.3;
-
-    QJsonObject payload;
-    payload["task"] = task;
+    QJsonObject payload = buildAgentPayload(sess->messages, effectiveTask, attachments);
     payload["session_id"] = targetSessionId;
-    payload["temperature"] = temp;
-    payload["language"] = LanguageManager::instance().currentLanguage();
 
     QueuedCompletionRequest request;
     request.sessionId = targetSessionId;

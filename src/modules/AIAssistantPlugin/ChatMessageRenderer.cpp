@@ -128,6 +128,11 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                         .arg(planSteps[pi].toString().toHtmlEscaped());
                 }
                 html += ChatTemplates::AGENT_THINKING.arg("📌 Kế hoạch", planHtml);
+            } else if (type == "delegation") {
+                const QString agent = step["agent"].toString().toHtmlEscaped();
+                const QString tool = step["tool"].toString().toHtmlEscaped();
+                html += ChatTemplates::AGENT_THINKING.arg("Multi-Agent",
+                    QString("Supervisor -> <b>%1</b> (%2)").arg(agent, tool));
             } else if (type == "tool_call") {
                 QString toolName = step["tool"].toString();
                 QString paramsStr = QString::fromUtf8(QJsonDocument(step["params"].toObject()).toJson(QJsonDocument::Compact));
@@ -136,6 +141,12 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                 const QJsonObject result = step["result"].toObject();
                 html += ChatTemplates::AGENT_TOOL_RESULT_LOCALIZED.arg(ctx->translate("ai.agent_result"),
                                                                          formatToolResult(step["tool"].toString(), result, ctx));
+            } else if (type == "verification") {
+                const QJsonObject result = step["result"].toObject();
+                const QString status = result.value("passed").toBool()
+                    ? "Verification passed" : "Verification failed";
+                html += ChatTemplates::AGENT_THINKING.arg(status,
+                    result.value("reason").toString().toHtmlEscaped());
             } else if (type == "pending_approval") {
                 QString toolName = step["tool"].toString();
                 QString actionId = step["action_id"].toString();

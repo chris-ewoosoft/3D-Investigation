@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-from modules import agent_module, llm_module, rag_module
+from modules import agent_module, llm_module, mcp_server, rag_module
 from modules.config import (
     _SERVER_START_TIME,
     BASE_DIR,
@@ -36,8 +36,8 @@ class ChatMessage(BaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, value: str) -> str:
-        if value not in ("user", "assistant", "system"):
-            raise ValueError("role must be user, assistant, or system")
+        if value not in ("user", "assistant", "system", "assistant_agent"):
+            raise ValueError("role must be user, assistant, system, or assistant_agent")
         return value
 
 
@@ -45,6 +45,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., min_length=1)
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(2048, ge=1, le=4096)
+    language: str = Field(default="vi", pattern="^(vi|en)$")
 
 
 @asynccontextmanager
@@ -52,15 +53,26 @@ async def lifespan(_: FastAPI):
     total = time.monotonic() - _SERVER_START_TIME
     logger.info("Server ready in %.1fs — http://127.0.0.1:8080", total)
     print(f"[SUCCESS] AI Server started successfully ({total:.1f}s)", flush=True)
-    yield
+    if mcp_server.MCP_AVAILABLE:
+        async with mcp_server.lifespan():
+            yield
+    else:
+        logger.warning("MCP SDK is not installed; MCP endpoint is unavailable")
+        yield
     logger.info("Server shutdown after %.1fs", time.monotonic() - _SERVER_START_TIME)
 
 
 app = FastAPI(title="3D-Reconstruction AI Server", version="2.4.0", lifespan=lifespan)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["POST", "GET"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST", "GET", "DELETE"],
+    allow_headers=["*"],
+    expose_headers=["Mcp-Session-Id"],
 )
 app.include_router(agent_module.agent_router)
+if mcp_server.MCP_AVAILABLE:
+    app.mount("/mcp", mcp_server.asgi_app())
 
 
 def _refresh_agent_routes() -> None:
@@ -178,17 +190,24 @@ def chat_completions(request: ChatRequest, http_req: Request):
         image_chunks = []
     rag_ms = (time.monotonic() - rag_start) * 1000
 
-    messages_raw = [message.model_dump() for message in request.messages]
+    # ``assistant_agent`` is stored for the Qt renderer only. It is structured
+    # execution state, not natural-language conversation for the chat model.
+    messages_raw = [message.model_dump() for message in request.messages
+                    if message.role != "assistant_agent"]
+    if not messages_raw:
+        raise HTTPException(status_code=422, detail="No conversational messages were supplied")
     if llm_module.is_vision_model:
         messages = llm_module.build_vision_messages(messages_raw, doc_ctx, code_ctx, image_chunks,
-                                                    suppress_citations=suppress_citations)
+                                                    suppress_citations=suppress_citations,
+                                                    language=request.language)
         estimated_tokens = sum(llm_module.estimate_tokens(part.get("text", ""))
                                for message in messages
                                for part in (message.get("content") if isinstance(message.get("content"), list)
                                             else [{"text": message.get("content", "")}]))
     else:
         messages = llm_module.build_text_messages(messages_raw, doc_ctx, code_ctx,
-                                                  suppress_citations=suppress_citations)
+                                                  suppress_citations=suppress_citations,
+                                                  language=request.language)
         estimated_tokens = sum(llm_module.estimate_tokens(message.get("content", "")) for message in messages)
 
     if estimated_tokens >= LLM_N_CTX - 512:

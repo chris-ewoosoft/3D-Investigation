@@ -20,6 +20,8 @@ from .tool_contract import build_tool_models, grammar_schema, openai_tools, vali
 from .sandbox import run as run_sandboxed_command, write_file as write_sandboxed_file
 from .observability import record_tool, span
 from .inference import backend_mode, openai_compatible_completion
+from .mcp_client import call_tool as call_mcp_tool
+from .multi_agent import audit as audit_agent, authorise as authorise_delegation, delegate, verify_result
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
@@ -645,7 +647,10 @@ def tool_rag_search(params: dict) -> dict:
         return {"error": f"Lỗi RAG search: {e}"}
 
 
-_TOOL_EXECUTORS = {
+# Implementations hosted by modules.mcp_server. Keep this map private to the
+# MCP boundary: the agent invokes the public MCP endpoint rather than these
+# functions directly.
+MCP_LOCAL_EXECUTORS = {
     "read_file":         tool_read_file,
     "list_directory":    tool_list_directory,
     "search_text":       tool_search_text,
@@ -659,6 +664,13 @@ _TOOL_EXECUTORS = {
     "app_action_general":        tool_application_action,
     "rag_search":                tool_rag_search,
     # write_file, run_command, patch_file, create_directory require approval
+}
+
+# Safe tools use the local Streamable HTTP MCP endpoint. Approval-gated write
+# tools do not enter this map and remain behind the existing approval flow.
+_TOOL_EXECUTORS = {
+    name: (lambda params, tool_name=name: call_mcp_tool(tool_name, params))
+    for name in MCP_LOCAL_EXECUTORS
 }
 
 _TOOLS_REQUIRING_APPROVAL = {"write_file", "run_command", "patch_file", "create_directory"}
@@ -957,6 +969,11 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         return answer
 
     def execute(tool_name: str, params: dict) -> dict:
+        delegation = delegate(task, session_id, tool_name, params)
+        allowed, reason = authorise_delegation(delegation, tool_name in _TOOLS_REQUIRING_APPROVAL)
+        if not allowed:
+            audit_agent("tool_denied", delegation, reason=reason)
+            return {"error": reason or "Tool call denied by supervisor policy."}
         if tool_name == "application_action":
             canonical_params, error = validate_action_params(params)
             if error:
@@ -969,8 +986,20 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             return {"error": f"Tool không tồn tại: {tool_name}"}
         with span("agent.tool", tool=tool_name, session_id=session_id):
             result = executor(params)
+        audit_agent("tool_completed", delegation, success="error" not in result)
         record_tool(tool_name, "error" not in result)
         return result
+
+    def select_specialist(tool_name: str, params: dict) -> dict:
+        delegation = delegate(task, session_id, tool_name, params)
+        audit_agent("tool_delegated", delegation)
+        return {"specialist": str(delegation.specialist), "idempotency_key": delegation.idempotency_key}
+
+    def verify_tool_result(tool_name: str, params: dict, result: dict) -> dict:
+        delegation = delegate(task, session_id, tool_name, params)
+        verification = verify_result(delegation, result)
+        audit_agent("tool_verified", delegation, **verification)
+        return verification
 
     logger.info("Khởi động LangGraph vòng lặp thực thi tool (session: %s)", session_id)
     graph = LocalAgentGraph(
@@ -980,6 +1009,8 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         needs_approval=lambda tool_name: tool_name in _TOOLS_REQUIRING_APPROVAL, # Kiểm tra xem có cần approval không
         max_iterations=_AGENT_MAX_ITERATIONS, # Số lần lặp tối đa
         emit=event_sink,
+        select_specialist=select_specialist,
+        verify_result=verify_tool_result,
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},
@@ -1048,6 +1079,8 @@ class AgentExecuteRequest(BaseModel):
     session_id:  str = Field(default="")
     temperature: float = Field(0.3, ge=0.0, le=1.5)  # Lower temp for agent precision
     language:    str = Field(default="vi", pattern="^(vi|en)$")
+    history:     list[dict] = Field(default_factory=list, max_length=20)
+    attachments: list[str] = Field(default_factory=list, max_length=10)
 
 class AgentApproveRequest(BaseModel):
     action_id:  str = Field(..., min_length=1)
@@ -1166,7 +1199,8 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             "total_ms": round((time.monotonic() - req_start) * 1000),
         }, http_req)
 
-    # Build initial messages
+    # Build initial messages. The desktop owns persisted history; retain only
+    # conversational roles here so JSON Agent-step snapshots never reach LLM.
     system_prompt = _build_agent_system_prompt(request.language)
 
     # RAG nay duoc cung cap nhu mot tool dong (rag_search) thay vi inject vao system prompt.
@@ -1182,18 +1216,36 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         except Exception:  # noqa: BLE001
             pass
 
+    history_messages: list[dict[str, str]] = []
+    for entry in request.history:
+        role = entry.get("role")
+        content = entry.get("content")
+        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
+            history_messages.append({"role": role, "content": content[:32000]})
+
+    task_with_attachments = task
+    if request.attachments:
+        names = [os.path.basename(path) for path in request.attachments]
+        task_with_attachments += "\n\n[Attached files: " + ", ".join(names) + "]"
+
     if use_langgraph:
         if "text/event-stream" in http_req.headers.get("accept", ""):
             return _stream_langgraph_execution(
-                lambda sink: _run_langgraph_agent(system_prompt, task, session_id,
+                lambda sink: _run_langgraph_agent(system_prompt, task_with_attachments, session_id,
                                                    request.temperature, request.language, req_start,
+                                                   initial_messages=[{"role": "system", "content": system_prompt},
+                                                                     *history_messages,
+                                                                     {"role": "user", "content": task_with_attachments}],
                                                    event_sink=sink))
-        return _agent_response(_run_langgraph_agent(system_prompt, task, session_id,
-                               request.temperature, request.language, req_start), http_req)
+        return _agent_response(_run_langgraph_agent(
+            system_prompt, task_with_attachments, session_id, request.temperature, request.language, req_start,
+            initial_messages=[{"role": "system", "content": system_prompt}, *history_messages,
+                              {"role": "user", "content": task_with_attachments}]), http_req)
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": task},
+        *history_messages,
+        {"role": "user", "content": task_with_attachments},
     ]
 
     steps = []

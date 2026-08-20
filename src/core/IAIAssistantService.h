@@ -51,7 +51,10 @@ public:
     virtual bool isServerRunning() const = 0;
 
     // Agent mode
-    virtual void executeAgentTask(const QString &sessionId, const QString &task) = 0;
+    // Unified assistant entry point: the server decides whether the request is
+    // answered directly or needs one or more tools.
+    virtual void executeAgentTask(const QString &sessionId, const QString &task,
+                                  const QStringList &attachments = QStringList()) = 0;
     virtual void approveAgentAction(const QString &sessionId, const QString &actionId) = 0;
     virtual void rejectAgentAction(const QString &sessionId, const QString &actionId) = 0;
     virtual void reportUiActionResult(const QString &requestId, bool success,

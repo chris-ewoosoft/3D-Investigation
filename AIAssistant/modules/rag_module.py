@@ -855,7 +855,7 @@ def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 30,
     dense_ids = [item.node.metadata["chunk_index"] for item in dense
                  if item.score is None or item.score >= SIMILARITY_THRESHOLD]
     sparse_ids = [item.node.metadata["chunk_index"] for item in sparse]
-    combined = _rrf_fuse([dense_ids, sparse_ids], [0.55, 0.45])
+    combined = _rrf_fuse([dense_ids, sparse_ids], [0.55, 0.45])   # Reciprocal Rank Fusion: 0.55 semantic + 0.45 bm25
 
     combined.sort(key=lambda x: x[1], reverse=True)
     return [knowledge_chunks[cid] for cid, _ in combined[:final_k]]

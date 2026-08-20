@@ -156,8 +156,10 @@ def _strip_reference_citations_for_character_answer(answer: str) -> str:
     return cleaned.strip()
 
 
-def build_text_messages(messages: list, doc_ctx: str, code_ctx: str, suppress_citations: bool = False) -> list:
-    system_prompt = _build_system_prompt(doc_ctx, code_ctx, suppress_citations=suppress_citations)
+def build_text_messages(messages: list, doc_ctx: str, code_ctx: str, suppress_citations: bool = False,
+                        language: str = "vi") -> list:
+    system_prompt = _build_system_prompt(doc_ctx, code_ctx, suppress_citations=suppress_citations,
+                                         language=language)
     result = [{"role": "system", "content": system_prompt}]
     
     history = trim_history(list(messages[:-1]), max_tokens=2000)
@@ -176,7 +178,8 @@ def build_text_messages(messages: list, doc_ctx: str, code_ctx: str, suppress_ci
     return result
 
 
-def _build_system_prompt(doc_ctx: str, code_ctx: str, suppress_citations: bool = False) -> str:
+def _build_system_prompt(doc_ctx: str, code_ctx: str, suppress_citations: bool = False,
+                         language: str = "vi") -> str:
     """Build system prompt chung cho cả text-only và vision model."""
     system_prompt = (
         "Bạn là trợ lý AI chuyên nghiệp cho dự án 3D-Reconstruction.\n"
@@ -201,6 +204,11 @@ def _build_system_prompt(doc_ctx: str, code_ctx: str, suppress_citations: bool =
         "11. Nếu câu hỏi liên quan đến nhân vật trong dự án (như thành viên, tác giả, người tham gia), hãy trả lời trực tiếp mà KHÔNG trích dẫn tài liệu tham khảo.\n"
         "12. KHÔNG liệt kê hay in lại log 'TÀI LIỆU THAM KHẢO' hoặc 'MÃ NGUỒN LIÊN QUAN' trong câu trả lời.\n"
     )
+    response_language = "Vietnamese" if language == "vi" else "English"
+    system_prompt += (
+        f"\n13. Respond exclusively in {response_language}, matching the current application language. "
+        "Do not choose the response language from the user's message or source documents.\n"
+    )
     if suppress_citations:
         system_prompt += (
             "\nCHẾ ĐỘ CÂU HỎI NHÂN VẬT/VAI TRÒ ĐANG BẬT:\n"
@@ -218,14 +226,16 @@ def _build_system_prompt(doc_ctx: str, code_ctx: str, suppress_citations: bool =
     return system_prompt
 
 
-def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str, image_chunks: list | None = None, suppress_citations: bool = False) -> list:
+def build_vision_messages(messages: list, doc_ctx: str, code_ctx: str, image_chunks: list | None = None,
+                          suppress_citations: bool = False, language: str = "vi") -> list:
     """
     Build messages format cho create_chat_completion() — vision model.
     Ảnh đính kèm được encode thành base64 data URI theo OpenAI multimodal format.
     Chỉ ảnh ở message cuối cùng được gửi — ảnh cũ trong history bị bỏ qua
     để tiết kiệm context.
     """
-    system_prompt = _build_system_prompt(doc_ctx, code_ctx, suppress_citations=suppress_citations)
+    system_prompt = _build_system_prompt(doc_ctx, code_ctx, suppress_citations=suppress_citations,
+                                         language=language)
     result = [{"role": "system", "content": system_prompt}]
 
     # History: chỉ gửi text, bỏ ảnh cũ
