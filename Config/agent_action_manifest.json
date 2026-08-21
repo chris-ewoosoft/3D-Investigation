@@ -10,7 +10,7 @@
   ],
   "actions": [
     {"id":"viewer.load_2d","aliases":["reconstruction.load_2d_image","viewer.load_2d_image"],"phrases":["load 2d","tai 2d","hinh anh 2d","anh 2d"],"parameters":{}},
-    {"id":"viewer.load_3d","aliases":["reconstruction.load_3d_model","viewer.load_3d_model"],"phrases":["load 3d","tai 3d","hinh anh 3d","anh 3d","mo file 3d"],"parameters":{}},
+    {"id":"viewer.load_3d","aliases":["reconstruction.load_3d_model","viewer.load_3d_model","reconstruction.load_model"],"phrases":["load 3d","load 3d model","load model 3d","tai 3d","tai mo hinh 3d","mo hinh 3d","hinh anh 3d","anh 3d","mo file 3d"],"parameters":{}},
     {"id":"viewer.load_dicom","aliases":["viewer.load_dicom_series","reconstruction.load_dicom_series"],"phrases":["load dicom","dicom series","tai dicom","anh dicom"],"parameters":{}},
     {"id":"reconstruction.load_images","aliases":[],"phrases":["load images","tai anh tai tao","anh tai tao"],"parameters":{"workflow_id":{"type":"string","required":false}}},
     {"id":"reconstruction.start_reconstruction","aliases":["reconstruction.run","reconstruction.start"],"phrases":["start reconstruction","run reconstruction","bat dau tai tao"],"parameters":{"workflow_id":{"type":"string","required":false}}},

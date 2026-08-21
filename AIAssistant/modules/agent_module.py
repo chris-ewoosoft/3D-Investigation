@@ -21,7 +21,14 @@ from .sandbox import run as run_sandboxed_command, write_file as write_sandboxed
 from .observability import record_tool, span
 from .inference import backend_mode, openai_compatible_completion
 from .mcp_client import call_tool as call_mcp_tool
-from .multi_agent import audit as audit_agent, authorise as authorise_delegation, delegate, verify_result
+from .multi_agent import (
+    audit as audit_agent,
+    authorise as authorise_delegation,
+    delegate,
+    reflect_result,
+    specialist_instruction,
+    verify_result,
+)
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
@@ -993,13 +1000,23 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     def select_specialist(tool_name: str, params: dict) -> dict:
         delegation = delegate(task, session_id, tool_name, params)
         audit_agent("tool_delegated", delegation)
-        return {"specialist": str(delegation.specialist), "idempotency_key": delegation.idempotency_key}
+        return {
+            "specialist": str(delegation.specialist),
+            "idempotency_key": delegation.idempotency_key,
+            "instruction": specialist_instruction(delegation),
+        }
 
     def verify_tool_result(tool_name: str, params: dict, result: dict) -> dict:
         delegation = delegate(task, session_id, tool_name, params)
         verification = verify_result(delegation, result)
         audit_agent("tool_verified", delegation, **verification)
         return verification
+
+    def reflect_tool_result(tool_name: str, params: dict, result: dict, verification: dict) -> dict:
+        delegation = delegate(task, session_id, tool_name, params)
+        reflection = reflect_result(delegation, result, verification)
+        audit_agent("tool_reflected", delegation, **reflection)
+        return reflection
 
     logger.info("Khởi động LangGraph vòng lặp thực thi tool (session: %s)", session_id)
     graph = LocalAgentGraph(
@@ -1011,6 +1028,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         emit=event_sink,
         select_specialist=select_specialist,
         verify_result=verify_tool_result,
+        reflect_result=reflect_tool_result,
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},

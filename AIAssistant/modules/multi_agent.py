@@ -29,6 +29,15 @@ class Delegation:
     idempotency_key: str
 
 
+_SPECIALIST_INSTRUCTIONS = {
+    Specialist.RESEARCH: "Inspect only the smallest relevant evidence; cite files and do not change state.",
+    Specialist.WORKFLOW: "Dispatch only a canonical desktop action and wait for the desktop acknowledgement.",
+    Specialist.CODE: "Describe the smallest safe change and require explicit approval before changing project state.",
+    Specialist.VERIFICATION: "Independently check observable output; report a failed check instead of assuming success.",
+    Specialist.SUPERVISOR: "Clarify intent, enforce policy, and coordinate the next specialist handoff.",
+}
+
+
 _RESEARCH_TOOLS = {"read_file", "list_directory", "search_text", "analyze_code", "rag_search"}
 _VERIFICATION_TOOLS = {"validate_file", "get_project_status"}
 _CODE_TOOLS = {"write_file", "patch_file", "create_directory", "run_command"}
@@ -75,6 +84,31 @@ def verify_result(delegation: Delegation, result: Any) -> dict[str, Any]:
         return {"passed": bool(result.get("pending_ui_ack") or result.get("success")),
                 "reason": "Qt acknowledgement is required for desktop actions."}
     return {"passed": True, "reason": "Structured tool result passed policy checks."}
+
+
+def specialist_instruction(delegation: Delegation) -> str:
+    """Return a compact role handoff for the shared local model.
+
+    Specialists are logical roles, not separate model processes: this retains
+    role separation without multiplying model context or token cost.
+    """
+    return _SPECIALIST_INSTRUCTIONS[delegation.specialist]
+
+
+def reflect_result(delegation: Delegation, result: Any, verification: dict[str, Any]) -> dict[str, Any]:
+    """Independent, deterministic critic used after each tool result.
+
+    The next ReAct turn receives this feedback and revises its approach when a
+    tool or verification failed.  Keeping the critic deterministic avoids an
+    additional LLM call for every tool invocation.
+    """
+    if not isinstance(result, dict):
+        return {"passed": False, "decision": "revise", "reason": "Tool returned an unstructured result."}
+    if result.get("error"):
+        return {"passed": False, "decision": "revise", "reason": f"Tool failed: {result['error']}"}
+    if not verification.get("passed"):
+        return {"passed": False, "decision": "revise", "reason": verification.get("reason", "Verification failed.")}
+    return {"passed": True, "decision": "continue", "reason": "Independent verification accepted the tool result."}
 
 
 def audit(event: str, delegation: Delegation, **details: Any) -> None:

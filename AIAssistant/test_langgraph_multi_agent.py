@@ -18,13 +18,15 @@ class LangGraphMultiAgentTests(unittest.TestCase):
             max_iterations=3,
             select_specialist=lambda _tool, _params: {"specialist": "research", "idempotency_key": "key"},
             verify_result=lambda _tool, _params, _result: {"passed": True, "reason": "ok"},
+            reflect_result=lambda _tool, _params, _result, _verification: {
+                "passed": True, "decision": "continue", "reason": "reviewed"},
         )
         state = graph.run([
             {"role": "system", "content": "test"},
             {"role": "user", "content": "short"},
         ], "multi-agent-test", 0.1)
         self.assertEqual([step["type"] for step in state["steps"]],
-                         ["thinking", "delegation", "tool_call", "tool_result", "verification", "final_answer"])
+                         ["thinking", "delegation", "tool_call", "tool_result", "verification", "reflection", "final_answer"])
 
 
 if __name__ == "__main__":

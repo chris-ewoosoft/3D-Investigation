@@ -70,6 +70,8 @@ class TestAgentActions(unittest.TestCase):
     def test_viewer_actions(self):
         self.assertEqual(_match_desktop_action("tai 2d"), {"action": "viewer.load_2d"})
         self.assertEqual(_match_desktop_action("tai 3d"), {"action": "viewer.load_3d"})
+        self.assertEqual(_match_desktop_action("Tải giúp tôi mô hình 3d."), {"action": "viewer.load_3d"})
+        self.assertEqual(_match_desktop_action("load 3d model"), {"action": "viewer.load_3d"})
         self.assertEqual(_match_desktop_action("load dicom"), {"action": "viewer.load_dicom"})
 
     def test_about(self):

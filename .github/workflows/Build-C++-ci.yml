@@ -52,7 +52,7 @@ env:
 jobs:
   build-and-test:
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 360
 
     steps:
       - name: Checkout

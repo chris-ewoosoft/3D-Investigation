@@ -4,7 +4,7 @@ The graph owns the agent loop; the host application owns model inference and
 tool execution.  This keeps Qt-specific actions outside the Python process.
 
 Architecture (ReAct + Plan-and-Execute):
-  START -> plan -> reason -> tool (loop) -> END
+  START -> plan -> reason -> tool -> reflect (loop) -> END
 
   plan   : Sinh ke hoach (danh sach cac buoc) truoc khi bat dau tool loop.
   reason : Quan sat ket qua tool truoc do, quyet dinh buoc tiep theo hoac ket thuc.
@@ -37,6 +37,7 @@ class AgentState(TypedDict):
     pending_tool:    dict[str, Any] | None  # tool dang cho phe duyet
     plan:            list[str] | None       # ke hoach cac buoc
     tool_call_count: int                    # so lan goi tool (trigger summarization)
+    last_reflection: dict[str, Any] | None  # deterministic critic result
 
 
 Completion    = Callable[[list[dict[str, str]], float], str]
@@ -45,6 +46,7 @@ Executor      = Callable[[str, dict[str, Any]], dict[str, Any]]
 NeedsApproval = Callable[[str], bool]
 SelectSpecialist = Callable[[str, dict[str, Any]], dict[str, Any]]
 VerifyResult = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
+ReflectResult = Callable[[str, dict[str, Any], dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 class LocalAgentGraph:
@@ -54,7 +56,8 @@ class LocalAgentGraph:
                  needs_approval: NeedsApproval, max_iterations: int,
                  emit: Callable[[dict[str, Any]], None] | None = None,
                  select_specialist: SelectSpecialist | None = None,
-                 verify_result: VerifyResult | None = None) -> None:
+                 verify_result: VerifyResult | None = None,
+                 reflect_result: ReflectResult | None = None) -> None:
         self._complete       = complete
         self._parse          = parse
         self._execute        = execute
@@ -63,12 +66,14 @@ class LocalAgentGraph:
         self._emit = emit
         self._select_specialist = select_specialist
         self._verify_result = verify_result
+        self._reflect_result = reflect_result
         self._emitted_steps = 0
 
         builder = StateGraph(AgentState)
         builder.add_node("plan",   self._traced("plan", self._plan))
         builder.add_node("reason", self._traced("reason", self._reason))
         builder.add_node("tool",   self._traced("tool", self._tool))
+        builder.add_node("reflect", self._traced("reflect", self._reflect))
 
         builder.add_edge(START, "plan")
         builder.add_conditional_edges("plan", self._after_plan,
@@ -81,6 +86,8 @@ class LocalAgentGraph:
         # desktop client.  An unconditional edge here would call the model
         # again and dispatch a second desktop action before the first ACK.
         builder.add_conditional_edges("tool", self._after_tool,
+                                      {"reflect": "reflect", "end": END})
+        builder.add_conditional_edges("reflect", self._after_reflect,
                                       {"reason": "reason", "end": END})
 
         self._graph = builder.compile(checkpointer=build_checkpointer())
@@ -113,6 +120,7 @@ class LocalAgentGraph:
                 "pending_tool":    None,
                 "plan":            None,
                 "tool_call_count": 0,
+                "last_reflection": None,
             },
             config={"configurable": {"thread_id": session_id}},
         )
@@ -239,6 +247,11 @@ class LocalAgentGraph:
 
         updated_messages = list(state["messages"])
         updated_messages.append({"role": "assistant", "content": answer})
+        if self._select_specialist and delegation.get("instruction"):
+            updated_messages.append({
+                "role": "system",
+                "content": f"[Specialist handoff: {delegation.get('specialist')}] {delegation['instruction']}",
+            })
 
         if self._needs_approval(tool_name):
             return {
@@ -263,15 +276,6 @@ class LocalAgentGraph:
             return "end"
         print("--- [LOG: ROUTER] -> Tool Node ---")
         return "tool"
-
-    @staticmethod
-    def _after_tool(state: AgentState) -> str:
-        """End after an asynchronous or approval-gated tool result."""
-        if state["done"] or state["pending_tool"] is not None:
-            print("--- [LOG: TOOL ROUTER] Ket thuc (cho ACK/phe duyet) ---")
-            return "end"
-        print("--- [LOG: TOOL ROUTER] -> Reason Node ---")
-        return "reason"
 
     # ── Node: tool ─────────────────────────────────────────────────────────────
 
@@ -352,6 +356,47 @@ class LocalAgentGraph:
             "tool_call_count": state.get("tool_call_count", 0) + 1,
         }
 
+    @staticmethod
+    def _after_tool(state: AgentState) -> str:
+        """End after an asynchronous or approval-gated tool result."""
+        if state["done"] or state["pending_tool"] is not None:
+            print("--- [LOG: TOOL ROUTER] Ket thuc (cho ACK/phe duyet) ---")
+            return "end"
+        print("--- [LOG: TOOL ROUTER] -> Reflect Node ---")
+        return "reflect"
+
+    # ── Node: reflect ────────────────────────────────────────────────────────
+
+    def _reflect(self, state: AgentState) -> dict[str, Any]:
+        """Run an independent, no-LLM review before the next ReAct turn."""
+        calls = [step for step in state["steps"] if step.get("type") == "tool_call"]
+        results = [step for step in state["steps"] if step.get("type") == "tool_result"]
+        if not calls or not results:
+            return {}
+        call, result_step = calls[-1], results[-1]
+        verification = next((step.get("result", {}) for step in reversed(state["steps"])
+                             if step.get("type") == "verification" and step.get("tool") == call["tool"]),
+                            {"passed": "error" not in result_step.get("result", {})})
+        if self._reflect_result:
+            reflection = self._reflect_result(call["tool"], call["params"], result_step["result"], verification)
+        else:
+            reflection = {"passed": bool(verification.get("passed")), "decision": "continue",
+                          "reason": verification.get("reason", "No critic configured.")}
+        steps = list(state["steps"])
+        steps.append({"type": "reflection", "tool": call["tool"], "result": reflection,
+                      "iteration": state["iteration"]})
+        messages = list(state["messages"])
+        if not reflection.get("passed"):
+            messages.append({"role": "system", "content": (
+                "[Independent review failed] " + str(reflection.get("reason", "Revise the approach.")) +
+                " Do not repeat the same failing call; inspect evidence or choose a safer next step.")})
+        return {"steps": steps, "messages": messages, "last_reflection": reflection}
+
+    @staticmethod
+    def _after_reflect(state: AgentState) -> str:
+        if state["done"] or state["pending_tool"] is not None:
+            return "end"
+        return "reason"
 
 # ── Observation Summarization ───────────────────────────────────────────────
 

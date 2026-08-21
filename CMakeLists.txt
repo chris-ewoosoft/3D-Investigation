@@ -186,6 +186,7 @@ find_package(VTK REQUIRED COMPONENTS
     ViewsQt
     IOGeometry
     IOImport
+    IOPLY
     FiltersCore
     IOImage
     IOXML
