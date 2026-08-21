@@ -10,7 +10,6 @@ sys.path.insert(0, str(ROOT))
 
 from modules.multi_agent import authorise, delegate, verify_result
 
-
 CASES = [
     ("search_text", {}, "research", True),
     ("rag_search", {}, "research", True),

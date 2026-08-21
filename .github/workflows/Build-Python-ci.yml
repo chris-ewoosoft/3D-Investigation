@@ -15,7 +15,9 @@ on:
 
 concurrency:
   group: python-ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep a running validation job: canceling a 30-second job buys little and
+  # makes a failed commit harder to diagnose.
+  cancel-in-progress: false
 
 jobs:
   lint:
@@ -39,7 +41,9 @@ jobs:
           pip install ruff
 
       - name: Ruff lint
-        run: ruff check AIAssistant/ --output-format=github
+        working-directory: AIAssistant
+        run: ruff check . --output-format=github
 
       - name: Syntax check
-        run: python -m py_compile AIAssistant/StartChatbotServer.py AIAssistant/modules/*.py
+        working-directory: AIAssistant
+        run: python -m compileall -q StartChatbotServer.py modules evals

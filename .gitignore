@@ -88,6 +88,11 @@ CMakeLists.txt.user*
 /build*/
 /AITraining/runs/
 /.ruff_cache/
+/.vs/
+/AIAssistant/Cache/
+/AIAssistant/Docs/
+/AIAssistant/logs/
+/AIComputerVision/runs/
 
 # Custom App Ignores
 /Predict/
