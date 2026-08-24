@@ -81,7 +81,10 @@ private:
     QString m_currentSessionId;
     QMap<QNetworkReply*, QueuedCompletionRequest> m_pendingRequests;
     QList<QueuedCompletionRequest> m_queuedRequests;
-    QMap<QString, QString> m_pendingUiActionSessions;
+    // Maps requestId → {sessionId, insertAfterIndex} so that the
+    // ui-action ACK response is inserted at the correct position
+    // instead of being appended to the end of the conversation.
+    QMap<QString, QPair<QString, int>> m_pendingUiActionSessions;
     bool m_isThinking = false;
     bool m_serverReadyEmitted = false;
     int m_currentModelIndex = 0;

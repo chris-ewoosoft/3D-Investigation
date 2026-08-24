@@ -51,6 +51,14 @@ class ChatRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     total = time.monotonic() - _SERVER_START_TIME
+    
+    # Dọn dẹp checkpoint cũ nếu có
+    try:
+        from modules.checkpointing import cleanup_old_checkpoints
+        cleanup_old_checkpoints()
+    except Exception as e:
+        logger.warning(f"Lỗi dọn dẹp checkpoint: {e}")
+
     logger.info("Server ready in %.1fs — http://127.0.0.1:8080", total)
     print(f"[SUCCESS] AI Server started successfully ({total:.1f}s)", flush=True)
     if mcp_server.MCP_AVAILABLE:
@@ -82,6 +90,21 @@ def _refresh_agent_routes() -> None:
                             if getattr(route, "path", None) not in agent_paths]
     app.include_router(agent_module.agent_router)
     app.openapi_schema = None
+
+
+@app.post("/admin/release-vram")
+def release_vram():
+    try:
+        with llm_module.llm_lock:
+            old_llm, llm_module.llm = llm_module.llm, None
+            del old_llm
+            gc.collect()
+            rag_module._release_ml_memory()
+        logger.info("VRAM released successfully")
+        return {"status": "ok", "message": "VRAM and models unloaded"}
+    except Exception as error:
+        logger.error("Failed to release VRAM: %s", error)
+        raise HTTPException(status_code=500, detail=str(error)) from error
 
 
 @app.post("/admin/reload-model")

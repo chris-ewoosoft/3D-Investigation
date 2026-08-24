@@ -17,6 +17,7 @@ if _enabled:
             "requests": Counter("agent_requests_total", "Agent requests", ["endpoint", "status"]),
             "latency": Histogram("agent_request_duration_seconds", "Agent request latency", ["endpoint"]),
             "tool": Counter("agent_tool_calls_total", "Tool calls", ["tool", "outcome"]),
+            "tokens": Counter("agent_tokens_total", "Tokens used", ["type"]),
         }
         from opentelemetry import trace
         _tracer = trace.get_tracer("3d-reconstruction.agent")
@@ -56,3 +57,9 @@ def prometheus_payload() -> bytes | None:
         return None
     from prometheus_client import generate_latest
     return generate_latest()
+
+
+def record_token_usage(in_tokens: int, out_tokens: int) -> None:
+    if _metrics:
+        _metrics["tokens"].labels("prompt").inc(in_tokens)
+        _metrics["tokens"].labels("completion").inc(out_tokens)

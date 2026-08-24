@@ -680,8 +680,9 @@ void AIAssistant::rejectAgentAction(const QString &sessionId, const QString &act
 void AIAssistant::reportUiActionResult(const QString &requestId, bool success, const QVariantMap &result) {
     if (requestId.isEmpty()) return;
     QueuedCompletionRequest request;
-    request.sessionId = m_pendingUiActionSessions.take(requestId);
-    if (request.sessionId.isEmpty()) request.sessionId = m_currentSessionId;
+    const auto entry = m_pendingUiActionSessions.take(requestId);
+    request.sessionId = entry.first.isEmpty() ? m_currentSessionId : entry.first;
+    request.insertAfterIndex = entry.second;  // -1 when not a retry (normal append)
     request.isAgent = true;
     request.isUiActionAck = true;
     request.payload["request_id"] = requestId;
@@ -826,7 +827,8 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
                     if (!responseRequestId.isEmpty() && requestId != responseRequestId) {
                         continue;
                     }
-                    if (!requestId.isEmpty()) m_pendingUiActionSessions.insert(requestId, sessionId);
+                    if (!requestId.isEmpty())
+                        m_pendingUiActionSessions.insert(requestId, {sessionId, request.insertAfterIndex});
                     QString manifestError;
                     QVariantMap actionParams = params.toVariantMap();
                     if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {

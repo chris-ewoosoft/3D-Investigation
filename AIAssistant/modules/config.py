@@ -97,6 +97,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 USE_LANGGRAPH_AGENT = os.environ.get("USE_LANGGRAPH_AGENT", "1") != "0"
+FORCE_LANGGRAPH_AGENT = os.environ.get("FORCE_LANGGRAPH_AGENT", "1") == "1"
 
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -219,6 +220,62 @@ def setup_logging():
 
     return logging.getLogger("chatbot_server"), log_filename
 
+
+def cleanup_old_logs(
+    logs_dir: str = LOGS_DIR,
+    max_days: int = 7,
+    max_size_mb: int = 100,
+) -> None:
+    """Dọn dẹp file log cũ trong thư mục logs.
+
+    Chính sách xóa (áp dụng tuần tự):
+    1. Xóa tất cả file .log / .log.* cũ hơn ``max_days`` ngày (mặc định 7).
+    2. Nếu tổng dung lượng vẫn vượt ``max_size_mb`` MB (mặc định 100 MB),
+       tiếp tục xóa file cũ nhất cho đến khi dưới ngưỡng.
+    Mỗi lỗi IO riêng lẻ bị bỏ qua để không làm gián đoạn quá trình khởi động.
+    """
+    if not os.path.isdir(logs_dir):
+        return
+
+    now = time.time()
+    max_age_sec = max_days * 86_400
+
+    # Thu thập tất cả file log (bao gồm .log.1, .log.2 của RotatingFileHandler)
+    log_files = sorted(
+        (
+            f
+            for f in (os.path.join(logs_dir, n) for n in os.listdir(logs_dir))
+            if os.path.isfile(f)
+            and (f.endswith(".log") or ".log." in os.path.basename(f))
+        ),
+        key=os.path.getmtime,  # cũ nhất trước
+    )
+
+    # Bước 1: Xóa file quá cũ
+    for fpath in list(log_files):
+        try:
+            if now - os.path.getmtime(fpath) > max_age_sec:
+                os.remove(fpath)
+                log_files.remove(fpath)
+        except OSError:
+            pass
+
+    # Bước 2: Xóa thêm nếu tổng kích thước vẫn vượt ngưỡng
+    def _dir_size_mb() -> float:
+        return sum(
+            os.path.getsize(f) for f in log_files if os.path.isfile(f)
+        ) / (1024 * 1024)
+
+    while log_files and _dir_size_mb() > max_size_mb:
+        try:
+            os.remove(log_files[0])
+        except OSError:
+            pass
+        log_files.pop(0)
+
+
+# Dọn log cũ trước khi tạo file log mới (file mới không bị tính vào quota)
+cleanup_old_logs()
 logger, LOG_FILE_PATH = setup_logging()
 
 # ─── 5. Startup timer ─────────────────────────────────────────────────────────

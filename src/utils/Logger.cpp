@@ -26,6 +26,10 @@ QString getLogFilePath() {
 
 void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
                           const QString &msg) {
+  if (type == QtWarningMsg && msg.contains("Unable to open monitor interface")) {
+    return;
+  }
+
   QString txt;
   QString timestamp =
       QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");

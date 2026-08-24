@@ -21,6 +21,13 @@ def openai_compatible_completion(messages: list[dict], **params) -> dict:
     endpoint = os.getenv("AGENT_INFERENCE_URL", "").rstrip("/")
     if not endpoint:
         raise RuntimeError("AGENT_INFERENCE_URL is required for remote inference")
+        
+    try:
+        from .data_governance import scrub_messages
+        messages = scrub_messages(messages)
+    except ImportError:
+        pass
+        
     body = json.dumps({"model": os.getenv("AGENT_INFERENCE_MODEL", "default"),
                        "messages": messages, "stream": False, **params}).encode()
     request = Request(endpoint + "/v1/chat/completions", data=body,

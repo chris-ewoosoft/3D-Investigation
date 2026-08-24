@@ -62,7 +62,8 @@ def canonicalise_action_params(params: dict[str, Any]) -> dict[str, Any] | None:
 def validate_action_params(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     result = canonicalise_action_params(params)
     if result is None:
-        return None, f"Unsupported desktop action: {params.get('action', '')}"
+        valid_actions = ", ".join(sorted(action_ids()))
+        return None, f"Unsupported desktop action: '{params.get('action', '')}'. Supported actions are: {valid_actions}"
     entry = _index()[0][result["action"]]
     for name, definition in entry.get("parameters", {}).items():
         value = result.get(name)
