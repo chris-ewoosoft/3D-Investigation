@@ -52,7 +52,7 @@ def build_checkpointer() -> Any:
 
 def cleanup_old_checkpoints(max_days: int = 30, max_size_mb: int = 50) -> None:
     """Xóa các checkpoint cũ nếu dùng SQLite để tránh tràn bộ nhớ."""
-    backend = os.getenv("AGENT_CHECKPOINT_BACKEND", "sqlite").casefold()
+    backend = os.getenv("AGENT_CHECKPOINT_BACKEND", "memory").casefold()
     if backend not in ("sqlite", "default"):
         return
         

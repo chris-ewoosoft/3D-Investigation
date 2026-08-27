@@ -71,3 +71,24 @@ def write_file(path: str, content: str, project_root: str) -> dict[str, Any]:
                 "bytes_written": len(content.encode("utf-8")), "sandbox": "write-allowlist"}
     except OSError as error:
         return {"error": f"Unable to write sandboxed target: {error}"}
+
+
+def create_directory(path: str, project_root: str) -> dict[str, Any]:
+    """Create an allow-listed directory after explicit approval."""
+    if os.getenv("AGENT_SANDBOX_ENABLED", "1") != "1":
+        return {"error": "Agent directory sandbox is disabled by policy."}
+    try:
+        root = Path(project_root).resolve()
+        target = Path(path).resolve()
+        relative = target.relative_to(root)
+    except ValueError:
+        return {"error": "Directory target escapes the project root."}
+    if not relative.parts or relative.parts[0] not in _WRITE_ROOTS:
+        return {"error": "Directory target is not in AGENT_WRITE_ALLOWLIST."}
+    try:
+        existed = target.is_dir()
+        target.mkdir(parents=True, exist_ok=True)
+        return {"success": True, "path": str(relative).replace("\\", "/"), "created": not existed,
+                "sandbox": "directory-allowlist"}
+    except OSError as error:
+        return {"error": f"Unable to create sandboxed directory: {error}"}

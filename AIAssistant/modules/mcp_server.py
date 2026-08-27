@@ -53,14 +53,22 @@ if MCP_AVAILABLE:
     )
 
     @mcp.tool()
-    def read_file(path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-        """Read a text file within the project directory."""
-        return _dispatch("read_file", {"path": path, "start_line": start_line, "end_line": end_line})
+    def read_file(path: str, start_line: int | None = None, end_line: int | None = None,
+                  symbol: str | None = None) -> str:
+        """Read a focused range or named source symbol within the project."""
+        return _dispatch("read_file", {
+            "path": path, "start_line": start_line, "end_line": end_line, "symbol": symbol,
+        })
 
     @mcp.tool()
     def list_directory(path: str, recursive: bool | None = None, max_depth: int | None = None) -> str:
         """List files and folders within the project directory."""
         return _dispatch("list_directory", {"path": path, "recursive": recursive, "max_depth": max_depth})
+
+    @mcp.tool()
+    def find_files(pattern: str, path: str | None = None, max_results: int | None = None) -> str:
+        """Find project files by glob without reading their contents."""
+        return _dispatch("find_files", {"pattern": pattern, "path": path, "max_results": max_results})
 
     @mcp.tool()
     def search_text(query: str, path: str | None = None, file_pattern: str | None = None,
@@ -78,6 +86,11 @@ if MCP_AVAILABLE:
     def get_project_status() -> str:
         """Get the current Git branch, modified files, and source summary."""
         return _dispatch("get_project_status", {})
+
+    @mcp.tool()
+    def git_diff(path: str | None = None, staged: bool | None = None) -> str:
+        """Read the current Git diff for Code Agent review."""
+        return _dispatch("git_diff", {"path": path, "staged": staged})
 
     @mcp.tool()
     def validate_file(path: str) -> str:

@@ -35,15 +35,20 @@ async def _call(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {"result": payload}
 
 
-def call_tool(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
+def call_tool(tool_name: str, parameters: dict[str, Any], timeout: int = 30) -> dict[str, Any]:
     """Call a server tool through MCP from the synchronous agent graph.
 
     LangGraph executes this in FastAPI's worker thread, therefore a dedicated
     event loop is safe and prevents sharing state with Uvicorn's event loop.
     """
     try:
-        return asyncio.run(_call(tool_name, parameters))
+        async def bounded_call() -> dict[str, Any]:
+            return await asyncio.wait_for(_call(tool_name, parameters), timeout=max(1, timeout))
+
+        return asyncio.run(bounded_call())
     except ImportError:
         return {"error": "MCP SDK is not installed. Install AIAssistant/requirements.txt."}
+    except asyncio.TimeoutError:
+        return {"error": f"MCP call timed out for {tool_name} after {timeout}s"}
     except Exception as error:  # noqa: BLE001 - callers need a model-visible tool error.
         return {"error": f"MCP call failed for {tool_name}: {error}"}

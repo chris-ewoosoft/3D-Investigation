@@ -74,6 +74,39 @@ def validate_action_params(params: dict[str, Any]) -> tuple[dict[str, Any] | Non
     return result, None
 
 
+def action_plan_match_score(action: str, plan_step: str) -> float | None:
+    """Score whether a canonical UI action describes a plan step.
+
+    This is a data-driven consistency check over the existing action contract,
+    not a per-request rule.  It lets Reflect reject a successful-but-unrelated
+    desktop action when the LLM claims it completed the current plan step.
+    ``None`` means the action or plan text could not be scored.
+    """
+    canonical = canonical_action(action)
+    if not canonical or not isinstance(plan_step, str) or not plan_step.strip():
+        return None
+    entry = _index()[0].get(canonical)
+    if not entry:
+        return None
+    step_tokens = set(re.findall(r"[a-z0-9]+", normalise_text(plan_step)))
+    if not step_tokens:
+        return None
+    candidates = [canonical.replace(".", " ").replace("_", " ")]
+    candidates.extend(str(phrase) for phrase in entry.get("phrases", []))
+    scores = []
+    for phrase in candidates:
+        phrase_tokens = set(re.findall(r"[a-z0-9]+", normalise_text(phrase)))
+        if phrase_tokens:
+            scores.append(len(step_tokens & phrase_tokens) / len(phrase_tokens))
+    return max(scores, default=0.0)
+
+
+def action_matches_plan_step(action: str, plan_step: str, threshold: float = 0.75) -> bool | None:
+    """Return a data-driven action/plan consistency decision."""
+    score = action_plan_match_score(action, plan_step)
+    return None if score is None else score >= threshold
+
+
 def looks_like_ui_action(text: str) -> bool:
     value = normalise_text(text)
     return any(normalise_text(phrase) in value for entry in manifest()["actions"] for phrase in entry.get("phrases", []))

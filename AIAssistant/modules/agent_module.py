@@ -1,6 +1,8 @@
 # ruff: noqa: I001
+import ast
 import fnmatch
 import queue
+import re
 import subprocess
 from collections.abc import Callable
 
@@ -16,30 +18,57 @@ from .action_manifest import (
     normalise_text as _normalise_agent_task,
     validate_action_params,
 )
-from .tool_contract import build_tool_models, grammar_schema, openai_tools, validate_tool_call
-from .sandbox import run as run_sandboxed_command, write_file as write_sandboxed_file
-from .observability import record_tool, span
+from .tool_contract import (
+    build_tool_models,
+    enrich_tool_definitions,
+    grammar_schema,
+    openai_tools,
+    validate_tool_call,
+)
+from .sandbox import (
+    create_directory as create_sandboxed_directory,
+    run as run_sandboxed_command,
+    write_file as write_sandboxed_file,
+)
+from .observability import record_approval, record_schema_error, record_tool, span
 from .inference import backend_mode, openai_compatible_completion
 from .mcp_client import call_tool as call_mcp_tool
+from .coding_agent import CodingTaskContext, instruction as coding_instruction, is_coding_task
+from .toolapp_agent import ToolAppAgent
+from .agent_tools import ToolRegistry
+from .approval_manager import PendingActionStore
+from .ui_action_manager import prepare_next_action
 from .multi_agent import (
     audit as audit_agent,
     authorise as authorise_delegation,
     delegate,
     reflect_result,
+    route_task,
     specialist_instruction,
     verify_result,
 )
+
+try:
+    from LangGraphAgent import LocalAgentGraph
+    LANGGRAPH_AVAILABLE = True
+    LANGGRAPH_IMPORT_ERROR = ""
+except ImportError as error:
+    LocalAgentGraph = None
+    LANGGRAPH_AVAILABLE = False
+    LANGGRAPH_IMPORT_ERROR = str(error)
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
     {
         "name": "read_file",
-        "description": "Read the content of a file. Returns file content as text. "
-                       "Use this to examine source code, configs, documentation, etc.",
+        "description": "Read a focused range from a file. Returns file content as text. "
+                       "For source files, first use search_text/analyze_code to locate a symbol, "
+                       "then provide start_line/end_line (or symbol) instead of reading a large file in full.",
         "parameters": {
             "path": {"type": "string", "description": "Relative path from project root (e.g. 'src/main.cpp')", "required": True},
-            "start_line": {"type": "integer", "description": "Start line (1-indexed, inclusive). Omit to read from beginning.", "required": False},
-            "end_line": {"type": "integer", "description": "End line (1-indexed, inclusive). Omit to read to end.", "required": False},
+            "start_line": {"type": "integer", "description": "Start line (1-indexed, inclusive). Required for large source files unless symbol is provided.", "required": False},
+            "end_line": {"type": "integer", "description": "End line (1-indexed, inclusive). Required for large source files unless symbol is provided.", "required": False},
+            "symbol": {"type": "string", "description": "Optional C/C++/Python function or method name; returns only its source range.", "required": False},
         },
     },
     {
@@ -73,6 +102,23 @@ AGENT_TOOLS = [
         },
     },
     {
+        "name": "find_files",
+        "description": "Find source and project files by glob pattern without reading their contents.",
+        "parameters": {
+            "pattern": {"type": "string", "description": "Glob pattern such as '*.cpp' or 'test_*.py'", "required": True},
+            "path": {"type": "string", "description": "Relative directory to search. Default: project root.", "required": False},
+            "max_results": {"type": "integer", "description": "Maximum number of paths to return. Default 100.", "required": False},
+        },
+    },
+    {
+        "name": "git_diff",
+        "description": "Read the current Git diff for a file or the project without changing state.",
+        "parameters": {
+            "path": {"type": "string", "description": "Optional relative file or directory to inspect.", "required": False},
+            "staged": {"type": "boolean", "description": "Read staged changes instead of working-tree changes.", "required": False},
+        },
+    },
+    {
         "name": "write_file",
         "description": "Write content to a file. THIS REQUIRES USER APPROVAL before execution. "
                        "Use this to fix bugs, add code, modify configs, etc.",
@@ -89,7 +135,7 @@ AGENT_TOOLS = [
         "parameters": {
             "command": {"type": "string", "description": "The shell command to run", "required": True},
             "cwd": {"type": "string", "description": "Working directory (relative to project root). Default: project root.", "required": False},
-            "timeout": {"type": "integer", "description": "Timeout in seconds. Default 30.", "required": False},
+            "timeout": {"type": "integer", "description": "Timeout in seconds. Default 30.", "minimum": 1, "maximum": 120, "required": False},
         },
     },
     {
@@ -186,15 +232,40 @@ AGENT_TOOLS.append({
         "password": {"type": "string", "description": "Optional login password", "required": False},
     },
 })
+AGENT_TOOLS = enrich_tool_definitions(AGENT_TOOLS)
 _TOOL_PARAM_MODELS = build_tool_models(AGENT_TOOLS)
 _LLAMA_CPP_TOOLS = openai_tools(AGENT_TOOLS)
 _TOOL_GRAMMAR_SCHEMA = grammar_schema(AGENT_TOOLS)
+_TOOL_DEFINITIONS = {tool["name"]: tool for tool in AGENT_TOOLS}
 
 # ── Safety: các thư mục/file cấm truy cập ────────────────────────────────────
 _AGENT_BLOCKED_DIRS = {".git", "build", "__pycache__", ".vs", "node_modules"}
 _AGENT_BLOCKED_EXTS = {".exe", ".dll", ".so", ".bin", ".dat", ".pkl", ".gguf", ".onnx", ".pt"}
-_AGENT_MAX_FILE_READ_CHARS = 50000  # ~25K tokens
+_AGENT_MAX_FILE_READ_CHARS = 24000  # bounded source context
+_AGENT_MAX_UNSCOPED_SOURCE_LINES = 240
 _AGENT_MAX_ITERATIONS = 12
+_CODE_CITATION_PATTERN = re.compile(
+    r"(?:trích\s*dẫn|trich\s*dan|cite|quote|show\s+code|source\s+code)"
+    r"[\s\S]{0,80}?([A-Za-z_]\w*(?:::[A-Za-z_]\w*)+)\s*\(",
+    re.IGNORECASE,
+)
+_PYTHON_DEF_PATTERN = re.compile(
+    r"(?:async\s+)?def\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*\(",
+    re.IGNORECASE,
+)
+_PYTHON_SYMBOL_LABEL_PATTERN = re.compile(
+    r"(?:h.m|ham|function|method|symbol)\s*[:：]?\s*"
+    r"(?:async\s+)?(?:def\s+)?([A-Za-z_]\w*(?:(?:::|\.)[A-Za-z_]\w*)*)",
+    re.IGNORECASE,
+)
+_PYTHON_PATH_PATTERN = re.compile(
+    r"(?P<path>[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+)*\.py)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_CITATION_PATTERN = re.compile(
+    r"(?:tr.{0,3}ch\s*d.{0,3}n|cite|quote|show\s+code|source\s+code)",
+    re.IGNORECASE,
+)
 
 
 def _agent_safe_path(rel_path: str) -> str | None:
@@ -207,8 +278,11 @@ def _agent_safe_path(rel_path: str) -> str | None:
     if ".." in rel_path.split("/"):
         return None
     abs_path = os.path.normpath(os.path.join(PROJECT_DIR, rel_path))
-    # Ensure within project
-    if not abs_path.startswith(os.path.normpath(PROJECT_DIR)):
+    # Ensure within project (commonpath avoids sibling-prefix escapes).
+    try:
+        if os.path.commonpath([abs_path, os.path.normpath(PROJECT_DIR)]) != os.path.normpath(PROJECT_DIR):
+            return None
+    except ValueError:
         return None
     # Check blocked dirs
     parts = rel_path.split("/")
@@ -244,8 +318,36 @@ def tool_read_file(params: dict) -> dict:
             return {"error": f"Không đọc được encoding của file: {path}"}
 
         total_lines = len(lines)
-        start = max(1, params.get("start_line", 1)) - 1  # 0-indexed
-        end = min(total_lines, params.get("end_line", total_lines))
+        requested_start = params.get("start_line")
+        requested_end = params.get("end_line")
+        symbol = str(params.get("symbol", "")).strip()
+        if symbol and requested_start is None and requested_end is None:
+            symbol_range = (
+                _find_python_symbol_range(lines, symbol)
+                if ext == ".py" else _find_symbol_range(lines, symbol)
+            )
+            if symbol_range is None:
+                return {"error": f"Không tìm thấy symbol '{symbol}' trong file: {path}",
+                        "path": path, "total_lines": total_lines}
+            requested_start, requested_end = symbol_range
+
+        if (requested_start is None and requested_end is None
+                and ext in {".cpp", ".h", ".c", ".hpp", ".cc", ".cxx"}
+                and total_lines > _AGENT_MAX_UNSCOPED_SOURCE_LINES):
+            return {
+                "error": (
+                    f"File nguồn có {total_lines} dòng; cần đọc theo phạm vi. "
+                    "Hãy dùng search_text/analyze_code để tìm symbol rồi gọi "
+                    "read_file với symbol hoặc start_line/end_line."
+                ),
+                "path": path,
+                "total_lines": total_lines,
+            }
+
+        start = max(1, requested_start or 1) - 1  # 0-indexed
+        end = min(total_lines, requested_end or total_lines)
+        if ext in {".cpp", ".h", ".c", ".hpp", ".cc", ".cxx"}:
+            end = _expand_function_end(lines, start, end)
 
         selected = lines[start:end]
         content = "".join(selected)
@@ -261,6 +363,237 @@ def tool_read_file(params: dict) -> dict:
         }
     except Exception as e:
         return {"error": f"Lỗi đọc file {path}: {e}"}
+
+
+def _find_symbol_range(lines: list[str], symbol: str) -> tuple[int, int] | None:
+    """Find a bounded source block for a named function/method."""
+    short_name = symbol.rsplit("::", 1)[-1].strip()
+    candidates = []
+    fallback = []
+    qualified = symbol.strip()
+    for i, line in enumerate(lines):
+        if not short_name or not re.search(rf"\b{re.escape(short_name)}\s*\(", line):
+            continue
+        if qualified and qualified in line:
+            fallback.append(i)
+        # Prefer a definition (opening brace on this line or immediately
+        # after it) over a call/declaration such as ``onRunReconstruction();``.
+        lookahead = " ".join(lines[i:min(len(lines), i + 4)])
+        if "{" in line or (qualified and qualified in line and "{" in lookahead):
+            candidates.append(i)
+    candidates = candidates or fallback
+    if not candidates:
+        return None
+    start = candidates[0]
+    depth = 0
+    opened = False
+    end = min(len(lines), start + 80)
+    for idx in range(start, min(len(lines), start + 240)):
+        depth += lines[idx].count("{") - lines[idx].count("}")
+        if "{" in lines[idx]:
+            opened = True
+        if opened and depth <= 0:
+            end = idx + 1
+            break
+    return start + 1, end
+
+
+def _find_python_symbol_range(lines: list[str], symbol: str) -> tuple[int, int] | None:
+    """Find the exact Python function/method range using the AST."""
+    source = "".join(lines)
+    short_name = symbol.rsplit("::", 1)[-1].rsplit(".", 1)[-1].strip()
+    qualified = symbol.replace("::", ".").strip()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tree = None
+
+    if tree is not None:
+        matches = []
+
+        def visit(node: ast.AST, parents: tuple[str, ...] = ()) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                node_path = ".".join((*parents, node.name))
+                if node_path == qualified or node.name == short_name:
+                    decorator_lines = [decorator.lineno for decorator in node.decorator_list]
+                    start = min([node.lineno, *decorator_lines])
+                    end = getattr(node, "end_lineno", node.lineno)
+                    matches.append((start, end, node_path == qualified))
+                next_parents = (*parents, node.name)
+            elif isinstance(node, ast.ClassDef):
+                next_parents = (*parents, node.name)
+            else:
+                next_parents = parents
+            for child in ast.iter_child_nodes(node):
+                visit(child, next_parents)
+
+        visit(tree)
+        if matches:
+            matches.sort(key=lambda item: (not item[2], item[0]))
+            return matches[0][0], matches[0][1]
+
+    # Syntax-error fallback: use Python indentation to keep the citation bounded.
+    definition = re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(short_name)}\s*\(")
+    for index, line in enumerate(lines):
+        if not definition.search(line):
+            continue
+        indent = len(line) - len(line.lstrip())
+        end = len(lines)
+        for candidate in range(index + 1, len(lines)):
+            next_line = lines[candidate]
+            if next_line.strip() and len(next_line) - len(next_line.lstrip()) <= indent:
+                end = candidate
+                break
+        return index + 1, end
+    return None
+
+
+def _expand_function_end(lines: list[str], start: int, end: int) -> int:
+    """Extend a range when it begins at a C/C++ function definition."""
+    header = " ".join(lines[start:min(len(lines), start + 8)])
+    if not re.search(r"\b[\w:~]+\s*\([^;{}]*\)\s*(?:const\s*)?(?:override\s*)?\{", header):
+        return end
+    depth = 0
+    opened = False
+    for idx in range(start, min(len(lines), start + 240)):
+        depth += lines[idx].count("{") - lines[idx].count("}")
+        if "{" in lines[idx]:
+            opened = True
+        if opened and depth <= 0:
+            return max(end, idx + 1)
+    return end
+
+
+def _requested_code_symbol(task: str) -> str | None:
+    """Extract a C/C++ or Python symbol from an explicit citation request."""
+    match = _CODE_CITATION_PATTERN.search(task)
+    if match:
+        return match.group(1)
+    match = _PYTHON_DEF_PATTERN.search(task)
+    if match:
+        return match.group(1)
+    match = _PYTHON_SYMBOL_LABEL_PATTERN.search(task)
+    return match.group(1) if match else None
+
+
+def _citation_is_python(task: str, symbol: str) -> bool:
+    return bool(
+        _PYTHON_PATH_PATTERN.search(task)
+        or re.search(r"\b(?:python|def|async\s+def)\b", task, re.IGNORECASE)
+        or "." in symbol
+    )
+
+
+def _citation_path_hint(task: str) -> str | None:
+    match = _PYTHON_PATH_PATTERN.search(task)
+    if not match:
+        return None
+    return match.group("path").replace("\\", "/")
+
+
+def _code_language(path: str) -> str:
+    return {
+        ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".h": "cpp", ".hpp": "cpp",
+        ".c": "c", ".py": "python", ".js": "javascript", ".ts": "typescript",
+    }.get(os.path.splitext(path)[1].lower(), "text")
+
+
+def _build_code_citation_result(task: str, session_id: str, request_started: float) -> dict | None:
+    """Return an exact source citation without asking the LLM to reproduce code.
+
+    This is a generic Coding Agent read-only workflow for explicit, qualified
+    symbol citations. It prevents a context-limited model from emitting an
+    unterminated or partial code fence after the exact source is already known.
+    """
+    symbol = _requested_code_symbol(task)
+    if not symbol or not _EXPLICIT_CITATION_PATTERN.search(task):
+        return None
+    is_python = _citation_is_python(task, symbol)
+    path_hint = _citation_path_hint(task) if is_python else None
+    search_symbol = symbol.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+    if path_hint:
+        search_path = os.path.dirname(path_hint) or "."
+        search_pattern = os.path.basename(path_hint)
+    elif is_python:
+        search_path = "AIAssistant"
+        search_pattern = "*.py"
+    else:
+        search_path = "src"
+        search_pattern = "*.cpp"
+    logger.info(
+        "[CODING CITATION] Resolve symbol=%s path=%s pattern=%s",
+        symbol, search_path, search_pattern,
+    )
+    search_params = {
+        "query": search_symbol if is_python else symbol,
+        "path": search_path,
+        "file_pattern": search_pattern,
+        "max_results": 50 if is_python else 20,
+    }
+    search_result = tool_search_text(search_params)
+    matches = search_result.get("results", []) if isinstance(search_result, dict) else []
+    if path_hint:
+        matches = [
+            item for item in matches
+            if str(item.get("file", "")).replace("\\", "/").endswith(path_hint)
+        ]
+    if is_python:
+        definition = next(
+            (
+                item for item in matches
+                if re.search(
+                    rf"\b(?:async\s+)?def\s+{re.escape(search_symbol)}\s*\(",
+                    str(item.get("content", "")),
+                )
+            ),
+            None,
+        )
+    else:
+        definition = next((item for item in matches if "{" in str(item.get("content", ""))), None)
+    if definition is None and not is_python:
+        search_params = {"query": symbol, "path": "src", "file_pattern": "*.h", "max_results": 20}
+        search_result = tool_search_text(search_params)
+        matches = search_result.get("results", []) if isinstance(search_result, dict) else []
+        definition = next((item for item in matches if "{" in str(item.get("content", ""))), None)
+    if definition is None:
+        return None
+
+    path = str(definition["file"])
+    read_params = {"path": path, "symbol": search_symbol if is_python else symbol}
+    read_result = tool_read_file(read_params)
+    if read_result.get("error"):
+        return None
+    content = str(read_result.get("content", "")).rstrip()
+    if not content:
+        return None
+
+    search_verification = {"passed": True, "reason": "Found a source definition for the requested symbol."}
+    read_verification = {"passed": True, "reason": "Read the complete source range for the requested symbol."}
+    showing = str(read_result.get("showing", ""))
+    final_answer = (
+        f"### Trích dẫn mã nguồn\n\n"
+        f"`{path}` — {showing}\n\n"
+        f"```{_code_language(path)}\n{content}\n```"
+    )
+    display_read_result = dict(read_result)
+    display_read_result["presentation"] = "citation_source"
+    steps = [
+        {"type": "delegation", "agent": "code", "tool": "search_text", "iteration": 0},
+        {"type": "tool_call", "tool": "search_text", "params": search_params, "iteration": 0},
+        {"type": "tool_result", "tool": "search_text", "result": search_result, "iteration": 0},
+        {"type": "verification", "tool": "search_text", "result": search_verification, "iteration": 0},
+        {"type": "delegation", "agent": "code", "tool": "read_file", "iteration": 0},
+        {"type": "tool_call", "tool": "read_file", "params": read_params, "iteration": 0},
+        {"type": "tool_result", "tool": "read_file", "result": display_read_result, "iteration": 0},
+        {"type": "verification", "tool": "read_file", "result": read_verification, "iteration": 0},
+        {"type": "final_answer", "content": final_answer, "iteration": 0},
+    ]
+    logger.info("[CODING CITATION] Resolved %s | %s | %s", symbol, path, showing)
+    return {
+        "status": "completed", "session_id": session_id, "steps": steps,
+        "prior_step_count": 0, "iterations": 0,
+        "total_ms": round((time.monotonic() - request_started) * 1000),
+    }
 
 
 def tool_list_directory(params: dict) -> dict:
@@ -279,7 +612,9 @@ def tool_list_directory(params: dict) -> dict:
     max_depth = params.get("max_depth", 3)
     entries = []
     count = 0
-    max_entries = 500
+    # Keep recursive repository discovery small enough for the model context;
+    # search_text/find_files are the precise tools for locating code.
+    max_entries = 150
 
     try:
         if recursive:
@@ -334,6 +669,34 @@ def tool_list_directory(params: dict) -> dict:
         return {"error": f"Lỗi liệt kê thư mục {path}: {e}"}
 
 
+def tool_find_files(params: dict) -> dict:
+    """Find files by glob without loading file contents into model context."""
+    pattern = str(params.get("pattern", "")).strip()
+    if not pattern or pattern in {".", ".."}:
+        return {"error": "File pattern must not be empty."}
+    path = params.get("path", ".")
+    abs_root = PROJECT_DIR if path == "." else _agent_safe_path(path)
+    if abs_root is None or not os.path.isdir(abs_root):
+        return {"error": f"Invalid or missing directory: {path}"}
+    max_results = min(max(int(params.get("max_results", 100)), 1), 500)
+    matches = []
+    try:
+        for root, dirs, files in os.walk(abs_root):
+            dirs[:] = sorted(d for d in dirs if d not in _AGENT_BLOCKED_DIRS)
+            for filename in sorted(files):
+                relative_to_root = os.path.relpath(os.path.join(root, filename), abs_root)
+                if not fnmatch.fnmatch(filename, pattern) and not fnmatch.fnmatch(relative_to_root, pattern):
+                    continue
+                matches.append(os.path.relpath(os.path.join(root, filename), PROJECT_DIR))
+                if len(matches) >= max_results:
+                    return {"pattern": pattern, "path": path, "count": len(matches),
+                            "truncated": True, "matches": matches}
+        return {"pattern": pattern, "path": path, "count": len(matches),
+                "truncated": False, "matches": matches}
+    except OSError as error:
+        return {"error": f"Unable to find files: {error}"}
+
+
 def tool_search_text(params: dict) -> dict:
     """Search for text in project files."""
     query = params.get("query", "")
@@ -349,6 +712,9 @@ def tool_search_text(params: dict) -> dict:
         return {"error": f"Đường dẫn không hợp lệ: {search_path}"}
 
     file_pattern = params.get("file_pattern", "*")
+    file_patterns = [pattern.strip() for pattern in re.split(r"[;,]", str(file_pattern)) if pattern.strip()]
+    if not file_patterns:
+        file_patterns = ["*"]
     case_sensitive = params.get("case_sensitive", True)
     max_results = min(params.get("max_results", 50), 100)
 
@@ -363,7 +729,14 @@ def tool_search_text(params: dict) -> dict:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in text_exts:
                     continue
-                if file_pattern != "*" and not fnmatch.fnmatch(filename, file_pattern):
+                relative_to_search = os.path.relpath(os.path.join(root, filename), abs_search)
+                relative_to_project = os.path.relpath(os.path.join(root, filename), PROJECT_DIR)
+                if file_patterns != ["*"] and not any(
+                    fnmatch.fnmatch(filename, pattern)
+                    or fnmatch.fnmatch(relative_to_search, pattern)
+                    or fnmatch.fnmatch(relative_to_project, pattern)
+                    for pattern in file_patterns
+                ):
                     continue
 
                 fp = os.path.join(root, filename)
@@ -431,7 +804,6 @@ def _analyze_python(content: str, result: dict) -> dict:
         return result
 
     classes = []
-    functions = []
     imports = []
 
     for node in ast.walk(tree):
@@ -444,16 +816,6 @@ def _analyze_python(content: str, result: dict) -> dict:
                 "methods": methods,
                 "bases": bases,
             })
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # Only top-level functions (not methods)
-            if not any(isinstance(p, ast.ClassDef) for p in ast.walk(tree)):
-                args = [a.arg for a in node.args.args]
-                functions.append({
-                    "name": node.name,
-                    "line": node.lineno,
-                    "args": args,
-                    "is_async": isinstance(node, ast.AsyncFunctionDef),
-                })
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -546,6 +908,33 @@ def tool_get_project_status(params: dict) -> dict:
             "source_file_counts": source_counts}
 
 
+def tool_git_diff(params: dict) -> dict:
+    """Return a bounded Git diff for Code Agent review."""
+    path = params.get("path", ".")
+    if path == ".":
+        diff_path = "."
+    else:
+        abs_path = _agent_safe_path(path)
+        if abs_path is None or not os.path.exists(abs_path):
+            return {"error": f"Invalid or missing diff path: {path}"}
+        diff_path = os.path.relpath(abs_path, PROJECT_DIR)
+    command = ["git", "diff", "--no-ext-diff"]
+    if params.get("staged", False):
+        command.append("--cached")
+    command.extend(["--", diff_path])
+    try:
+        completed = subprocess.run(command, cwd=PROJECT_DIR, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=10, check=False)
+        if completed.returncode != 0:
+            return {"error": completed.stderr.strip() or "git diff failed", "return_code": completed.returncode}
+        content = completed.stdout
+        limit = 16000
+        return {"path": path, "staged": bool(params.get("staged", False)),
+                "content": content[:limit], "truncated": len(content) > limit}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"error": f"Unable to read Git diff: {error}"}
+
+
 def tool_validate_file(params: dict) -> dict:
     """Validate Python or JSON syntax without executing project code."""
     path = params.get("path", "")
@@ -584,6 +973,9 @@ def _match_desktop_action_sequence(task: str) -> list[dict] | None:
     return _manifest_match_action_sequence(task)
 
 
+TOOL_APP_AGENT = ToolAppAgent(_match_desktop_action, _match_desktop_action_sequence)
+
+
 def tool_application_action(params: dict) -> dict:
     """Create a UI-action request; success is only reported after Qt ACKs it."""
     canonical_params, error = validate_action_params(params)
@@ -612,9 +1004,12 @@ def _execute_approved_patch_file(params: dict) -> dict:
         matches = content.count(find_text)
         if matches != 1:
             return {"error": f"Patch requires exactly one matching fragment; found {matches}.", "path": path}
-        with open(abs_path, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content.replace(find_text, replacement, 1))
-        return {"success": True, "path": path, "replacements": 1}
+        updated = content.replace(find_text, replacement, 1)
+        result = write_sandboxed_file(abs_path, updated, PROJECT_DIR)
+        if result.get("error"):
+            return result
+        return {"success": True, "path": path, "replacements": 1,
+                "bytes_written": result.get("bytes_written", 0), "sandbox": result.get("sandbox")}
     except OSError as error:
         return {"error": f"Unable to patch file: {error}"}
 
@@ -624,12 +1019,7 @@ def _execute_approved_create_directory(params: dict) -> dict:
     abs_path = _agent_safe_path(path)
     if abs_path is None:
         return {"error": f"Invalid directory path: {path}"}
-    try:
-        existed = os.path.isdir(abs_path)
-        os.makedirs(abs_path, exist_ok=True)
-        return {"success": True, "path": path, "created": not existed}
-    except OSError as error:
-        return {"error": f"Unable to create directory: {error}"}
+    return create_sandboxed_directory(abs_path, PROJECT_DIR)
 
 
 def tool_rag_search(params: dict) -> dict:
@@ -658,13 +1048,15 @@ def tool_rag_search(params: dict) -> dict:
 # MCP boundary: the agent invokes the public MCP endpoint rather than these
 # functions directly.
 MCP_LOCAL_EXECUTORS = {
-    "read_file":         tool_read_file,
+    "read_file":                tool_read_file,
     "list_directory":    tool_list_directory,
+    "find_files":        tool_find_files,
     "search_text":       tool_search_text,
     "analyze_code":      tool_analyze_code,
     "get_project_status": tool_get_project_status,
-    "validate_file":             tool_validate_file,
-    "application_action":         tool_application_action,
+    "git_diff":          tool_git_diff,
+"validate_file":                tool_validate_file,
+"application_action":             tool_application_action,
     "app_action_viewer":         tool_application_action,
     "app_action_reconstruction": tool_application_action,
     "app_action_ai":             tool_application_action,
@@ -676,40 +1068,32 @@ MCP_LOCAL_EXECUTORS = {
 # Safe tools use the local Streamable HTTP MCP endpoint. Approval-gated write
 # tools do not enter this map and remain behind the existing approval flow.
 _TOOL_EXECUTORS = {
-    name: (lambda params, tool_name=name: call_mcp_tool(tool_name, params))
+    name: (lambda params, tool_name=name: call_mcp_tool(
+        tool_name, params, timeout=_TOOL_DEFINITIONS.get(tool_name, _TOOL_DEFINITIONS["application_action"])["timeout_seconds"],
+    ))
     for name in MCP_LOCAL_EXECUTORS
 }
+TOOL_REGISTRY = ToolRegistry(_TOOL_EXECUTORS)
 
-_TOOLS_REQUIRING_APPROVAL = {"write_file", "run_command", "patch_file", "create_directory"}
+_TOOLS_REQUIRING_APPROVAL = {
+    tool["name"] for tool in AGENT_TOOLS if tool.get("requires_approval")
+}
 
 # ── Pending actions storage (in-memory, per session) ──────────────────────────
-_pending_actions: dict = {}  # action_id -> {tool, params, session_id}
 _pending_lock = threading.Lock()
 _PENDING_ACTIONS_FILE = os.path.join(APP_DATA_DIR, "AIAssistant", "pending_agent_actions.json")
+_pending_actions = PendingActionStore(_PENDING_ACTIONS_FILE)
 
 
 def _save_pending_actions() -> None:
     """Persist pending approvals so a server restart does not invalidate the UI action."""
-    os.makedirs(os.path.dirname(_PENDING_ACTIONS_FILE), exist_ok=True)
-    temp_file = _PENDING_ACTIONS_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as handle:
-        json.dump(_pending_actions, handle, ensure_ascii=False)
-    os.replace(temp_file, _PENDING_ACTIONS_FILE)
+    _pending_actions.save()
 
 
 def _load_pending_actions() -> None:
-    if not os.path.exists(_PENDING_ACTIONS_FILE):
-        return
-    try:
-        with open(_PENDING_ACTIONS_FILE, "r", encoding="utf-8") as handle:
-            saved_actions = json.load(handle)
-        cutoff = time.time() - 600
-        _pending_actions.update({
-            action_id: action for action_id, action in saved_actions.items()
-            if action.get("created_at", 0) >= cutoff
-        })
-    except (OSError, ValueError, TypeError) as error:
-        logger.warning("Unable to restore pending agent actions: %s", error)
+    _pending_actions.load()
+    if _pending_actions.cleanup(time.time() - 600):
+        _save_pending_actions()
 
 
 def _generate_action_id() -> str:
@@ -737,8 +1121,8 @@ def _execute_approved_run_command(params: dict) -> dict:
         abs_cwd = PROJECT_DIR
     else:
         abs_cwd = _agent_safe_path(cwd)
-    if abs_cwd is None:
-        abs_cwd = PROJECT_DIR
+    if abs_cwd is None or not os.path.isdir(abs_cwd):
+        return {"error": f"Invalid command working directory: {cwd}"}
 
     return run_sandboxed_command(command, abs_cwd, timeout)
 
@@ -783,10 +1167,18 @@ answer use {{"kind":"final","content":"your concise answer"}}.
 8. Sử dụng Markdown formatting cho câu trả lời cuối cùng.
 9. Nếu task quá lớn hoặc nguy hiểm, hãy giải thích và hỏi lại trước khi thực hiện.
 10. Scope: chỉ làm việc trong thư mục project — không truy cập file ngoài project.
-11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you may call application_action. If your plan has multiple steps, call them sequentially. Provide a short confirmation message only when all steps are completed.
+11. For application UI requests (loading data, reconstruction, AI tools, mail, language, help, or account actions), you MUST call application_action directly. Do NOT call rag_search, search_text, read_file, or another research tool to discover a UI action. If your plan has multiple steps, call the canonical UI actions sequentially. Provide a short confirmation message only when all steps are completed.
 12. Dùng rag_search TRƯỚC khi dùng read_file khi chưa biết file nào chứa thông tin cần tìm.
 13. DỪNG NGAY khi task đã hoàn thành — KHÔNG gọi thêm tool nếu kết quả đã rõ ràng.
 14. Với câu trả lời về project, chỉ khẳng định điều có bằng chứng từ RAG/tool. Nếu kết quả không đủ bằng chứng, nói rõ không tìm thấy thay vì suy đoán. Khi cần chi tiết chính xác, dùng read_file để xác minh đoạn nguồn trước khi kết luận.
+
+15. Khi yêu cầu trích dẫn hoặc giải thích một hàm/symbol, không đọc toàn bộ file nguồn. Hãy dùng search_text để lấy file và dòng, sau đó gọi read_file với symbol hoặc start_line/end_line để lấy đúng đoạn code.
+
+16. Với task coding có thay đổi repository, phải đi đủ chuỗi bằng chứng: đọc
+source liên quan, gọi patch_file/write_file sau khi đã được duyệt, gọi git_diff
+để review thay đổi và gọi run_command để kiểm chứng. Không được coi việc tìm
+thấy file hoặc đề xuất patch là đã hoàn thành. Không suy ra file/command từ
+tên tính năng; hãy lấy chúng từ source, CMake, test và kết quả tool thực tế.
 
 ## EXAMPLE:
 
@@ -849,6 +1241,7 @@ def _parse_tool_call(response_text: str) -> tuple:
     validated, error = validate_tool_call(tool_name, params, _TOOL_PARAM_MODELS)
     if error:
         logger.warning("Rejected invalid constrained tool call %s: %s", tool_name, error)
+        record_schema_error(tool_name)
         return "_validation_error", {"tool": tool_name, "error": error}
     return tool_name, validated
 
@@ -932,18 +1325,71 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
     raise RuntimeError("Constrained decoder returned an unsupported envelope")
 
 
+_PLANNER_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "requires_plan": {"type": "boolean"},
+        "plan": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["requires_plan", "plan"],
+    "additionalProperties": False,
+}
+_CRITIC_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "passed": {"type": "boolean"},
+        "decision": {"type": "string", "enum": ["continue", "revise"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["passed", "decision", "reason"],
+    "additionalProperties": False,
+}
+
+
+def _structured_agent_completion(messages: list[dict], max_tokens: int,
+                                 temperature: float, schema: dict) -> str:
+    """Generate internal planner/critic JSON without the ReAct tool schema."""
+    try:
+        if backend_mode() != "llama_cpp":
+            response = openai_compatible_completion(
+                messages, max_tokens=max_tokens, temperature=temperature,
+                response_format={"type": "json_object"},
+            )
+        else:
+            from llama_cpp import LlamaGrammar  # imported lazily for testability
+            with llm_runtime.llm_lock:
+                response = llm_runtime.llm.create_chat_completion(
+                    messages=messages, max_tokens=max_tokens, temperature=temperature,
+                    repeat_penalty=1.1, stream=False,
+                    # llama-cpp-python expects a serialized JSON Schema here;
+                    # passing the Python dict raises ``JSON object must be str``.
+                    grammar=LlamaGrammar.from_json_schema(json.dumps(schema)),
+                )
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeError(f"Structured JSON decoding failed: {error}") from error
+
+    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    if not isinstance(content, str):
+        raise RuntimeError("Structured decoder returned no text content")
+    logger.info("Structured LLM response: %s", content)
+    return content
+
+
 def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                          temperature: float, language: str, request_started: float,
                          initial_messages: list[dict[str, str]] | None = None,
-                         initial_steps: list[dict] | None = None,
-                         initial_iteration: int = 0,
-                         event_sink: Callable[[dict], None] | None = None) -> dict:
+                          initial_steps: list[dict] | None = None,
+                          initial_iteration: int = 0,
+                          resume_with_reflection: bool = False,
+                          event_sink: Callable[[dict], None] | None = None,
+                          prior_step_count: int = 0) -> dict:
     """Run the tool loop through LangGraph while preserving the Qt API response."""
     if not LANGGRAPH_AVAILABLE or LocalAgentGraph is None:
         raise HTTPException(
             status_code=503,
             detail="LangGraph is required for Agent mode. Run: pip install -r AIAssistant/requirements.txt",
         )
+    supervisor_route = route_task(task)
 
     def complete(messages: list[dict[str, str]], current_temperature: float) -> str:
         total_chars = sum(len(message.get("content", "")) for message in messages)
@@ -993,7 +1439,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         return answer
 
     def execute(tool_name: str, params: dict) -> dict:
-        delegation = delegate(task, session_id, tool_name, params)
+        delegation = delegate(task, session_id, tool_name, params, prefer_code=is_coding_task(task))
         allowed, reason = authorise_delegation(delegation, tool_name in _TOOLS_REQUIRING_APPROVAL)
         if not allowed:
             audit_agent("tool_denied", delegation, reason=reason)
@@ -1007,19 +1453,20 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             params.update(canonical_params)
         if tool_name == "_validation_error":
             return {"error": f"Lỗi xác thực tham số tool '{params.get('tool')}': {params.get('error')}"}
-        executor = _TOOL_EXECUTORS.get(tool_name)
+        executor = TOOL_REGISTRY.get(tool_name)
         if executor is None:
             return {"error": f"Tool không tồn tại: {tool_name}"}
+        tool_started = time.monotonic()
         with span("agent.tool", tool=tool_name, session_id=session_id):
             result = executor(params)
         audit_agent("tool_completed", delegation, success="error" not in result)
-        record_tool(tool_name, "error" not in result)
+        record_tool(tool_name, "error" not in result, time.monotonic() - tool_started)
         return result
 
     def select_specialist(tool_name: str, params: dict) -> dict:
         if tool_name == "_validation_error":
             return {}
-        delegation = delegate(task, session_id, tool_name, params)
+        delegation = delegate(task, session_id, tool_name, params, prefer_code=is_coding_task(task))
         audit_agent("tool_delegated", delegation)
         return {
             "specialist": str(delegation.specialist),
@@ -1030,15 +1477,14 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     def verify_tool_result(tool_name: str, params: dict, result: dict) -> dict:
         if tool_name == "_validation_error":
             return {"passed": False, "reason": result.get("error", "Validation error")}
-        delegation = delegate(task, session_id, tool_name, params)
+        delegation = delegate(task, session_id, tool_name, params, prefer_code=is_coding_task(task))
         verification = verify_result(delegation, result)
         audit_agent("tool_verified", delegation, **verification)
         return verification
 
-    def reflect_tool_result(tool_name: str, params: dict, result: dict, verification: dict) -> dict:
-        if tool_name == "_validation_error":
-            return {"passed": False, "decision": "continue", "reason": "Hãy thử dùng công cụ khác hoặc kiểm tra lại tên công cụ."}
-        delegation = delegate(task, session_id, tool_name, params)
+    def deterministic_reflection(tool_name: str, params: dict, result: dict,
+                                 verification: dict) -> dict:
+        delegation = delegate(task, session_id, tool_name, params, prefer_code=is_coding_task(task))
         reflection = reflect_result(delegation, result, verification)
         audit_agent("tool_reflected", delegation, **reflection)
         return reflection
@@ -1054,13 +1500,29 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         emit=event_sink,
         select_specialist=select_specialist,
         verify_result=verify_tool_result,
-        reflect_result=reflect_tool_result,
+        reflect_result=deterministic_reflection,
+        plan_complete=lambda messages, temp: _structured_agent_completion(
+            messages, 512, temp, _PLANNER_JSON_SCHEMA),
+        reflect_complete=lambda messages, temp: _structured_agent_completion(
+            messages, 512, temp, _CRITIC_JSON_SCHEMA),
+        plan_reflect_complete=lambda messages, temp: _structured_agent_completion(
+            messages, 512, temp, _CRITIC_JSON_SCHEMA),
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task},
     ]
-    state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration)
+    # An explicit manifest workflow is optional context only.  A single action
+    # match is not promoted to a sequence; every plan step remains an LLM
+    # tool-calling decision and is reviewed by Reflect.
+    matched_ui_actions = (
+        TOOL_APP_AGENT.match_sequence(_normalise_agent_task(task)) or []
+        if supervisor_route.value == "toolapp" else []
+    )
+    state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
+                      resume_with_reflection=resume_with_reflection,
+                      required_ui_actions=matched_ui_actions,
+                      enforce_plan_completion=supervisor_route.value == "code")
     pending_state = state.get("pending_tool") or {}
     pending_status = ("pending_ui_action" if pending_state.get("ui_ack")
                       else "pending_approval" if pending_state else "completed")
@@ -1106,6 +1568,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         return {
             "status": "pending_approval", "session_id": session_id,
             "steps": steps, "action_id": action_id,
+            "prior_step_count": prior_step_count,
             "total_ms": round((time.monotonic() - request_started) * 1000),
         }
 
@@ -1113,6 +1576,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         steps.append({"type": "final_answer", "content": "Agent đã kết thúc mà chưa có kết luận."})
     return {
         "status": "completed", "session_id": session_id, "steps": steps,
+        "prior_step_count": prior_step_count,
         "iterations": state["iteration"],
         "total_ms": round((time.monotonic() - request_started) * 1000),
     }
@@ -1213,7 +1677,19 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     req_start = time.monotonic()
     task = request.task
     session_id = request.session_id or "agent_default"
+    supervisor_route = route_task(task)
+    logger.info("[SUPERVISOR] routed task to %s", supervisor_route.value)
     retry_idx  = request.retry_message_index  # None ở request thường
+
+    # Exact code citations are a read-only Coding Agent operation. Resolve
+    # them from disk before any model turn so a constrained completion cannot
+    # truncate the requested source or leave an unclosed Markdown code fence.
+    if supervisor_route.value == "code":
+        citation_result = _build_code_citation_result(task, session_id, req_start)
+        if citation_result is not None:
+            if retry_idx is not None:
+                citation_result["retry_message_index"] = retry_idx
+            return _agent_response(citation_result, http_req)
 
     # Đưa ra quyết định dùng LangGraph hay legacy loop
     force_langgraph = FORCE_LANGGRAPH_AGENT
@@ -1230,19 +1706,30 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
 
     # Fast-path key matching: deterministic, khong can LLM.
     # Bỏ qua khi force_langgraph=True để ép LLM tự suy luận (dùng để test độ chính xác).
-    desktop_sequence = _match_desktop_action_sequence(task)
+    # A coding request may mention a UI action (for example, fixing DICOM
+    # loading). Keep it in the Code Agent so the UI matcher cannot hijack the
+    # plan or inject an unrelated expected application action.
+    if supervisor_route.value == "toolapp":
+        desktop_params, desktop_sequence = TOOL_APP_AGENT.match(task)
+    else:
+        desktop_params, desktop_sequence = None, None
     if desktop_sequence:
         workflow_id = _generate_action_id()
         for workflow_params in desktop_sequence:
             workflow_params["workflow_id"] = workflow_id
-    desktop_params = (desktop_sequence or [_match_desktop_action(task)])[0]
-    if desktop_params and not force_langgraph:
+    # Keep the bypass only for an explicit manifest workflow. A single
+    # matching action is insufficient evidence for a compound request, so it
+    # must go through LangGraph planning and LLM tool-calling.
+    if (supervisor_route.value == "toolapp" and desktop_params and desktop_sequence and not force_langgraph
+            and os.getenv("AGENT_UI_FASTPATH", "0") == "1"):
         print(f"[AGENT TRACE] ⚡ Fast-path match: {desktop_params.get('action', '?')} (bypass LLM)", flush=True)
         desktop_params, error = validate_action_params(desktop_params)
         if error:
             raise HTTPException(status_code=422, detail=error)
         request_id = _generate_action_id()
         desktop_params["request_id"] = request_id
+        fastpath_delegation = delegate(task, session_id, "application_action", desktop_params)
+        audit_agent("tool_delegated", fastpath_delegation)
         with _pending_lock:
             _pending_actions[request_id] = {
                 "tool": "application_action", "params": desktop_params,
@@ -1256,8 +1743,10 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         return _agent_response({
             "status": "pending_ui_action",
             "session_id": session_id,
+            "prior_step_count": 0,
             "steps": [
-                {"type": "tool_call", "tool": "application_action", "params": desktop_params, "iteration": 0},
+                {"type": "tool_call", "tool": "application_action", "params": desktop_params,
+                 "idempotency_key": fastpath_delegation.idempotency_key, "iteration": 0},
             ],
             "request_id": request_id,
             "ui_action": {"request_id": request_id, "action": desktop_params["action"], "params": desktop_params},
@@ -1270,11 +1759,19 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # Build initial messages. The desktop owns persisted history; retain only
     # conversational roles here so JSON Agent-step snapshots never reach LLM.
     system_prompt = _build_agent_system_prompt(request.language)
+    if is_coding_task(task):
+        system_prompt += "\n\n" + coding_instruction(CodingTaskContext(
+            task=task, language=request.language, project_root=_safe_relpath(PROJECT_DIR, PROJECT_DIR),
+        ))
+    if supervisor_route.value == "toolapp" and _looks_like_ui_action(_normalise_agent_task(task)):
+        system_prompt += "\n\n## TOOLAPP AGENT HANDOFF\n\n" + ToolAppAgent.instruction()
 
     # RAG nay duoc cung cap nhu mot tool dong (rag_search) thay vi inject vao system prompt.
     # Chi inject mot luong nho context khi task KHONG phai UI action va RAG san sang,
     # de tranh lam day context window voi thong tin khong lien quan.
-    if ENABLE_RAG and rag_runtime.knowledge_chunks and not _looks_like_ui_action(_normalise_agent_task(task)):
+    if (ENABLE_RAG and rag_runtime.knowledge_chunks
+            and supervisor_route.value != "code"
+            and not _looks_like_ui_action(_normalise_agent_task(task))):
         try:
             doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
             if doc_ctx:
@@ -1404,7 +1901,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 }
                 _save_pending_actions()
             return _agent_response({"status": "pending_ui_action", "session_id": session_id,
-                "request_id": request_id, "steps": steps,
+                "request_id": request_id, "prior_step_count": 0, "steps": steps,
                 "ui_action": {"request_id": request_id, "action": tool_params["action"], "params": tool_params},
                 **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
             }, http_req)
@@ -1442,6 +1939,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             return _agent_response({
                 "status": "pending_approval",
                 "session_id": session_id,
+                "prior_step_count": 0,
                 "steps": steps,
                 "action_id": action_id,
                 "total_ms": round(total_ms),
@@ -1451,9 +1949,9 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         # Execute safe tool
         if tool_name == "_validation_error":
             tool_result = {"error": f"Lỗi xác thực tham số tool '{tool_params.get('tool')}': {tool_params.get('error')}"}
-        elif tool_name in _TOOL_EXECUTORS:
+        elif tool_name in TOOL_REGISTRY.names():
             try:
-                tool_result = _TOOL_EXECUTORS[tool_name](tool_params)
+                tool_result = TOOL_REGISTRY.execute(tool_name, tool_params)
             except Exception as e:
                 tool_result = {"error": f"Tool exception: {e}"}
         else:
@@ -1498,6 +1996,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     return _agent_response({
         "status": "completed",
         "session_id": session_id,
+        "prior_step_count": 0,
         "steps": steps,
         "iterations": iteration,
         "total_ms": round(total_ms),
@@ -1520,26 +2019,44 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
     steps = []
     steps.append({"type": "tool_result", "tool": "application_action", "request_id": request.request_id,
                   "result": result, "iteration": action.get("iteration", 0)})
+    # The initial dispatch only proves that Qt received the request.  Verify the
+    # actual ACK separately so reflect evaluates the desktop outcome, including
+    # a failure reported by the client.
+    delegation = delegate(action["task"], action["session_id"], "application_action", params)
+    verification = verify_result(delegation, result)
+    audit_agent("tool_verified", delegation, **verification)
+    steps.append({"type": "verification", "tool": "application_action", "result": verification,
+                  "iteration": action.get("iteration", 0)})
 
     # A workflow advances only after the desktop has positively acknowledged
     # the preceding action.  Each continuation has a fresh request_id, so the
     # Qt client can dispatch it once without replaying the earlier step.
     next_actions = action.get("next_actions", [])
     if request.success and next_actions:
-        next_params, error = validate_action_params(next_actions[0])
+        # Keep an explicit passed reflection for every action that is already
+        # acknowledged.  The next graph/resume uses these reflections as the
+        # cursor for plan-step accounting; without them it would think that
+        # step 1 is still active and could replay the first action.
+        steps.append({
+            "type": "reflection", "tool": "application_action",
+            "result": {"passed": True, "decision": "continue",
+                       "reason": f"Qt acknowledged UI step: {params['action']}."},
+            "iteration": action.get("iteration", 0),
+        })
+        next_action, error = prepare_next_action(
+            action, steps, next_actions, validate_action_params, _generate_action_id,
+        )
         if error:
             raise HTTPException(status_code=422, detail=error)
-        next_request_id = _generate_action_id()
-        next_params["request_id"] = next_request_id
-        next_action = {**action, "params": next_params,
-                       "next_actions": next_actions[1:], "created_at": time.time()}
+        next_params = next_action["params"]
+        next_request_id = next_params["request_id"]
+        next_action["created_at"] = time.time()
         with _pending_lock:
             _pending_actions[next_request_id] = next_action
             _save_pending_actions()
-        steps.append({"type": "tool_call", "tool": "application_action",
-                      "params": next_params, "iteration": action.get("iteration", 0) + 1})
         return {"status": "pending_ui_action", "session_id": action["session_id"],
-                "request_id": next_request_id, "steps": action.get("steps", []) + steps,
+                "request_id": next_request_id, "prior_step_count": len(action.get("steps", [])),
+                "steps": action.get("steps", []) + steps,
                 "ui_action": {"request_id": next_request_id, "action": next_params["action"],
                               "params": next_params}}
 
@@ -1568,17 +2085,21 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
             initial_messages=messages,
             initial_steps=action.get("steps", []) + steps,
             initial_iteration=action.get("iteration", 0),
+            resume_with_reflection=True,
+            prior_step_count=len(action.get("steps", [])),
         )
 
     content = (f"Đã thực thi {params['action']}." if request.success
                else f"Không thể thực thi {params['action']}: {result.get('error', 'unknown error')}")
     steps.append({"type": "final_answer", "content": content})
+    all_steps = action.get("steps", []) + steps
     retry_idx_stored = action.get("retry_message_index")
     return {
         "status": "completed" if request.success else "failed",
         "session_id": action["session_id"],
         "request_id": request.request_id,
-        "steps": steps,
+        "prior_step_count": len(action.get("steps", [])),
+        "steps": all_steps,
         **({"retry_message_index": retry_idx_stored} if retry_idx_stored is not None else {}),
     }
 
@@ -1599,9 +2120,17 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         _save_pending_actions()
 
     if action is None:
-        raise HTTPException(status_code=404, detail=f"Action không tồn tại hoặc đã hết hạn: {action_id}")
+        record_approval("missing")
+        raise HTTPException(status_code=404, detail=f"Action not found: {action_id}")
 
+    if request.session_id and request.session_id != action.get("session_id"):
+        with _pending_lock:
+            _pending_actions[action_id] = action
+            _save_pending_actions()
+        record_approval("unauthorized")
+        raise HTTPException(status_code=403, detail="Action does not belong to this session")
     if not request.approved:
+        record_approval("rejected")
         # User rejected
         return {
             "status": "rejected",
@@ -1617,9 +2146,11 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         }
 
     # Execute the approved action
+    record_approval("approved")
     tool_name = action["tool"]
     tool_params = action["params"]
 
+    approved_tool_started = time.monotonic()
     if tool_name == "write_file":
         tool_result = _execute_approved_write_file(tool_params)
     elif tool_name == "run_command":
@@ -1630,13 +2161,22 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         tool_result = _execute_approved_create_directory(tool_params)
     else:
         tool_result = {"error": f"Unknown approval tool: {tool_name}"}
+    record_tool(tool_name, "error" not in tool_result, time.monotonic() - approved_tool_started)
 
+    prior_step_count = len(action["steps"])
     steps = action["steps"]
     steps.append({
         "type": "tool_result",
         "tool": tool_name,
         "action_id": action_id,
         "result": tool_result,
+        "iteration": action["iteration"],
+    })
+    delegation = delegate(action["task"], action["session_id"], tool_name, tool_params)
+    verification = verify_result(delegation, tool_result)
+    audit_agent("tool_verified", delegation, **verification)
+    steps.append({
+        "type": "verification", "tool": tool_name, "result": verification,
         "iteration": action["iteration"],
     })
 
@@ -1666,6 +2206,8 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             initial_messages=messages,
             initial_steps=steps,
             initial_iteration=action["iteration"],
+            resume_with_reflection=True,
+            prior_step_count=prior_step_count,
         )
 
     # Continue the agent loop
@@ -1750,7 +2292,7 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             return {
                 "status": "pending_approval",
                 "session_id": action["session_id"],
-                "prior_step_count": len(action["steps"]),
+                "prior_step_count": prior_step_count,
                 "steps": steps,
                 "action_id": new_action_id,
                 "total_ms": round(total_ms),
@@ -1758,9 +2300,9 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
 
         if tool_name_next == "_validation_error":
             tool_result_next = {"error": f"Lỗi xác thực tham số tool '{tool_params_next.get('tool')}': {tool_params_next.get('error')}"}
-        elif tool_name_next in _TOOL_EXECUTORS:
+        elif tool_name_next in TOOL_REGISTRY.names():
             try:
-                tool_result_next = _TOOL_EXECUTORS[tool_name_next](tool_params_next)
+                tool_result_next = TOOL_REGISTRY.execute(tool_name_next, tool_params_next)
             except Exception as e:
                 tool_result_next = {"error": f"Tool exception: {e}"}
         else:
@@ -1792,7 +2334,7 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
     return {
         "status": "completed",
         "session_id": action["session_id"],
-        "prior_step_count": len(action["steps"]),
+        "prior_step_count": prior_step_count,
         "steps": steps,
         "iterations": iteration,
         "total_ms": round(total_ms),
@@ -1803,13 +2345,10 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
 def _cleanup_pending_actions():
     cutoff = time.time() - 600
     with _pending_lock:
-        expired = [k for k, v in _pending_actions.items() if v.get("created_at", 0) < cutoff]
-        for k in expired:
-            del _pending_actions[k]
-        if expired:
+        had_expired = _pending_actions.cleanup(cutoff)
+        if had_expired:
             _save_pending_actions()
-        if expired:
-            logger.info("Cleaned up %d expired pending agent actions", len(expired))
+            logger.info("Cleaned up expired pending agent actions")
 
 
 def reset_agent_state() -> None:

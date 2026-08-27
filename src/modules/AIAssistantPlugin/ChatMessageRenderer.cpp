@@ -7,6 +7,18 @@
 #include <QStringList>
 
 namespace {
+int commonStepPrefixLength(const QJsonArray& previous, const QJsonArray& current) {
+    const int limit = qMin(previous.size(), current.size());
+    int index = 0;
+    for (; index < limit; ++index) {
+        if (QJsonDocument(previous[index].toObject()).toJson(QJsonDocument::Compact) !=
+            QJsonDocument(current[index].toObject()).toJson(QJsonDocument::Compact)) {
+            break;
+        }
+    }
+    return index;
+}
+
 QString resultLine(const QString& label, const QString& value) {
     return QString("<div style='margin:2px 0;'><span style='color:#94a3b8;'>%1</span> <span style='color:#e2e8f0;'>%2</span></div>")
         .arg(label.toHtmlEscaped(), value.toHtmlEscaped());
@@ -47,12 +59,15 @@ QString formatToolResult(const QString& toolName, const QJsonObject& result, IAp
     if (toolName == "read_file") {
         QString html = resultLine(ctx->translate("ai.agent_file"), result.value("path").toString()) +
                        resultLine(ctx->translate("ai.agent_lines"), result.value("showing").toString());
+        if (result.value("presentation").toString() == "citation_source") {
+            return html + "<div style='color:#94a3b8; margin-top:6px;'>Full source is rendered in the styled citation below.</div>";
+        }
         QString preview = result.value("content").toString();
         if (!preview.isEmpty()) {
-            const QStringList lines = preview.split('\n');
-            preview = lines.mid(0, 12).join("\n");
-            if (lines.size() > 12) preview += "\n…";
-            html += "<pre style='margin:6px 0 0; padding:6px; background:#111827; color:#cbd5e1; max-height:180px; white-space:pre-wrap;'>" + preview.toHtmlEscaped() + "</pre>";
+            // The server now returns a bounded, symbol/line-scoped source
+            // range. Render the complete range; the previous 12-line preview
+            // silently hid the remainder of functions such as onRunReconstruction.
+            html += "<pre style='margin:6px 0 0; padding:6px; background:#111827; color:#cbd5e1; white-space:pre-wrap;'>" + preview.toHtmlEscaped() + "</pre>";
         }
         return html;
     }
@@ -82,10 +97,25 @@ void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* 
         }
     }
 
+    QJsonArray previousAgentSteps;
     for (int i = 0; i < history.size(); ++i) {
         const auto &m = history[i];
+        const QString role = m["role"].toString();
+        int skipSteps = -1;
+        if (role == "assistant_agent") {
+            const QJsonObject envelope = QJsonDocument::fromJson(m["content"].toString().toUtf8()).object();
+            const QJsonArray currentSteps = envelope["steps"].toArray();
+            // Server responses are snapshots.  Use the explicit cursor when
+            // present and also derive the common prefix for older responses
+            // that did not include prior_step_count.
+            skipSteps = qMax(envelope["prior_step_count"].toInt(),
+                             commonStepPrefixLength(previousAgentSteps, currentSteps));
+            previousAgentSteps = currentSteps;
+        } else {
+            previousAgentSteps = QJsonArray();
+        }
         h += buildMessageHtml(m["role"].toString(), m["content"].toString(), m["attachments"].toArray(),
-                              m["timestamp"].toString(), i, ctx, resolvedActions);
+                              m["timestamp"].toString(), i, ctx, resolvedActions, skipSteps);
         
         if (isThinking && thinkingInsertIndex == i) {
             h += QString("<div class='typing'>%1</div>").arg(ctx->translate("ai.thinking"));
@@ -102,14 +132,14 @@ void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* 
 
 QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString &content, const QJsonArray &attachments,
                                              const QString &timestamp, int index, IAppContext* ctx,
-                                             const QSet<QString>& resolvedActions) {
+                                             const QSet<QString>& resolvedActions, int skipSteps) {
     if (role == "assistant") {
         return ChatTemplates::AI_MESSAGE_CONTAINER.arg(HtmlUtilities::mdToHtml(content));
     } else if (role == "assistant_agent") {
         QJsonDocument doc = QJsonDocument::fromJson(content.toUtf8());
         QJsonObject res = doc.object();
         QJsonArray steps = res["steps"].toArray();
-        const int priorStepCount = res["prior_step_count"].toInt();
+        const int priorStepCount = skipSteps >= 0 ? skipSteps : res["prior_step_count"].toInt();
         QString html;
         for (int i = priorStepCount; i < steps.size(); ++i) {
             QJsonObject step = steps[i].toObject();
@@ -128,20 +158,30 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                         .arg(planSteps[pi].toString().toHtmlEscaped());
                 }
                 html += ChatTemplates::AGENT_THINKING.arg("📌 Kế hoạch", planHtml);
+            } else if (type == "plan_reflection") {
+                const QJsonObject review = step["result"].toObject();
+                const bool passed = review.value("passed").toBool();
+                const QString status = passed ? "Plan verification passed" : "Plan verification failed";
+                html += ChatTemplates::AGENT_THINKING.arg(status,
+                    review.value("reason").toString().toHtmlEscaped());
             } else if (type == "delegation") {
                 const QString agent = step["agent"].toString().toHtmlEscaped();
                 const QString tool = step["tool"].toString().toHtmlEscaped();
+                if (tool == "rag_search") continue;
                 html += ChatTemplates::AGENT_THINKING.arg("Multi-Agent",
                     QString("Supervisor -> <b>%1</b> (%2)").arg(agent, tool));
             } else if (type == "tool_call") {
                 QString toolName = step["tool"].toString();
+                if (toolName == "rag_search") continue;
                 QString paramsStr = QString::fromUtf8(QJsonDocument(step["params"].toObject()).toJson(QJsonDocument::Compact));
                 html += ChatTemplates::AGENT_TOOL_CALL.arg("🔧", toolName, paramsStr.toHtmlEscaped());
             } else if (type == "tool_result") {
+                if (step["tool"].toString() == "rag_search") continue;
                 const QJsonObject result = step["result"].toObject();
                 html += ChatTemplates::AGENT_TOOL_RESULT_LOCALIZED.arg(ctx->translate("ai.agent_result"),
                                                                          formatToolResult(step["tool"].toString(), result, ctx));
             } else if (type == "verification") {
+                if (step["tool"].toString() == "rag_search") continue;
                 const QJsonObject result = step["result"].toObject();
                 const QString status = result.value("passed").toBool()
                     ? "Verification passed" : "Verification failed";

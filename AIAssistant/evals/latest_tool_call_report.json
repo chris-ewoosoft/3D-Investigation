@@ -1,6 +1,6 @@
 {
-  "total": 5,
-  "passed": 5,
+  "total": 7,
+  "passed": 7,
   "accuracy": 1.0,
   "cases": [
     {
@@ -17,6 +17,14 @@
     },
     {
       "name": "read file",
+      "passed": true
+    },
+    {
+      "name": "find files",
+      "passed": true
+    },
+    {
+      "name": "git diff",
       "passed": true
     },
     {

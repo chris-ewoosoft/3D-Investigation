@@ -58,14 +58,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-try:
-    from LangGraphAgent import LocalAgentGraph
-    LANGGRAPH_AVAILABLE = True
-    LANGGRAPH_IMPORT_ERROR = ""
-except ImportError as error:
-    LocalAgentGraph = None
-    LANGGRAPH_AVAILABLE = False
-    LANGGRAPH_IMPORT_ERROR = str(error)
+# LangGraph is imported by ``agent_module`` only after this configuration
+# module has finished initialising.  Importing it here creates a cycle because
+# LangGraph's per-agent logger needs ``LOGS_DIR`` defined below.
+LocalAgentGraph = None
+LANGGRAPH_AVAILABLE = False
+LANGGRAPH_IMPORT_ERROR = ""
 
 # Fix UTF-8 encoding cho Qt Creator (piped stdout — SetConsoleOutputCP không có hiệu lực)
 os.environ["PYTHONUTF8"] = "1"

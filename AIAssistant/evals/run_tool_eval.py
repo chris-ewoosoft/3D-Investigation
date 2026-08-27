@@ -15,6 +15,10 @@ TOOLS = [
      "language": {"type": "string", "required": False}, "username": {"type": "string", "required": False},
      "password": {"type": "string", "required": False}}},
     {"name": "read_file", "parameters": {"path": {"type": "string", "required": True}}},
+    {"name": "find_files", "parameters": {"pattern": {"type": "string", "required": True},
+     "path": {"type": "string", "required": False}, "max_results": {"type": "integer", "required": False}}},
+    {"name": "git_diff", "parameters": {"path": {"type": "string", "required": False},
+     "staged": {"type": "boolean", "required": False}}},
 ]
 
 

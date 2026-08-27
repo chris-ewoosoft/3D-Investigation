@@ -116,14 +116,14 @@ namespace ChatTemplates {
     const QString AGENT_TOOL_RESULT = R"(
         <div style='background-color:#2a2a35; border-left: 3px solid #10a37f; border-radius: 4px; padding: 8px; margin-bottom: 12px;'>
             <div style='color:#10a37f; font-weight:bold; font-size:12px; margin-bottom:4px;'>✓ Result</div>
-            <div style='color:#ccc; font-family:monospace; font-size:11px; white-space:pre-wrap; max-height:200px; overflow:hidden;'>%1</div>
+            <div style='color:#ccc; font-family:monospace; font-size:11px; white-space:pre-wrap;'>%1</div>
         </div>
     )";
 
     const QString AGENT_TOOL_RESULT_LOCALIZED = R"(
         <div style='background-color:#2a2a35; border-left: 3px solid #10a37f; border-radius: 4px; padding: 8px; margin-bottom: 12px;'>
             <div style='color:#10a37f; font-weight:bold; font-size:12px; margin-bottom:4px;'>&#10003; %1</div>
-            <div style='color:#ccc; font-family:monospace; font-size:11px; white-space:pre-wrap; max-height:200px; overflow:hidden;'>%2</div>
+            <div style='color:#ccc; font-family:monospace; font-size:11px; white-space:pre-wrap;'>%2</div>
         </div>
     )";
 

@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from modules import agent_module, llm_module, mcp_server, rag_module
+from modules.chatbot_agent import ChatbotAgent
 from modules.config import (
     _SERVER_START_TIME,
     BASE_DIR,
@@ -26,6 +27,7 @@ from modules.config import (
     _safe_relpath,
     logger,
 )
+from modules.multi_agent import route_task
 
 
 class ChatMessage(BaseModel):
@@ -79,6 +81,7 @@ app.add_middleware(
     expose_headers=["Mcp-Session-Id"],
 )
 app.include_router(agent_module.agent_router)
+chatbot_agent = ChatbotAgent(llm_module, rag_module)
 if mcp_server.MCP_AVAILABLE:
     app.mount("/mcp", mcp_server.asgi_app())
 
@@ -109,6 +112,7 @@ def release_vram():
 
 @app.post("/admin/reload-model")
 def reload_model():
+    global chatbot_agent
     try:
         with llm_module.llm_lock:
             old_llm, llm_module.llm = llm_module.llm, None
@@ -116,6 +120,7 @@ def reload_model():
             gc.collect()
             rag_module._release_ml_memory()
         importlib.reload(llm_module)
+        chatbot_agent = ChatbotAgent(llm_module, rag_module)
         llm_module.load_model()
         if llm_module.is_vision_model:
             rag_module.release_embedding_for_vision()
@@ -129,6 +134,7 @@ def reload_model():
 
 @app.post("/admin/reload-rag")
 def reload_rag():
+    global chatbot_agent
     if not ENABLE_RAG:
         return {"status": "skipped", "message": "RAG is disabled"}
     try:
@@ -141,6 +147,7 @@ def reload_rag():
         gc.collect()
         rag_module._release_ml_memory()
         importlib.reload(rag_module)
+        chatbot_agent = ChatbotAgent(llm_module, rag_module)
         chunks = rag_module.initialize_rag(
             force_rebuild=True, enable_reranker=not llm_module.is_vision_model,
         )
@@ -206,31 +213,22 @@ def chat_completions(request: ChatRequest, http_req: Request):
 
     logger.info("[MODE: CHAT] Query from %s: %s…", http_req.client.host,
                 user_query[:60].replace("\n", " "))
-    suppress_citations = llm_module._is_character_query(user_query)
+    logger.info("[SUPERVISOR] routed chat request to %s", route_task(user_query, "chatbot").value)
     rag_start = time.monotonic()
-    doc_ctx, code_ctx, image_chunks = rag_module.get_context(user_query, query_image_b64=query_image_b64)
-    if not query_image_b64:
-        image_chunks = []
-    rag_ms = (time.monotonic() - rag_start) * 1000
-
-    # ``assistant_agent`` is stored for the Qt renderer only. It is structured
-    # execution state, not natural-language conversation for the chat model.
     messages_raw = [message.model_dump() for message in request.messages
                     if message.role != "assistant_agent"]
     if not messages_raw:
         raise HTTPException(status_code=422, detail="No conversational messages were supplied")
+    messages, chatbot_metadata = chatbot_agent.build_messages(
+        messages_raw, user_query, query_image_b64, request.language,
+    )
+    rag_ms = (time.monotonic() - rag_start) * 1000
     if llm_module.is_vision_model:
-        messages = llm_module.build_vision_messages(messages_raw, doc_ctx, code_ctx, image_chunks,
-                                                    suppress_citations=suppress_citations,
-                                                    language=request.language)
         estimated_tokens = sum(llm_module.estimate_tokens(part.get("text", ""))
                                for message in messages
                                for part in (message.get("content") if isinstance(message.get("content"), list)
                                             else [{"text": message.get("content", "")}]))
     else:
-        messages = llm_module.build_text_messages(messages_raw, doc_ctx, code_ctx,
-                                                  suppress_citations=suppress_citations,
-                                                  language=request.language)
         estimated_tokens = sum(llm_module.estimate_tokens(message.get("content", "")) for message in messages)
 
     if estimated_tokens >= LLM_N_CTX - 512:
@@ -254,10 +252,7 @@ def chat_completions(request: ChatRequest, http_req: Request):
         raise HTTPException(status_code=500, detail=f"Inference error: {error}") from error
 
     answer = answer.strip()
-    if suppress_citations:
-        answer = llm_module._strip_reference_citations_for_character_answer(answer)
-    if finish_reason == "length":
-        answer += "\n\n⚠️ Response may be incomplete because the token limit was reached."
+    answer = chatbot_agent.clean_answer(answer, chatbot_metadata, finish_reason)
 
     total_ms = (time.monotonic() - req_start) * 1000
     logger.info("Done | rag=%.0fms llm=%.0fms total=%.0fms", rag_ms, llm_ms, total_ms)

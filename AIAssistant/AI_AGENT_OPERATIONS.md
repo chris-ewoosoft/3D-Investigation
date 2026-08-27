@@ -22,6 +22,27 @@ the action. Each action receives a `request_id`, and Qt must post the result to
 `/v1/agent/ui-action-result`. A dispatch is not reported as successful until
 that acknowledgement arrives.
 
+Agent responses are cumulative snapshots for resume/audit. Continuations include
+`prior_step_count`; Qt renders only the suffix after that cursor (and derives a
+common prefix for older persisted snapshots), so each acknowledged desktop tool
+is displayed exactly once.
+
+## Agent logs and UI-step reasoning
+
+The server keeps the aggregate log and also writes role-specific rotating logs
+under `AIAssistant/logs/`: `agent_supervisor.log`, `agent_chatbot.log`,
+`agent_toolapp.log`, `agent_coding.log`, `agent_reasoning.log`,
+`agent_verification.log`, plus `agent_research.log`, `agent_workflow.log`, and
+`agent_code.log` when those specialists are used. Reasoning entries include
+the current plan step, expected canonical action, completed-step cursor, and
+the model-selected tool when model selection is applicable.
+
+For a matched desktop workflow, the ToolApp route may provide canonical action
+hints to LangGraph. Reason still selects each tool through the model. Reflect
+evaluates the result against the current plan step; a failed reflection is fed
+back to the next Reason turn, which can choose a different valid tool or
+parameters. No request-specific action sequence is hard-coded in the agent.
+
 ## Scale and privacy
 
 Do not move inference to vLLM/TGI merely for model quality. Use it when shared
