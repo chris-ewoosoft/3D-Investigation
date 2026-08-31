@@ -75,6 +75,16 @@ class CodingAgentToolTests(unittest.TestCase):
         self.assertTrue(status.diff_reviewed)
         self.assertTrue(status.execution_observed)
 
+    def test_failed_command_cannot_complete_verification_stage(self) -> None:
+        steps = [
+            {"type": "tool_result", "tool": "read_file", "result": {"content": "source"}},
+            {"type": "tool_result", "tool": "patch_file", "result": {"success": True}},
+            {"type": "tool_result", "tool": "git_diff", "result": {"content": "diff"}},
+            {"type": "tool_result", "tool": "run_command", "result": {"return_code": 1}},
+        ]
+        status = coding_workflow_status("Implement a feature in the project", steps)
+        self.assertIn("verification_command", status.missing)
+
 
 if __name__ == "__main__":
     unittest.main()

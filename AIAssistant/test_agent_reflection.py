@@ -4,7 +4,7 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from modules.multi_agent import delegate, reflect_result, specialist_instruction
+from modules.multi_agent import delegate, reflect_result, specialist_instruction, verify_result
 
 
 class AgentReflectionTests(unittest.TestCase):
@@ -23,6 +23,11 @@ class AgentReflectionTests(unittest.TestCase):
     def test_each_specialist_has_a_compact_handoff(self):
         item = delegate("verify", "session", "validate_file", {"path": "x.py"})
         self.assertIn("Independently", specialist_instruction(item))
+
+    def test_empty_discovery_result_is_not_accepted_as_evidence(self):
+        item = delegate("inspect", "session", "search_text", {"query": "symbol"})
+        review = verify_result(item, {"query": "symbol", "count": 0, "results": []})
+        self.assertFalse(review["passed"])
 
 
 if __name__ == "__main__":

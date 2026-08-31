@@ -153,6 +153,16 @@ class TestAgentActions(unittest.TestCase):
         self.assertGreater(result["count"], 0)
         self.assertTrue(any(item["file"].endswith("agent_module.py") for item in result["results"]))
 
+    def test_search_text_accepts_a_file_path_and_extension_shorthand(self):
+        result = tool_search_text({
+            "query": "def _build_code_citation_result",
+            "path": "AIAssistant/modules/agent_module.py",
+            "file_pattern": ".py",
+            "max_results": 10,
+        })
+        self.assertGreater(result["count"], 0)
+        self.assertTrue(all(item["file"].endswith("agent_module.py") for item in result["results"]))
+
     def test_python_analysis_keeps_top_level_functions_when_classes_exist(self):
         result = tool_analyze_code({"path": "AIAssistant/modules/agent_module.py"})
         self.assertIn("_build_code_citation_result", [item["name"] for item in result["functions"]])

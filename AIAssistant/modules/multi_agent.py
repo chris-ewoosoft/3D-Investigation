@@ -124,6 +124,31 @@ def verify_result(delegation: Delegation, result: Any) -> dict[str, Any]:
         outcome = {"passed": False, "reason": str(result["error"])}
         verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
         return outcome
+    if result.get("success") is False:
+        outcome = {"passed": False, "reason": "Tool reported an unsuccessful operation."}
+        verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
+        return outcome
+    if result.get("return_code", 0) != 0:
+        outcome = {"passed": False, "reason": f"Command exited with code {result['return_code']}."}
+        verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
+        return outcome
+
+    # Read-only discovery is useful only when it produces an observation the
+    # reasoner can act on.  These field names are the public result contract of
+    # the generic tools, not feature-specific rules.
+    evidence_fields = {
+        "read_file": ("content",),
+        "search_text": ("results",),
+        "find_files": ("matches",),
+        "list_directory": ("entries",),
+        "analyze_code": ("functions", "classes", "includes"),
+        "git_diff": ("content",),
+    }
+    fields = evidence_fields.get(str(delegation.tool))
+    if fields and not any(bool(result.get(field)) for field in fields):
+        outcome = {"passed": False, "reason": "Tool completed but returned no usable evidence."}
+        verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
+        return outcome
     if delegation.specialist is Specialist.WORKFLOW:
         outcome = {"passed": bool(result.get("pending_ui_ack") or result.get("success")),
                    "reason": "Qt acknowledgement is required for desktop actions."}

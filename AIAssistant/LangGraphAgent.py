@@ -1,4 +1,4 @@
-﻿"""LangGraph orchestration for the local 3D-Reconstruction agent.
+"""LangGraph orchestration for the local 3D-Reconstruction agent.
 
 The graph owns the agent loop; the host application owns model inference and
 tool execution.  This keeps Qt-specific actions outside the Python process.
@@ -23,6 +23,7 @@ validation feedback loop.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -50,15 +51,21 @@ _LOW_RISK_TOOLS = {
 }
 _OBSERVATION_SUMMARY_THRESHOLD = 4   # tong ket observations sau N tool calls
 _OBSERVATION_KEEP_LAST = 2           # giu lai N tool-result messages gan nhat
+_CONTEXT_SYSTEM_LIMIT = 6000
+_CONTEXT_MESSAGE_LIMIT = 1800
+_CONTEXT_TOTAL_LIMIT = 14000
+_SEMANTIC_REFLECTION_TOOLS = {"run_command", "write_file", "patch_file", "create_directory", "application_action"}
 
 _PLANNER_PROMPT = """Bạn là Planner (Người lập kế hoạch) của hệ thống AI Assistant.
 Nhiệm vụ của bạn là phân tích yêu cầu của người dùng và lập ra một kế hoạch ngắn gọn, từng bước một.
 KHÔNG sử dụng bất kỳ công cụ (tool) nào.
-Trả lời CHÍNH XÁC theo JSON object:
-{"requires_plan": true/false, "plan": ["bước 1", "bước 2", ...]}
-Đặt requires_plan=false và plan=[] nếu yêu cầu chỉ có một bước độc lập.
+Trả lời CHÍNH XÁC theo JSON object với schema:
+{"requires_plan": true/false, "goal": "mục tiêu chuẩn hóa", "affected_areas": ["..."],
+ "acceptance_criteria": ["tiêu chí kiểm chứng được"], "verification_commands": ["lệnh an toàn"],
+ "steps": ["bước 1", "bước 2", ...]}
+Đặt requires_plan=false và các mảng rỗng nếu yêu cầu chỉ có một bước độc lập.
 Với yêu cầu điều khiển giao diện (mở/tải ảnh, mô hình, DICOM, tái tạo),
-hãy lập các bước thực thi trực tiếp trong ứng dụng; không lập bước tìm tài liệu,
+hãy lập các bước thực thi trực tiếp trong ứng dụng; không lập bước mở ứng dụng, tìm tài liệu,
 tìm mã nguồn, RAG hoặc tìm vị trí tệp.
 Với yêu cầu engineering/coding có thay đổi repository, kế hoạch phải bao phủ
 đọc/định vị source liên quan, thay đổi được duyệt, xem lại diff và kiểm chứng
@@ -89,6 +96,52 @@ Bạn phải tuân thủ nghiêm ngặt các quy tắc và định dạng kết 
 """
 
 
+def _completed_plan_steps(steps: list[dict[str, Any]], plan: list[str] | None) -> int:
+    """Count consecutive accepted plan steps without double-counting retries.
+
+    Each tool call is stamped with the plan step it was intended to advance.
+    Older persisted sessions lack that stamp, so retain the former sequential
+    interpretation only for those sessions.  This keeps plan progress stable
+    when a tool is retried or when post-plan evidence is collected.
+    """
+    if not plan:
+        return 0
+    reflections = [
+        step for step in steps
+        if step.get("type") == "reflection" and step.get("result", {}).get("passed") is True
+    ]
+    indexed = [step for step in reflections if isinstance(step.get("plan_step_index"), int)]
+    if not indexed:
+        return min(len(reflections), len(plan))
+    accepted = {
+        step["plan_step_index"] for step in indexed
+        if 0 <= step["plan_step_index"] < len(plan)
+    }
+    completed = 0
+    while completed in accepted:
+        completed += 1
+    return completed
+
+
+def _normalise_plan_payload(payload: dict[str, Any]) -> tuple[list[str] | None, dict[str, Any]]:
+    """Accept the current structured planner contract and older ``plan`` JSON."""
+    requires_plan = bool(payload.get("requires_plan"))
+    raw_steps = payload.get("steps", payload.get("plan", []))
+    plan = [str(item).strip() for item in raw_steps if str(item).strip()] if isinstance(raw_steps, list) else []
+    spec = {
+        "requires_plan": requires_plan,
+        "goal": str(payload.get("goal", "")).strip(),
+        "affected_areas": [str(item) for item in payload.get("affected_areas", [])
+                           if str(item).strip()] if isinstance(payload.get("affected_areas", []), list) else [],
+        "acceptance_criteria": [str(item) for item in payload.get("acceptance_criteria", [])
+                                if str(item).strip()] if isinstance(payload.get("acceptance_criteria", []), list) else [],
+        "verification_commands": [str(item) for item in payload.get("verification_commands", [])
+                                  if str(item).strip()] if isinstance(payload.get("verification_commands", []), list) else [],
+        "steps": plan,
+    }
+    return (plan or None) if requires_plan else None, spec
+
+
 class AgentState(TypedDict):
     messages:        list[dict[str, str]]   # lich su hoi thoai
     steps:           list[dict[str, Any]]   # danh sach steps (cho UI)
@@ -97,6 +150,10 @@ class AgentState(TypedDict):
     done:            bool                   # da hoan thanh chua
     pending_tool:    dict[str, Any] | None  # tool dang cho phe duyet
     plan:            list[str] | None       # ke hoach cac buoc
+    plan_spec:       dict[str, Any] | None  # structured planner contract
+    approval_granted: bool                  # one approval covers this plan scope
+    approval_scope:   str                   # stable hash of task/plan scope
+    cancelled:        bool                  # cooperative cancellation requested
     tool_call_count: int                    # so lan goi tool (trigger summarization)
     last_reflection: dict[str, Any] | None  # deterministic critic result
     error_count:     int                    # so lan tool loi lien tiep
@@ -130,7 +187,8 @@ class LocalAgentGraph:
                  reflect_result: ReflectResult | None = None,
                  plan_complete: Completion | None = None,
                  reflect_complete: Completion | None = None,
-                 plan_reflect_complete: Completion | None = None) -> None:
+                 plan_reflect_complete: Completion | None = None,
+                 cancel_checker: Callable[[], bool] | None = None) -> None:
         self._complete       = complete
         self._parse          = parse
         self._execute        = execute
@@ -148,6 +206,7 @@ class LocalAgentGraph:
         # plan-review completions. If omitted, deterministic checks still run
         # and a plan is accepted without consuming the tool-critic callback.
         self._plan_reflect_complete = plan_reflect_complete
+        self._cancel_checker = cancel_checker or (lambda: False)
         self._emitted_steps = 0
 
         builder = StateGraph(AgentState)
@@ -197,7 +256,9 @@ class LocalAgentGraph:
             temperature: float, steps: list[dict[str, Any]] | None = None,
             iteration: int = 0, resume_with_reflection: bool = False,
             required_ui_actions: list[dict[str, Any]] | None = None,
-            enforce_plan_completion: bool = False) -> AgentState:
+            enforce_plan_completion: bool = False,
+            approval_granted: bool = False,
+            approval_scope: str = "") -> AgentState:
         self._emitted_steps = len(steps or [])
         restored_plan = next(
             (step.get("steps") for step in reversed(steps or []) if step.get("type") == "plan"),
@@ -217,6 +278,11 @@ class LocalAgentGraph:
             "done":            False,
             "pending_tool":    None,
             "plan":            restored_plan,
+            "plan_spec":       next((step.get("spec") for step in reversed(steps or [])
+                                      if step.get("type") == "plan"), None),
+            "approval_granted": approval_granted,
+            "approval_scope":   approval_scope,
+            "cancelled":        False,
             "tool_call_count": 0,
             "last_reflection": None,
             "error_count":     0,
@@ -289,7 +355,7 @@ class LocalAgentGraph:
             for step in reversed(state.get("steps", [])):
                 if step.get("type") == "plan":
                     logger.info("[NODE: plan] Đã có kế hoạch đã xác thực: %s", step.get("steps"))
-                    return {"plan": step.get("steps"), "plan_verified": True}
+                    return {"plan": step.get("steps"), "plan_spec": step.get("spec"), "plan_verified": True}
 
         # Preserve an existing plan while entering the graph from a fresh
         # request; only a failed plan_reflection authorises regeneration.
@@ -297,7 +363,7 @@ class LocalAgentGraph:
             for step in reversed(state.get("steps", [])):
                 if step.get("type") == "plan":
                     logger.info("[NODE: plan] Đã có kế hoạch từ trước: %s", step.get("steps"))
-                    return {"plan": step.get("steps")}
+                    return {"plan": step.get("steps"), "plan_spec": step.get("spec")}
 
         # Skip planning nếu đang ở giữa task (đã có tool_call từ vòng lặp trước)
         if any(step.get("type") == "tool_call" for step in state.get("steps", [])) and previous_review is None:
@@ -328,32 +394,31 @@ class LocalAgentGraph:
         print(f"[AGENT TRACE] ── Plan: kế hoạch thô: {raw[:200]}", flush=True)
 
         plan: list[str] | None = None
-        requires_plan = False
+        plan_spec: dict[str, Any] = {}
         parsed = False
         try:
             payload = json.loads(raw)
             parsed = isinstance(payload, dict)
-            requires_plan = bool(payload.get("requires_plan")) if isinstance(payload, dict) else False
-            plan = payload.get("plan") if isinstance(payload, dict) and requires_plan else None
-            if not isinstance(plan, list):
-                plan = None
+            if parsed:
+                plan, plan_spec = _normalise_plan_payload(payload)
         except (ValueError, json.JSONDecodeError):
             plan = None
 
         if plan:
             steps = list(state["steps"])
-            steps.append({"type": "plan", "steps": plan})
+            steps.append({"type": "plan", "steps": plan, "spec": plan_spec})
             print(f"[AGENT TRACE] ── Plan: {plan}", flush=True)
             logger.info(f"[NODE: plan] Đã sinh kế hoạch: {plan}")
             return {"plan": plan, "steps": steps,
                     "plan_verified": False,
                     "plan_attempts": state.get("plan_attempts", 0) + 1,
+                    "plan_spec": plan_spec,
                     "plan_feedback": ""}
 
         if not parsed:
             print("[AGENT TRACE] ── Plan: không parse được, tiếp tục không có plan.", flush=True)
             logger.info("[NODE: plan] Không sinh được kế hoạch.")
-        elif requires_plan:
+        elif plan_spec.get("requires_plan"):
             print("[AGENT TRACE] ── Plan: planner yêu cầu kế hoạch nhưng không có bước hợp lệ.", flush=True)
             logger.info("[NODE: plan] Planner không trả về bước kế hoạch hợp lệ.")
         else:
@@ -387,7 +452,7 @@ class LocalAgentGraph:
                 {"role": "system", "content": _PLAN_CRITIC_PROMPT},
                 {"role": "user", "content": (
                     f"Yêu cầu ban đầu: {user_msg}\n"
-                    f"Kế hoạch cần kiểm tra: {json.dumps(plan, ensure_ascii=False)}\n"
+                    f"Kế hoạch cần kiểm tra: {json.dumps(state.get('plan_spec') or {'steps': plan}, ensure_ascii=False)}\n"
                     "Kế hoạch có đạt yêu cầu và sẵn sàng thực thi không?"
                 )},
             ]
@@ -449,6 +514,11 @@ class LocalAgentGraph:
         print(f"\n[AGENT TRACE] ── Reason node: iter {iteration}", flush=True)
         logger.info(f"[NODE: reason] Bắt đầu suy luận (iteration {iteration})")
 
+        if self._cancel_checker():
+            steps.append({"type": "cancelled", "content": "Task cancelled cooperatively.",
+                          "iteration": iteration})
+            return {"iteration": iteration, "steps": steps, "done": True, "cancelled": True}
+
         if iteration > self._max_iterations:
             print(f"[AGENT TRACE] ── Reason: đạt giới hạn ({self._max_iterations} iterations).", flush=True)
             steps.append({"type": "final_answer",
@@ -465,8 +535,7 @@ class LocalAgentGraph:
 
         plan            = state.get("plan")
         tool_call_count = state.get("tool_call_count", 0)
-        done_count      = sum(1 for s in steps if s.get("type") == "reflection"
-                              and s.get("result", {}).get("passed") is True)
+        done_count      = _completed_plan_steps(steps, plan)
 
         coding_status = None
         if state.get("enforce_coding_workflow"):
@@ -553,6 +622,14 @@ class LocalAgentGraph:
         print(f"[AGENT TRACE] ── Reason: LLM output ({len(answer)} chars): {answer[:120].replace(chr(10), ' ')}", flush=True)
         logger.info(f"[NODE: reason] LLM trả về raw answer: {answer}")
 
+        if answer.casefold().startswith(("context quá dài", "context qua dai", "context too long")):
+            compacted = _summarize_messages(state["messages"])
+            steps.append({"type": "context_compacted", "iteration": iteration})
+            updated = [*compacted, {"role": "system", "content":
+                                    "Context vừa được rút gọn. Tiếp tục bằng một JSON tool_call hoặc final khi đủ bằng chứng."}]
+            return {"iteration": iteration, "steps": steps, "messages": updated,
+                    "tool_call_count": tool_call_count, "done": False}
+
         if not answer:
             steps.append({"type": "error", "content": "LLM tra ve rong."})
             return {"iteration": iteration, "steps": steps, "done": True}
@@ -565,7 +642,15 @@ class LocalAgentGraph:
             print("[AGENT TRACE] ── Reason: final answer.", flush=True)
             logger.info("[NODE: reason] LLM quyết định dừng (final_answer).")
             coding_missing = coding_status.missing if coding_status else ()
-            plan_missing = bool(state.get("enforce_plan_completion") and plan and done_count < len(plan))
+            # Natural-language plan entries describe intent, whereas the Coding
+            # workflow has observable completion conditions (source, approved
+            # mutation, diff and verification).  Do not force a model to emit
+            # arbitrary extra calls merely to consume prose plan entries.
+            plan_missing = bool(
+                state.get("enforce_plan_completion")
+                and not state.get("enforce_coding_workflow")
+                and plan and done_count < len(plan)
+            )
             if coding_missing or plan_missing:
                 # A model may emit a prose answer after a large observation
                 # result even though coding evidence or planned work remains.
@@ -659,6 +744,26 @@ class LocalAgentGraph:
                           "iteration": iteration})
 
         params = tool_params or {}
+        fingerprint = json.dumps({"tool": tool_name, "params": params},
+                                 ensure_ascii=False, sort_keys=True)
+        failed_calls = set()
+        for index, step in enumerate(steps):
+            if step.get("type") != "reflection" or step.get("result", {}).get("passed") is not False:
+                continue
+            for prior in reversed(steps[:index]):
+                if prior.get("type") == "tool_call":
+                    failed_calls.add(json.dumps({"tool": prior.get("tool"), "params": prior.get("params", {})},
+                                                 ensure_ascii=False, sort_keys=True))
+                    break
+        if fingerprint in failed_calls:
+            steps.append({"type": "validation_error", "tool": tool_name,
+                          "error": "Identical tool call already failed review; choose a different query, scope, or tool.",
+                          "iteration": iteration})
+            updated_messages = list(state["messages"])
+            updated_messages.append({"role": "user", "content":
+                                     "Không được lặp lại tool call vừa thất bại. Hãy đổi tham số/phạm vi hoặc chọn tool khám phá bổ sung."})
+            return {"iteration": iteration, "steps": steps, "messages": updated_messages,
+                    "tool_call_count": tool_call_count}
         idempotency_key = ""
         if self._select_specialist:
             delegation = self._select_specialist(tool_name, params)
@@ -669,8 +774,10 @@ class LocalAgentGraph:
         print(f"[AGENT TRACE] ── Reason: tool call → tool='{tool_name}', params={str(params)[:80]}", flush=True)
         logger.info("[NODE: reason] LLM quyết định gọi tool: %s, params: %s", tool_name, params)
         tool_call = {"type": "tool_call", "tool": tool_name,
-                     "params": params, "idempotency_key": idempotency_key,
-                     "iteration": iteration}
+                      "params": params, "idempotency_key": idempotency_key,
+                      "iteration": iteration}
+        if current_plan_step is not None:
+            tool_call["plan_step_index"] = done_count
         steps.append(tool_call)
 
         updated_messages = list(state["messages"])
@@ -679,12 +786,29 @@ class LocalAgentGraph:
         # injected as an internal role into the next model payload: the model
         # receives one unified user/assistant/system conversation contract.
 
-        if self._needs_approval(tool_name):
+        approval_scope = state.get("approval_scope")
+        if not approval_scope:
+            scope_payload = json.dumps({"plan": plan, "spec": state.get("plan_spec")},
+                                       ensure_ascii=False, sort_keys=True)
+            approval_scope = hashlib.sha256(scope_payload.encode()).hexdigest()[:16]
+        if self._needs_approval(tool_name) and not state.get("approval_granted"):
+            spec = state.get("plan_spec") or {}
+            preview = {
+                "scope_id": approval_scope,
+                "goal": spec.get("goal", ""),
+                "affected_areas": spec.get("affected_areas", []),
+                "acceptance_criteria": spec.get("acceptance_criteria", []),
+                "tool": tool_name, "params": params,
+                "remaining_steps": plan[done_count:] if plan and done_count < len(plan) else [],
+            }
             return {
                 "iteration":    iteration,
                 "steps":        steps,
                 "messages":     updated_messages,
-                "pending_tool": {"tool": tool_name, "params": params},
+                "pending_tool": {"tool": tool_name, "params": params,
+                                  "approval_scope": approval_scope,
+                                  "approval_preview": preview},
+                "approval_scope": approval_scope,
                 "done":         True,
             }
 
@@ -715,6 +839,10 @@ class LocalAgentGraph:
             logger.info("[ROUTER: after_reason] → REASON (coding evidence incomplete)")
             print("[AGENT TRACE] ── Router: → Reason node (coding workflow incomplete)", flush=True)
             return "reason"
+        if steps and steps[-1].get("type") == "context_compacted":
+            logger.info("[ROUTER: after_reason] → REASON (context compacted)")
+            print("[AGENT TRACE] ── Router: → Reason node (context compacted)", flush=True)
+            return "reason"
         logger.info("[ROUTER: after_reason] → TOOL")
         print("[AGENT TRACE] ── Router: → Tool node", flush=True)
         return "tool"
@@ -723,16 +851,37 @@ class LocalAgentGraph:
 
     def _tool(self, state: AgentState) -> dict[str, Any]:
         logger.info("[NODE: tool] Bắt đầu thực thi tool.")
+        if self._cancel_checker():
+            steps = list(state["steps"])
+            steps.append({"type": "cancelled", "content": "Task cancelled cooperatively.",
+                          "iteration": state.get("iteration", 0)})
+            return {"steps": steps, "done": True, "cancelled": True}
         # Tim tool_call chua co tool_result tuong ung
         call_steps   = [s for s in state["steps"] if s.get("type") == "tool_call"]
         result_steps = [s for s in state["steps"] if s.get("type") == "tool_result"]
-        if len(call_steps) > len(result_steps):
-            last_step = call_steps[len(result_steps)]
-        else:
-            last_step = state["steps"][-1]
+        if len(call_steps) <= len(result_steps):
+            logger.error("[NODE: tool] Reached without a pending tool_call.")
+            steps = list(state["steps"])
+            steps.append({
+                "type": "error",
+                "content": "Tool node reached without a pending tool call.",
+                "iteration": state.get("iteration", 0),
+            })
+            return {"steps": steps, "done": True}
 
-        tool_name = last_step["tool"]
-        params    = last_step["params"]
+        last_step = call_steps[len(result_steps)]
+
+        tool_name = last_step.get("tool")
+        params = last_step.get("params")
+        if not tool_name or not isinstance(params, dict):
+            logger.error("[NODE: tool] Pending tool_call has invalid payload: %s", last_step)
+            steps = list(state["steps"])
+            steps.append({
+                "type": "error",
+                "content": "Pending tool call has an invalid payload.",
+                "iteration": state.get("iteration", 0),
+            })
+            return {"steps": steps, "done": True}
 
         logger.info("[NODE: tool] Thực thi: %s, params: %s", tool_name, str(params)[:200])
         print(f"\n--- [LOG: TOOL NODE] Thuc thi: {tool_name} ---")
@@ -751,6 +900,16 @@ class LocalAgentGraph:
         else:
             error_count = 0
 
+        # Desktop actions are executed by Qt, outside this process.  Stop the
+        # graph until the client explicitly acknowledges the request instead
+        # of treating dispatch as success.
+        if result.get("pending_ui_ack"):
+            return {
+                "steps": state.get("steps", []),
+                "pending_tool": {"tool": tool_name, "params": params, "ui_ack": True},
+                "done": True,
+            }
+
         steps = list(state["steps"])
         steps.append({"type": "tool_result", "tool": tool_name,
                       "result": result, "iteration": state["iteration"]})
@@ -763,16 +922,6 @@ class LocalAgentGraph:
             verification = self._verify_result(tool_name, params, result)
             steps.append({"type": "verification", "tool": tool_name, "result": verification,
                           "iteration": state["iteration"]})
-
-        # Desktop actions are executed by Qt, outside this process.  Stop the
-        # graph until the client explicitly acknowledges the request instead
-        # of treating dispatch as success.
-        if result.get("pending_ui_ack"):
-            return {
-                "steps": steps,
-                "pending_tool": {"tool": tool_name, "params": params, "ui_ack": True},
-                "done": True,
-            }
 
         result_text = json.dumps(result, ensure_ascii=False, indent=2)
         if len(result_text) > 8000:
@@ -812,9 +961,11 @@ class LocalAgentGraph:
             steps.append({
                 "type": "reflection", "tool": tool_name,
                 "result": {"passed": True, "decision": "continue",
-                           "reason": "Verified low-risk read-only tool result."},
+                            "reason": "Verified low-risk read-only tool result."},
                 "iteration": state["iteration"],
             })
+            if isinstance(last_step.get("plan_step_index"), int):
+                steps[-1]["plan_step_index"] = last_step["plan_step_index"]
             return {
                 "steps":           steps,
                 "messages":        messages,
@@ -822,6 +973,19 @@ class LocalAgentGraph:
                 "error_count":     error_count,
                 "skip_reflect":    True,
             }
+        if (tool_name not in _SEMANTIC_REFLECTION_TOOLS
+                and verification.get("passed") and "error" not in result):
+            steps.append({
+                "type": "reflection", "tool": tool_name,
+                "result": {"passed": True, "decision": "continue",
+                            "reason": "Verified result contract; semantic critic not required."},
+                "iteration": state["iteration"],
+            })
+            if isinstance(last_step.get("plan_step_index"), int):
+                steps[-1]["plan_step_index"] = last_step["plan_step_index"]
+            return {"steps": steps, "messages": messages,
+                    "tool_call_count": state.get("tool_call_count", 0) + 1,
+                    "error_count": error_count, "skip_reflect": True}
         return {
             "steps":           steps,
             "messages":        messages,
@@ -878,10 +1042,7 @@ class LocalAgentGraph:
         # step as failed, which is what produced the "chỉ tải ảnh 2D nhưng
         # yêu cầu cần cả mô hình 3D và ảnh DICOM" false-negative.
         scope_note = ""
-        completed_plan_steps = sum(
-            1 for step in state["steps"]
-            if step.get("type") == "reflection" and step.get("result", {}).get("passed") is True
-        )
+        completed_plan_steps = _completed_plan_steps(state["steps"], plan)
         if plan and completed_plan_steps < len(plan):
             current_step_text = plan[completed_plan_steps]
             scope_note = (
@@ -919,7 +1080,16 @@ class LocalAgentGraph:
         ):
             reflection = None
 
-        if not reflection or "passed" not in reflection:
+        if not verification.get("passed"):
+            # An LLM critic may be optimistic about a syntactically valid but
+            # empty search or a failed command.  Deterministic verification is
+            # the authority for the tool-result contract.
+            reflection = self._reflect_result(call["tool"], call["params"], result_step["result"], verification) \
+                if self._reflect_result else {
+                    "passed": False, "decision": "revise",
+                    "reason": verification.get("reason", "Verification failed."),
+                }
+        elif not reflection or "passed" not in reflection:
             logger.warning("[NODE: reflect] LLM parse lỗi, dùng verification fallback.")
             if self._reflect_result:
                 reflection = self._reflect_result(call["tool"], call["params"], result_step["result"], verification)
@@ -960,16 +1130,24 @@ class LocalAgentGraph:
                            reflection: dict[str, Any]) -> dict[str, Any]:
         """Persist critic output and feed a failed review back to the reasoner."""
         steps = list(state["steps"])
-        steps.append({"type": "reflection", "tool": call["tool"], "result": reflection,
-                      "iteration": state["iteration"]})
+        reflection_step = {"type": "reflection", "tool": call["tool"], "result": reflection,
+                           "iteration": state["iteration"]}
+        if isinstance(call.get("plan_step_index"), int):
+            reflection_step["plan_step_index"] = call["plan_step_index"]
+        steps.append(reflection_step)
         messages = list(state["messages"])
         if not reflection.get("passed"):
             logger.warning("[NODE: reflect] Review FAILED cho tool '%s': %s",
                            call["tool"], reflection.get("reason", ""))
+            recovery = (
+                " If this was a discovery call with no evidence, change the query or scope and use a complementary "
+                "discovery tool (file listing, symbol analysis, focused read, or diff) instead of repeating the "
+                "same fingerprint. Preserve the failure as evidence and continue the plan."
+            )
             messages.append({"role": "system", "content": (
                 "[Independent review failed] " + str(reflection.get("reason", "Revise the approach.")) +
                 " Do not repeat the same failing call; inspect evidence, follow the current plan step, "
-                "and choose a different valid tool or parameters when needed.")})
+                "and choose a different valid tool or parameters when needed." + recovery)})
         return {"steps": steps, "messages": messages, "last_reflection": reflection}
 
     @staticmethod
@@ -983,37 +1161,68 @@ class LocalAgentGraph:
 # ── Observation Summarization ───────────────────────────────────────────────
 
 def _summarize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Rut gon lich su hoi thoai: giu system + first-user-task,
-    tom tat cac tool results cu, giu N messages gan nhat.
+    """Keep a bounded, useful context for the next Reasoner turn.
+
+    The old implementation retained every system note and four complete tool
+    messages.  A single large source read could therefore push the request over
+    the model context window; the host returned ``Context quá dài`` and the
+    graph repeatedly treated that sentinel as a final answer.  This compactor
+    preserves the original task and the latest observations while enforcing a
+    character budget independent of the number or domain of tools used.
     """
-    if len(messages) <= 4:
+    if len(messages) <= 4 and sum(len(m.get("content", "")) for m in messages) <= _CONTEXT_TOTAL_LIMIT:
         return messages
 
-    system     = [m for m in messages if m.get("role") == "system"]
-    first_user = next((m for m in messages if m.get("role") == "user"), None)
-    keep_count = _OBSERVATION_KEEP_LAST * 2
-    middle     = messages[2:-keep_count] if len(messages) > 2 + keep_count else []
-    recent     = messages[-keep_count:]
+    def clipped(message: dict[str, str], limit: int) -> dict[str, str]:
+        content = message.get("content", "")
+        if len(content) <= limit:
+            return message
+        marker = "\n… [context clipped]"
+        return {**message, "content": content[:max(0, limit - len(marker))] + marker}
 
-    if not middle:
-        return messages
+    first_system_index = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)
+    first_user_index = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
+    recent_count = _OBSERVATION_KEEP_LAST * 2
+    recent_indices = list(range(max(0, len(messages) - recent_count), len(messages)))
+    protected = set(recent_indices)
+    if first_system_index is not None:
+        protected.add(first_system_index)
+    if first_user_index is not None:
+        protected.add(first_user_index)
 
-    parts = []
-    for m in middle:
-        role    = m.get("role", "")
-        content = m.get("content", "")[:300]
-        parts.append(f"[{role}] {content}")
+    middle = [messages[i] for i in range(len(messages)) if i not in protected]
+    parts = [
+        f"[{m.get('role', '')}] {m.get('content', '')[:300]}"
+        for m in middle
+    ]
+    result: list[dict[str, str]] = []
+    if first_system_index is not None:
+        result.append(clipped(messages[first_system_index], _CONTEXT_SYSTEM_LIMIT))
+    if first_user_index is not None and first_user_index != first_system_index:
+        result.append(clipped(messages[first_user_index], _CONTEXT_MESSAGE_LIMIT))
+    if parts:
+        result.append({
+            "role": "system",
+            "content": "[Tom tat cac buoc da thuc hien]\n" + "\n".join(parts) + "\n[Het tom tat]",
+        })
+    for index in recent_indices:
+        if index not in {first_system_index, first_user_index}:
+            result.append(clipped(messages[index], _CONTEXT_MESSAGE_LIMIT))
 
-    summary_msg = {
-        "role":    "system",
-        "content": "[Tom tat cac buoc da thuc hien]\n" + "\n".join(parts) + "\n[Het tom tat]",
-    }
-
-    result = list(system)
-    if first_user:
-        result.append(first_user)
-    result.append(summary_msg)
-    result.extend(recent)
+    # Preserve the latest observation if the fixed total budget is still tight.
+    total = sum(len(m.get("content", "")) for m in result)
+    if total > _CONTEXT_TOTAL_LIMIT:
+        for index in range(len(result) - 1, -1, -1):
+            message = result[index]
+            if message.get("role") == "system" and index == 0:
+                continue
+            excess = total - _CONTEXT_TOTAL_LIMIT
+            content = message.get("content", "")
+            new_length = max(240, len(content) - excess)
+            result[index] = clipped(message, new_length)
+            total = sum(len(m.get("content", "")) for m in result)
+            if total <= _CONTEXT_TOTAL_LIMIT:
+                break
     return result
 
 
@@ -1021,8 +1230,10 @@ def _format_code_citation(messages: list[dict[str, str]], steps: list[dict[str, 
     """Return a complete, syntax-highlighted citation for symbol requests."""
     user_msg = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
     normalized = user_msg.casefold()
-    citation_terms = ("trích dẫn", "trich dan", "quote", "show code", "source code",
-                      "hàm", "ham", "function", "method", "symbol")
+    # A request that merely names a function may ask for analysis, review or a
+    # fix.  Only an explicit citation request may replace the model's final
+    # explanation with a source fence.
+    citation_terms = ("trích dẫn", "trich dan", "cite", "quote", "show code", "source code")
     if not any(term in normalized for term in citation_terms):
         return None
     for step in reversed(steps):

@@ -56,6 +56,42 @@ _SOURCE_TOOLS = frozenset({"read_file", "analyze_code"})
 _MUTATION_TOOLS = frozenset({"write_file", "patch_file", "create_directory"})
 
 
+def _result_is_successful(result: object) -> bool:
+    """Return whether a tool result represents a successful operation.
+
+    Tool executors use a small shared result contract.  Absence of ``error`` is
+    not sufficient: a command can finish with a non-zero exit code and a
+    mutation can explicitly report ``success: false``.  Keeping this check here
+    makes completion evidence independent of a particular feature or tool
+    caller.
+    """
+    if not isinstance(result, dict) or result.get("error"):
+        return False
+    if result.get("success") is False:
+        return False
+    return result.get("return_code", 0) == 0
+
+
+def _result_has_evidence(tool: str, result: object) -> bool:
+    """Return whether a successful discovery result contains usable evidence."""
+    if not _result_is_successful(result) or not isinstance(result, dict):
+        return False
+    evidence_fields = {
+        "read_file": "content",
+        "search_text": "results",
+        "find_files": "matches",
+        "list_directory": "entries",
+        "analyze_code": ("functions", "classes", "includes"),
+    }
+    fields = evidence_fields.get(tool)
+    if fields is None:
+        return True
+    if isinstance(fields, str):
+        value = result.get(fields)
+        return bool(value.strip()) if isinstance(value, str) else bool(value)
+    return any(bool(result.get(field)) for field in fields)
+
+
 def _normalise_task(task: str) -> str:
     """Create one accent-insensitive view for intent and workflow checks."""
     return unicodedata.normalize("NFKD", task).encode("ascii", "ignore").decode().casefold()
@@ -106,11 +142,17 @@ def coding_workflow_status(task: str, steps: list[dict]) -> CodingWorkflowStatus
         if step.get("type") != "tool_result":
             continue
         result = step.get("result")
-        if isinstance(result, dict) and not result.get("error"):
+        if _result_is_successful(result):
             successful_results.append((index, step))
 
-    source_evidence = any(step.get("tool") in _SOURCE_TOOLS for _, step in successful_results)
-    discovery_evidence = any(step.get("tool") in _DISCOVERY_TOOLS for _, step in successful_results)
+    source_evidence = any(
+        step.get("tool") in _SOURCE_TOOLS and _result_has_evidence(step.get("tool", ""), step.get("result"))
+        for _, step in successful_results
+    )
+    discovery_evidence = any(
+        step.get("tool") in _DISCOVERY_TOOLS and _result_has_evidence(step.get("tool", ""), step.get("result"))
+        for _, step in successful_results
+    )
     mutation_indices = [
         index for index, step in successful_results
         if step.get("tool") in _MUTATION_TOOLS
@@ -118,7 +160,8 @@ def coding_workflow_status(task: str, steps: list[dict]) -> CodingWorkflowStatus
     last_mutation = max(mutation_indices, default=None)
     mutation = last_mutation is not None
     diff_reviewed = any(
-        index > last_mutation and step.get("tool") == "git_diff"
+        (index > last_mutation and step.get("tool") == "git_diff"
+         and _result_has_evidence("git_diff", step.get("result")))
         for index, step in successful_results
     ) if last_mutation is not None else False
     execution_observed = any(

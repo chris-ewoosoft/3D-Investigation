@@ -697,7 +697,8 @@ void AIAssistant::reportUiActionResult(const QString &requestId, bool success, c
 
 void AIAssistant::onProcessReadyRead() {
     QString out = QString::fromUtf8(aiServerProcess->readAllStandardOutput());
-    qDebug().noquote() << "[AIAssistant Server]" << out;
+    if(!out.isEmpty())
+        qDebug().noquote() << "[AIAssistant Server]" << out << "\n";
     
     QStringList lines = out.split('\n');
     for (const QString &line : lines) {
@@ -719,7 +720,8 @@ void AIAssistant::onProcessReadyRead() {
 
 void AIAssistant::onProcessError() {
     QString err = QString::fromUtf8(aiServerProcess->readAllStandardError());
-    qDebug().noquote() << "[AIAssistant Server]" << err;
+    if(!err.isEmpty())
+        qDebug().noquote() << "[AIAssistant Server]" << err << "\n";
     
     QStringList lines = err.split('\n');
     for (const QString &line : lines) {

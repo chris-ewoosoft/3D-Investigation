@@ -38,6 +38,7 @@ from .toolapp_agent import ToolAppAgent
 from .agent_tools import ToolRegistry
 from .approval_manager import PendingActionStore
 from .ui_action_manager import prepare_next_action
+from .task_coordinator import coordinator as task_coordinator
 from .multi_agent import (
     audit as audit_agent,
     authorise as authorise_delegation,
@@ -710,11 +711,14 @@ def tool_search_text(params: dict) -> dict:
         abs_search = _agent_safe_path(search_path)
     if abs_search is None:
         return {"error": f"Đường dẫn không hợp lệ: {search_path}"}
+    if not os.path.isdir(abs_search) and not os.path.isfile(abs_search):
+        return {"error": f"Đường dẫn không tồn tại: {search_path}"}
 
     file_pattern = params.get("file_pattern", "*")
     file_patterns = [pattern.strip() for pattern in re.split(r"[;,]", str(file_pattern)) if pattern.strip()]
     if not file_patterns:
         file_patterns = ["*"]
+    file_patterns = [f"*{pattern}" if pattern.startswith(".") else pattern for pattern in file_patterns]
     case_sensitive = params.get("case_sensitive", True)
     max_results = min(params.get("max_results", 50), 100)
 
@@ -723,13 +727,18 @@ def tool_search_text(params: dict) -> dict:
     text_exts = {".cpp", ".h", ".py", ".md", ".txt", ".cmake", ".json", ".xml", ".html", ".css", ".js", ".ts", ".yaml", ".yml", ".toml", ".cfg", ".ini", ".bat", ".sh"}
 
     try:
-        for root, dirs, files in os.walk(abs_search):
+        walk_roots = (
+            [(os.path.dirname(abs_search), [], [os.path.basename(abs_search)])]
+            if os.path.isfile(abs_search) else os.walk(abs_search)
+        )
+        search_root = os.path.dirname(abs_search) if os.path.isfile(abs_search) else abs_search
+        for root, dirs, files in walk_roots:
             dirs[:] = sorted(d for d in dirs if d not in _AGENT_BLOCKED_DIRS)
             for filename in sorted(files):
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in text_exts:
                     continue
-                relative_to_search = os.path.relpath(os.path.join(root, filename), abs_search)
+                relative_to_search = os.path.relpath(os.path.join(root, filename), search_root)
                 relative_to_project = os.path.relpath(os.path.join(root, filename), PROJECT_DIR)
                 if file_patterns != ["*"] and not any(
                     fnmatch.fnmatch(filename, pattern)
@@ -1329,9 +1338,15 @@ _PLANNER_JSON_SCHEMA = {
     "type": "object",
     "properties": {
         "requires_plan": {"type": "boolean"},
+        "goal": {"type": "string"},
+        "affected_areas": {"type": "array", "items": {"type": "string"}},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+        "verification_commands": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "string"}},
+        # Kept for persisted/older planner clients; new prompts emit steps.
         "plan": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["requires_plan", "plan"],
+    "required": ["requires_plan", "steps"],
     "additionalProperties": False,
 }
 _CRITIC_JSON_SCHEMA = {
@@ -1382,7 +1397,9 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                           initial_iteration: int = 0,
                           resume_with_reflection: bool = False,
                           event_sink: Callable[[dict], None] | None = None,
-                          prior_step_count: int = 0) -> dict:
+                          prior_step_count: int = 0,
+                          approval_granted: bool = False,
+                          approval_scope: str = "") -> dict:
     """Run the tool loop through LangGraph while preserving the Qt API response."""
     if not LANGGRAPH_AVAILABLE or LocalAgentGraph is None:
         raise HTTPException(
@@ -1507,6 +1524,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             messages, 512, temp, _CRITIC_JSON_SCHEMA),
         plan_reflect_complete=lambda messages, temp: _structured_agent_completion(
             messages, 512, temp, _CRITIC_JSON_SCHEMA),
+        cancel_checker=lambda: task_coordinator.is_cancelled(session_id),
     )
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},
@@ -1522,10 +1540,22 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
                       resume_with_reflection=resume_with_reflection,
                       required_ui_actions=matched_ui_actions,
-                      enforce_plan_completion=supervisor_route.value == "code")
+                      enforce_plan_completion=supervisor_route.value == "code",
+                      approval_granted=approval_granted or bool((initial_steps or []) and
+                                            any(step.get("type") == "approval_granted"
+                                                for step in (initial_steps or []))),
+                      approval_scope=approval_scope)
     pending_state = state.get("pending_tool") or {}
     pending_status = ("pending_ui_action" if pending_state.get("ui_ack")
                       else "pending_approval" if pending_state else "completed")
+    if state.get("cancelled"):
+        pending_status = "cancelled"
+    if pending_state:
+        task_coordinator.update(session_id, status="waiting_approval" if not pending_state.get("ui_ack")
+                                else "waiting_ui_ack", iterations=state.get("iteration", 0))
+    else:
+        task_coordinator.finish(session_id, success=not state.get("cancelled"),
+                                iterations=state.get("iteration", 0))
     total_lg_ms = round((time.monotonic() - request_started) * 1000)
     print(f"[AGENT TRACE] ✓ Done (LangGraph) | iter={state.get('iteration', 0)} status={pending_status} | {total_lg_ms}ms", flush=True)
     logger.info("LangGraph hoàn thành vòng lặp execution (iteration: %d, status: %s)", state.get("iteration", 0), pending_status)
@@ -1548,6 +1578,8 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                 "language": language,
                 "created_at": time.time(),
                 "ui_ack": is_ui_ack,
+                "approval_scope": pending.get("approval_scope", ""),
+                "approval_preview": pending.get("approval_preview"),
             }
             _save_pending_actions()
         if is_ui_ack:
@@ -1564,6 +1596,8 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             "tool": pending["tool"],
             "params": pending["params"],
             "description": pending["params"].get("description", f"Thực thi {pending['tool']}"),
+            "approval_scope": pending.get("approval_scope", ""),
+            "preview": pending.get("approval_preview"),
         })
         return {
             "status": "pending_approval", "session_id": session_id,
@@ -1608,6 +1642,11 @@ class AgentUiActionResultRequest(BaseModel):
     request_id: str = Field(..., min_length=1)
     success: bool
     result: dict = Field(default_factory=dict)
+
+
+class AgentCancelRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    request_id: str = Field(default="")
 
 
 # ── Agent Endpoints ───────────────────────────────────────────────────────────
@@ -1677,6 +1716,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     req_start = time.monotonic()
     task = request.task
     session_id = request.session_id or "agent_default"
+    task_coordinator.start(session_id, task=request.task)
     supervisor_route = route_task(task)
     logger.info("[SUPERVISOR] routed task to %s", supervisor_route.value)
     retry_idx  = request.retry_message_index  # None ở request thường
@@ -1687,6 +1727,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     if supervisor_route.value == "code":
         citation_result = _build_code_citation_result(task, session_id, req_start)
         if citation_result is not None:
+            task_coordinator.finish(session_id, success=True)
             if retry_idx is not None:
                 citation_result["retry_message_index"] = retry_idx
             return _agent_response(citation_result, http_req)
@@ -1740,6 +1781,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 "retry_message_index": retry_idx,
             }
             _save_pending_actions()
+        task_coordinator.update(session_id, request_id, status="waiting_ui_ack")
         return _agent_response({
             "status": "pending_ui_action",
             "session_id": session_id,
@@ -1821,6 +1863,11 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
 
     while iteration < _AGENT_MAX_ITERATIONS:
         iteration += 1
+
+        if task_coordinator.is_cancelled(session_id):
+            steps.append({"type": "cancelled", "content": "Task cancelled cooperatively.",
+                          "iteration": iteration})
+            break
 
         # Estimate tokens and calculate budget
         total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -1909,6 +1956,9 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         # Check if tool requires approval
         if tool_name in _TOOLS_REQUIRING_APPROVAL:
             action_id = _generate_action_id()
+            approval_scope = hashlib.sha256(task.encode()).hexdigest()[:16]
+            approval_preview = {"scope_id": approval_scope, "goal": task,
+                                "tool": tool_name, "params": tool_params}
             with _pending_lock:
                 _pending_actions[action_id] = {
                     "tool": tool_name,
@@ -1922,8 +1972,12 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                     "language": request.language,
                     "created_at": time.time(),
                     "retry_message_index": retry_idx,
+                    "approval_scope": approval_scope,
+                    "approval_preview": approval_preview,
                 }
                 _save_pending_actions()
+
+            task_coordinator.update(session_id, action_id, status="waiting_approval")
 
             steps.append({
                 "type": "pending_approval",
@@ -1931,6 +1985,8 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 "tool": tool_name,
                 "params": tool_params,
                 "description": tool_params.get("description", f"Thực thi {tool_name}"),
+                "approval_scope": approval_scope,
+                "preview": approval_preview,
             })
 
             # Return immediately — client must approve/reject
@@ -1943,6 +1999,8 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
                 "steps": steps,
                 "action_id": action_id,
                 "total_ms": round(total_ms),
+                "approval_scope": approval_scope,
+                "approval_preview": approval_preview,
                 **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
             }, http_req)
 
@@ -1993,8 +2051,10 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         iteration, len(steps), total_ms,
     )
 
+    cancelled = task_coordinator.is_cancelled(session_id)
+    task_coordinator.finish(session_id, success=not cancelled, iterations=iteration)
     return _agent_response({
-        "status": "completed",
+        "status": "cancelled" if cancelled else "completed",
         "session_id": session_id,
         "prior_step_count": 0,
         "steps": steps,
@@ -2002,6 +2062,15 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         "total_ms": round(total_ms),
         **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
     }, http_req)
+
+
+@agent_router.post("/v1/agent/cancel")
+def agent_cancel(request: AgentCancelRequest):
+    """Request cooperative cancellation for a running session/request."""
+    cancelled = task_coordinator.cancel(request.session_id, request.request_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Unknown or already finished agent task")
+    return {"status": "cancelled", **cancelled}
 
 
 @agent_router.post("/v1/agent/ui-action-result")
@@ -2054,6 +2123,8 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
         with _pending_lock:
             _pending_actions[next_request_id] = next_action
             _save_pending_actions()
+        task_coordinator.update(action["session_id"], next_request_id,
+                                status="waiting_ui_ack")
         return {"status": "pending_ui_action", "session_id": action["session_id"],
                 "request_id": next_request_id, "prior_step_count": len(action.get("steps", [])),
                 "steps": action.get("steps", []) + steps,
@@ -2093,6 +2164,7 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
                else f"Không thể thực thi {params['action']}: {result.get('error', 'unknown error')}")
     steps.append({"type": "final_answer", "content": content})
     all_steps = action.get("steps", []) + steps
+    task_coordinator.finish(action["session_id"], success=request.success)
     retry_idx_stored = action.get("retry_message_index")
     return {
         "status": "completed" if request.success else "failed",
@@ -2123,6 +2195,12 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         record_approval("missing")
         raise HTTPException(status_code=404, detail=f"Action not found: {action_id}")
 
+    if task_coordinator.is_cancelled(action.get("session_id", "")):
+        task_coordinator.finish(action.get("session_id", ""), success=False)
+        return {"status": "cancelled", "action_id": action_id,
+                "steps": [*action.get("steps", []), {
+                    "type": "cancelled", "content": "Task cancelled before approval."}]}
+
     if request.session_id and request.session_id != action.get("session_id"):
         with _pending_lock:
             _pending_actions[action_id] = action
@@ -2135,6 +2213,8 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         return {
             "status": "rejected",
             "action_id": action_id,
+            "approval_scope": action.get("approval_scope", ""),
+            "approval_preview": action.get("approval_preview"),
             "prior_step_count": len(action["steps"]),
             "steps": action["steps"] + [{
                 "type": "tool_result",
@@ -2196,6 +2276,8 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
 
     if USE_LANGGRAPH_AGENT and LANGGRAPH_AVAILABLE:
         system_prompt = messages[0]["content"] if messages and messages[0].get("role") == "system" else _build_agent_system_prompt(action.get("language", "vi"))
+        steps.append({"type": "approval_granted", "scope_id": action.get("approval_scope", ""),
+                      "tool": tool_name, "action_id": action_id})
         return _run_langgraph_agent(
             system_prompt=system_prompt,
             task=action["task"],
@@ -2208,12 +2290,15 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             initial_iteration=action["iteration"],
             resume_with_reflection=True,
             prior_step_count=prior_step_count,
+            approval_granted=True,
+            approval_scope=action.get("approval_scope", ""),
         )
 
     # Continue the agent loop
     iteration = action["iteration"]
     temperature = action["temperature"]
     req_start = time.monotonic()
+    approval_already_granted = True
 
     while iteration < _AGENT_MAX_ITERATIONS:
         iteration += 1
@@ -2264,7 +2349,7 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             "iteration": iteration,
         })
 
-        if tool_name_next in _TOOLS_REQUIRING_APPROVAL:
+        if tool_name_next in _TOOLS_REQUIRING_APPROVAL and not approval_already_granted:
             new_action_id = _generate_action_id()
             with _pending_lock:
                 _pending_actions[new_action_id] = {
@@ -2277,8 +2362,10 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
                     "iteration": iteration,
                     "temperature": temperature,
                     "created_at": time.time(),
+                    "approval_scope": action.get("approval_scope", ""),
                 }
                 _save_pending_actions()
+            task_coordinator.update(action["session_id"], new_action_id, status="waiting_approval")
 
             steps.append({
                 "type": "pending_approval",

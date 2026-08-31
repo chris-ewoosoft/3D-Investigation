@@ -24,7 +24,7 @@ def get_agent_logger(agent_name: str) -> logging.Logger:
         )
         handler.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            "%Y-%m-%d %H:%M:%S",
+            "[%Y-%m-%d %H:%M:%S]",
         ))
         handler.setLevel(logging.DEBUG)
         agent_logger.addHandler(handler)

@@ -28,7 +28,14 @@ def main() -> int:
         # Code tools are approved by the UI before host execution.
         if tool == "write_file":
             allowed, _ = authorise(delegation, False)
-        verified = verify_result(delegation, {"success": True})
+        evidence = {"success": True}
+        if tool == "search_text":
+            evidence.update({"count": 1, "results": [{"path": "src/example.cpp", "line": 1, "text": "match"}]})
+        elif tool == "rag_search":
+            evidence.update({"found": True, "results": [{"source": "docs", "content": "match"}]})
+        elif tool == "read_file":
+            evidence.update({"path": "src/example.cpp", "content": "match"})
+        verified = verify_result(delegation, evidence)
         passed = str(delegation.specialist) == expected_agent and allowed == expected_allowed and verified["passed"]
         results.append({"tool": tool, "passed": passed, "specialist": str(delegation.specialist)})
     report = {"total": len(results), "passed": sum(r["passed"] for r in results), "cases": results}

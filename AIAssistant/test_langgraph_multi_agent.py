@@ -4,10 +4,42 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from LangGraphAgent import LocalAgentGraph
+from LangGraphAgent import LocalAgentGraph, _summarize_messages
 
 
 class LangGraphMultiAgentTests(unittest.TestCase):
+    def test_context_compactor_keeps_task_and_stays_bounded(self):
+        messages = [
+            {"role": "system", "content": "SYSTEM " + "x" * 9000},
+            {"role": "user", "content": "original task"},
+        ]
+        messages.extend(
+            {"role": "user", "content": "observation " + "y" * 5000}
+            for _ in range(8)
+        )
+        compacted = _summarize_messages(messages)
+        self.assertLessEqual(sum(len(item["content"]) for item in compacted), 14000)
+        self.assertIn("original task", "\n".join(item["content"] for item in compacted))
+
+    def test_context_compaction_returns_to_reasoning_without_a_tool_call(self):
+        replies = iter(["Context too long", "DONE"])
+        graph = LocalAgentGraph(
+            complete=lambda _messages, _temperature: next(replies),
+            parse=lambda _text: (None, None),
+            execute=lambda _tool, _params: self.fail("tool must not run after context compaction"),
+            needs_approval=lambda _tool: False,
+            max_iterations=3,
+            plan_complete=lambda _messages, _temperature: '{"requires_plan": false, "plan": []}',
+        )
+        state = graph.run(
+            [{"role": "system", "content": "test"}, {"role": "user", "content": "task"}],
+            "context-compaction-routing-test", 0.1,
+        )
+        self.assertEqual(
+            [step["type"] for step in state["steps"]],
+            ["context_compacted", "final_answer"],
+        )
+
     def test_delegation_and_verification_steps_are_emitted(self):
         replies = iter([
             '{"requires_plan": false, "plan": []}', "CALL",
@@ -151,7 +183,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
         )
         self.assertEqual(
             [step["tool"] for step in state["steps"] if step.get("type") == "tool_result"],
-            ["run_command", "application_action"],
+            ["run_command"],
         )
         self.assertTrue(any(
             step.get("type") == "reflection" and step.get("result", {}).get("passed") is False
