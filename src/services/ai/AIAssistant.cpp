@@ -698,7 +698,7 @@ void AIAssistant::reportUiActionResult(const QString &requestId, bool success, c
 void AIAssistant::onProcessReadyRead() {
     QString out = QString::fromUtf8(aiServerProcess->readAllStandardOutput());
     if(!out.isEmpty())
-        qDebug().noquote() << "[AIAssistant Server]" << out << "\n";
+        qDebug().noquote() << QString("[AIAssistant Server]\n%1").arg(out.trimmed());
     
     QStringList lines = out.split('\n');
     for (const QString &line : lines) {
@@ -721,7 +721,7 @@ void AIAssistant::onProcessReadyRead() {
 void AIAssistant::onProcessError() {
     QString err = QString::fromUtf8(aiServerProcess->readAllStandardError());
     if(!err.isEmpty())
-        qDebug().noquote() << "[AIAssistant Server]" << err << "\n";
+        qDebug().noquote() << QString("[AIAssistant Server]\n%1").arg(err.trimmed());
     
     QStringList lines = err.split('\n');
     for (const QString &line : lines) {
@@ -829,8 +829,11 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
                     if (!responseRequestId.isEmpty() && requestId != responseRequestId) {
                         continue;
                     }
-                    if (!requestId.isEmpty())
-                        m_pendingUiActionSessions.insert(requestId, {sessionId, request.insertAfterIndex});
+                    if (!requestId.isEmpty()) {
+                        // Store the index where THIS response will be inserted, so the ACK is inserted AFTER it
+                        int nextInsertIndex = (request.insertAfterIndex >= 0) ? request.insertAfterIndex + 1 : -1;
+                        m_pendingUiActionSessions.insert(requestId, {sessionId, nextInsertIndex});
+                    }
                     QString manifestError;
                     QVariantMap actionParams = params.toVariantMap();
                     if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {

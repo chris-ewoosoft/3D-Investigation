@@ -35,6 +35,7 @@ from modules.action_manifest import (
     action_matches_plan_step,
     canonical_action,
     match_action_intent,
+    split_step_by_manifest_phrases,
 )
 from modules.agent_logging import get_agent_logger
 from modules.checkpointing import build_checkpointer
@@ -67,6 +68,9 @@ Trả lời CHÍNH XÁC theo JSON object với schema:
 Với yêu cầu điều khiển giao diện (mở/tải ảnh, mô hình, DICOM, tái tạo),
 hãy lập các bước thực thi trực tiếp trong ứng dụng; không lập bước mở ứng dụng, tìm tài liệu,
 tìm mã nguồn, RAG hoặc tìm vị trí tệp.
+Với yêu cầu điều khiển giao diện gồm nhiều hành động nối bằng "và"/"sau đó"/"rồi",
+BẮT BUỘC tách mỗi hành động thành một bước riêng biệt trong "steps".
+Không được gộp 2 hành động canonical vào cùng một bước.
 Với yêu cầu engineering/coding có thay đổi repository, kế hoạch phải bao phủ
 đọc/định vị source liên quan, thay đổi được duyệt, xem lại diff và kiểm chứng
 bằng test/lint/compile/build phù hợp. Không coi việc tìm thấy file là đã hoàn thành."""
@@ -256,6 +260,7 @@ class LocalAgentGraph:
             temperature: float, steps: list[dict[str, Any]] | None = None,
             iteration: int = 0, resume_with_reflection: bool = False,
             required_ui_actions: list[dict[str, Any]] | None = None,
+            supervisor_route: str | None = None,
             enforce_plan_completion: bool = False,
             approval_granted: bool = False,
             approval_scope: str = "") -> AgentState:
@@ -291,6 +296,7 @@ class LocalAgentGraph:
             "plan_verified":   bool(prior_plan_review and prior_plan_review.get("passed") is True),
             "plan_attempts":   sum(1 for step in (steps or []) if step.get("type") == "plan"),
             "plan_feedback":   "",
+            "routing_plan":    supervisor_route,
             "enforce_plan_completion": enforce_plan_completion,
             "enforce_coding_workflow": enforce_plan_completion,
         }
@@ -401,6 +407,11 @@ class LocalAgentGraph:
             parsed = isinstance(payload, dict)
             if parsed:
                 plan, plan_spec = _normalise_plan_payload(payload)
+                if plan:
+                    expanded = []
+                    for step in plan:
+                        expanded.extend(split_step_by_manifest_phrases(step))
+                    plan = expanded
         except (ValueError, json.JSONDecodeError):
             plan = None
 
@@ -581,7 +592,7 @@ class LocalAgentGraph:
         expected_action = (required_actions[completed_ui_actions]
                            if completed_ui_actions < len(required_actions) else None)
         plan_action_hint = None
-        if plan and done_count < len(plan) and required_actions:
+        if plan and done_count < len(plan):
             plan_action_hint = match_action_intent(plan[done_count])
         expected_action = expected_action or plan_action_hint
         current_plan_step = (plan[done_count]
@@ -744,8 +755,12 @@ class LocalAgentGraph:
                           "iteration": iteration})
 
         params = tool_params or {}
-        fingerprint = json.dumps({"tool": tool_name, "params": params},
-                                 ensure_ascii=False, sort_keys=True)
+        _VOLATILE_PARAM_KEYS = {"request_id", "workflow_id"}
+        def _stable_fingerprint(tool: str, params: dict) -> str:
+            stable = {k: v for k, v in (params or {}).items() if k not in _VOLATILE_PARAM_KEYS}
+            return json.dumps({"tool": tool, "params": stable}, ensure_ascii=False, sort_keys=True)
+        
+        fingerprint = _stable_fingerprint(tool_name, params)
         failed_calls = set()
         for index, step in enumerate(steps):
             if step.get("type") != "reflection" or step.get("result", {}).get("passed") is not False:

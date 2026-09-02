@@ -187,8 +187,8 @@ def setup_logging():
     log_filename = os.path.join(
         LOGS_DIR, f"server_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
-    fmt_console = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s", "%H:%M:%S")
-    fmt_file    = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    fmt_console = logging.Formatter("[%(asctime)s] %(levelname)-8s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fmt_file    = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
                                     "%Y-%m-%d %H:%M:%S")
     root = logging.getLogger()
     root.setLevel(logging.INFO)

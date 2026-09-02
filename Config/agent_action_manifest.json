@@ -43,6 +43,7 @@
         "load model 3d",
         "tai 3d",
         "tai mo hinh 3d",
+        "mo hinh 3d",
         "mo file 3d"
       ],
       "parameters": {}
@@ -107,7 +108,8 @@
         "show point cloud",
         "xem 3d model",
         "xem mo hinh 3d",
-        "xem mo hinh tai tao"
+        "hien thi mo hinh 3d",
+        "hien thi mo hinh tai tao"
       ],
       "parameters": {}
     },
@@ -130,8 +132,10 @@
       "phrases": [
         "run detection",
         "detection",
+        "nhan dien",
         "nhan dien doi tuong",
-        "phat hien doi tuong"
+        "phat hien doi tuong",
+        "chay nhan dien"
       ],
       "parameters": {}
     },
@@ -141,10 +145,11 @@
         "ai.segmentation"
       ],
       "phrases": [
-        "run segmentation",
-        "segmentation",
         "phan doan",
-        "phan doan doi tuong"
+        "chay phan doan",
+        "phan doan doi tuong",
+        "run segmentation",
+        "segmentation"
       ],
       "parameters": {}
     },
@@ -154,9 +159,11 @@
         "ai.tracking"
       ],
       "phrases": [
-        "video tracking",
+        "theo doi doi tuong",
+        "theo doi",
         "theo doi video",
-        "theo doi doi tuong"
+        "video tracking",
+        "tracking"
       ],
       "parameters": {}
     },

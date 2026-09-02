@@ -85,6 +85,18 @@ def action_plan_match_score(action: str, plan_step: str) -> float | None:
     canonical = canonical_action(action)
     if not canonical or not isinstance(plan_step, str) or not plan_step.strip():
         return None
+    
+    # First, use the robust longest-substring match algorithm
+    matched_actions = extract_actions_from_text(plan_step)
+    if canonical in matched_actions:
+        return 1.0
+        
+    # If there are valid exact substring matches and this action isn't one of them,
+    # reject it to prevent substring overlap false positives (like 'mo hinh' vs 'an mo hinh').
+    if matched_actions:
+        return 0.0
+
+    # Fallback for text that might be slightly misspelled or not exactly match a phrase
     entry = _index()[0].get(canonical)
     if not entry:
         return None
@@ -119,14 +131,16 @@ def match_action_intent(text: str) -> dict[str, Any] | None:
         return {"action": "language.change", "language": "en"}
     if any(phrase in value for phrase in ("doi sang tieng viet", "change to vietnamese", "switch to vietnamese")):
         return {"action": "language.change", "language": "vi"}
-    for entry in manifest()["actions"]:
-        if entry["id"] == "language.change":
-            continue
-        if any(normalise_text(phrase) in value for phrase in entry.get("phrases", [])):
-            result: dict[str, Any] = {"action": entry["id"]}
-            if entry["id"] == "admin.login":
-                result.update({"username": "Admin", "password": "1"})
-            return result
+    
+    matched_actions = extract_actions_from_text(text)
+    if matched_actions:
+        action_id = matched_actions[0]
+        if action_id == "language.change":
+            return None
+        result: dict[str, Any] = {"action": action_id}
+        if action_id == "admin.login":
+            result.update({"username": "Admin", "password": "1"})
+        return result
     return None
 
 
@@ -144,3 +158,79 @@ def match_action_sequence(text: str) -> list[dict[str, Any]] | None:
 
 def action_ids() -> set[str]:
     return set(_index()[0])
+
+def extract_actions_from_text(text: str) -> list[str]:
+    """Find the best non-overlapping manifest actions in the text using longest-match."""
+    normalized = normalise_text(text)
+    all_matches = []
+    for entry in manifest()["actions"]:
+        for phrase in entry.get("phrases", []):
+            np = normalise_text(phrase)
+            if not np:
+                continue
+            idx = normalized.find(np)
+            if idx != -1:
+                all_matches.append((len(np), idx, idx + len(np), entry["id"], phrase))
+
+    # Sort matches by length (descending) to prioritize longer, more specific phrases
+    all_matches.sort(key=lambda x: x[0], reverse=True)
+    
+    kept_hits = []
+    covered_indices = set()
+    for match in all_matches:
+        _, start, end, action_id, phrase = match
+        # If this match overlaps with any already accepted (longer) match, discard it
+        if any(i in covered_indices for i in range(start, end)):
+            continue
+        
+        kept_hits.append((start, action_id, phrase))
+        covered_indices.update(range(start, end))
+        
+    kept_hits.sort()
+    return [action_id for _, action_id, _ in kept_hits]
+
+
+def split_step_by_manifest_phrases(step_text: str) -> list[str]:
+    """Nếu một plan step khớp >1 canonical action phrase, tách thành nhiều step
+    atomic theo thứ tự xuất hiện trong câu. Thuần data-driven từ manifest,
+    không hard-code danh sách action — tự động áp dụng cho action mới thêm sau này.
+
+    Trả về action id (canonical label) thay vì raw phrase để các bước con vẫn
+    được semantic-match chính xác ở Reflect node.
+    """
+    normalized = normalise_text(step_text)
+    all_matches = []
+    for entry in manifest()["actions"]:
+        for phrase in entry.get("phrases", []):
+            np = normalise_text(phrase)
+            if not np:
+                continue
+            idx = normalized.find(np)
+            if idx != -1:
+                all_matches.append((len(np), idx, idx + len(np), entry["id"], phrase))
+
+    all_matches.sort(key=lambda x: x[0], reverse=True)
+    
+    kept_hits = []
+    covered_indices = set()
+    for match in all_matches:
+        _, start, end, action_id, phrase = match
+        if any(i in covered_indices for i in range(start, end)):
+            continue
+        kept_hits.append((start, action_id, phrase))
+        covered_indices.update(range(start, end))
+        
+    if len(kept_hits) <= 1:
+        return [step_text]
+    
+    kept_hits.sort()
+    seen, ordered = set(), []
+    for start, action_id, phrase in kept_hits:
+        if action_id not in seen:
+            seen.add(action_id)
+            entry = _index()[0].get(action_id, {})
+            phrases = entry.get("phrases", [phrase])
+            label = phrases[0] if phrases else phrase
+            ordered.append(label)
+    return ordered
+

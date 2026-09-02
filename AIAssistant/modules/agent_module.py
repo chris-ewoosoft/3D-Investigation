@@ -1540,6 +1540,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
                       resume_with_reflection=resume_with_reflection,
                       required_ui_actions=matched_ui_actions,
+                      supervisor_route = supervisor_route.value,
                       enforce_plan_completion=supervisor_route.value == "code",
                       approval_granted=approval_granted or bool((initial_steps or []) and
                                             any(step.get("type") == "approval_granted"
