@@ -150,7 +150,7 @@ void ReconstructionPipeline::processPointCloud() {
     qDebug() << "Post-processing. Initial points:" << points3D.size();
 
     const auto &f = m_config.filter;
-    if (m_usedTrackBasedGroundTruth) {
+    // if (m_usedTrackBasedGroundTruth) {
         qDebug() << "Post-processing (GT track). Initial points:" << points3D.size();
 
         // B1: Adaptive ROR trước - loại bụi cô lập, giữ cột mỏng
@@ -170,17 +170,17 @@ void ReconstructionPipeline::processPointCloud() {
         float leaf = f.voxelLeafSizeTrack > 0 ? f.voxelLeafSizeTrack : 0.003f;
 
         PointCloudFilter::voxelGrid(points3D, colors, leaf);
-    } else {
-        PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanK, f.sorStdDevMul);
-        if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
+    // } else {
+    //     PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanK, f.sorStdDevMul);
+    //     if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
         
-        // The reconstruction scale is arbitrary here; derive the radius from
-        // nearest-neighbour spacing instead of a fixed world-space threshold.
-        PointCloudFilter::adaptiveRadiusOutlier(points3D, colors, 3.0f, f.rorMinNeighbors);
-        if (points3D.empty()) { qWarning() << "No points after adaptive ROR."; return; }
+    //     // The reconstruction scale is arbitrary here; derive the radius from
+    //     // nearest-neighbour spacing instead of a fixed world-space threshold.
+    //     PointCloudFilter::adaptiveRadiusOutlier(points3D, colors, 3.0f, f.rorMinNeighbors);
+    //     if (points3D.empty()) { qWarning() << "No points after adaptive ROR."; return; }
 
-        PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSize);
-    }
+    //     PointCloudFilter::voxelGrid(points3D, colors, f.voxelLeafSize);
+    // }
 
     qDebug() << "After post-processing:" << points3D.size() << "points";
 }
@@ -927,6 +927,9 @@ bool ReconstructionPipeline::reconstruct() {
 
     qDebug() << "Raw points:" << points3D.size();
     processPointCloud();
+
+    return!points3D.empty();
+
     // filterFarOutliers không cần nữa vì vòm sinh ra từ Poisson, đã trim trong poissonMeshing
     densifyPointCloudMLS(points3D, colors, 1000000);
 
