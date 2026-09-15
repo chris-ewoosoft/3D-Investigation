@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .agent_logging import get_agent_logger
+from .inference import strip_think_tags
 
 logger = get_agent_logger("chatbot")
 
@@ -40,8 +41,7 @@ class ChatbotAgent:
         return prepared, {"suppress_citations": suppress_citations}
 
     def clean_answer(self, answer: str, metadata: dict[str, Any], finish_reason: str) -> str:
-        import re
-        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+        answer = strip_think_tags(answer)
         
         if metadata.get("suppress_citations"):
             answer = self._llm._strip_reference_citations_for_character_answer(answer)

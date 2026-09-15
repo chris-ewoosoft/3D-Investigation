@@ -31,7 +31,7 @@ from .sandbox import (
     write_file as write_sandboxed_file,
 )
 from .observability import record_approval, record_schema_error, record_tool, span
-from .inference import backend_mode, openai_compatible_completion
+from .inference import backend_mode, openai_compatible_completion, strip_think_tags
 from .mcp_client import call_tool as call_mcp_tool
 from .coding_agent import CodingTaskContext, instruction as coding_instruction, is_coding_task
 from .toolapp_agent import ToolAppAgent
@@ -280,12 +280,16 @@ AGENT_TOOLS.extend([
 
 # ``application_action`` is the sole public UI tool.  The former category
 # names remain parser aliases for old conversations, but are not model tools.
+app_action_tools = [tool for tool in AGENT_TOOLS if tool["name"].startswith("app_action_")]
 AGENT_TOOLS = [tool for tool in AGENT_TOOLS if not tool["name"].startswith("app_action_")]
+
+app_action_descriptions = "\n".join([f"- {t['description']}" for t in app_action_tools])
+
 AGENT_TOOLS.append({
     "name": "application_action",
-    "description": "Execute a canonical desktop action from the shared action manifest.",
+    "description": f"Execute a canonical desktop action from the shared action manifest. Available action categories:\n{app_action_descriptions}",
     "parameters": {
-        "action": {"type": "string", "description": "Canonical desktop action id", "required": True},
+        "action": {"type": "string", "description": "Canonical desktop action id (e.g., viewer.load_2d, ai.run_detection)", "required": True},
         "language": {"type": "string", "description": "Required only for language.change: vi or en", "required": False},
         "username": {"type": "string", "description": "Optional login username", "required": False},
         "password": {"type": "string", "description": "Optional login password", "required": False},
@@ -1334,6 +1338,41 @@ Respond to the user in {"Vietnamese" if language == "vi" else "English"}. Keep t
 """
 
 
+def _extract_tool_call_xml(content: str) -> str | None:
+    """Extract tool call from ``<tool_call>...</tool_call>`` XML envelope.
+
+    Qwen text models using their native GGUF chat template emit tool calls
+    as XML-wrapped JSON in the *content* field instead of populating the
+    structured ``tool_calls`` response field.  This helper converts the XML
+    envelope into the canonical ``{"kind": "tool", ...}`` JSON string that
+    the rest of the agent pipeline expects.
+    """
+    match = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", content, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    # Qwen format: {"name": "tool_name", "arguments": {...}}
+    # Fallback format: {"tool": "tool_name", "params": {...}}
+    tool_name = data.get("name", "") or data.get("tool", "")
+    arguments = data.get("arguments")
+    if arguments is None:
+        arguments = data.get("params", {})
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    if not tool_name or not isinstance(arguments, dict):
+        return None
+    envelope = {"kind": "tool", "tool": tool_name, "params": arguments}
+    logger.info("Extracted tool call from <tool_call> XML envelope: %s",
+                json.dumps(envelope, ensure_ascii=False))
+    return json.dumps(envelope, ensure_ascii=False)
+
+
 def _parse_tool_call(response_text: str) -> tuple:
     """Decode the JSON envelope emitted by llama.cpp constrained decoding.
 
@@ -1371,6 +1410,19 @@ def _parse_tool_call(response_text: str) -> tuple:
         record_schema_error(tool_name)
         return "_validation_error", {"tool": tool_name, "error": error}
     return tool_name, validated
+
+
+_PRECOMPILED_TOOL_GRAMMAR = None
+
+def _get_tool_grammar():
+    global _PRECOMPILED_TOOL_GRAMMAR
+    if _PRECOMPILED_TOOL_GRAMMAR is None:
+        try:
+            from llama_cpp import LlamaGrammar
+            _PRECOMPILED_TOOL_GRAMMAR = LlamaGrammar.from_json_schema(_TOOL_GRAMMAR_SCHEMA)
+        except ImportError:
+            _PRECOMPILED_TOOL_GRAMMAR = None
+    return _PRECOMPILED_TOOL_GRAMMAR
 
 
 def _constrained_agent_completion(messages: list[dict], max_tokens: int, temperature: float) -> str:
@@ -1412,7 +1464,13 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
             "messages": messages, "max_tokens": max_tokens,
             "temperature": temperature, "repeat_penalty": 1.1, "stream": False,
         }
-        kwargs.update({"tools": _LLAMA_CPP_TOOLS, "tool_choice": "auto"})
+        use_native = os.environ.get("AGENT_NATIVE_TOOL_CALLS", "0") == "1"
+        if use_native:
+            kwargs.update({"tools": _LLAMA_CPP_TOOLS, "tool_choice": "auto"})
+        else:
+            grammar = _get_tool_grammar()
+            if grammar is not None:
+                kwargs.update({"grammar": grammar})
         with llm_runtime.llm_lock:
             response = llm_runtime.llm.create_chat_completion(**kwargs)
     except Exception as error:  # noqa: BLE001
@@ -1435,7 +1493,13 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
     content = message.get("content", "")
     if not isinstance(content, str):
         raise RuntimeError("Constrained decoder returned no text content")
+    content = strip_think_tags(content)
     logger.info("Constrained LLM response: %s", content)
+    # Detect <tool_call> XML envelope emitted by Qwen text models
+    if "<tool_call>" in content:
+        xml_result = _extract_tool_call_xml(content)
+        if xml_result:
+            return xml_result
     try:
         # Xử lý trường hợp model sinh ra thêm văn bản rác sau chuỗi JSON
         content_stripped = content.strip()
@@ -1510,6 +1574,7 @@ def _structured_agent_completion(messages: list[dict], max_tokens: int,
     content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not isinstance(content, str):
         raise RuntimeError("Structured decoder returned no text content")
+    content = strip_think_tags(content)
     logger.info("Structured LLM response: %s", content)
     return content
 
@@ -1596,7 +1661,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             params.update(canonical_params)
         if tool_name == "_validation_error":
             return {"error": f"Lỗi xác thực tham số tool '{params.get('tool')}': {params.get('error')}"}
-        executor = TOOL_REGISTRY.get(tool_name)
+        executor = TOOL_REGISTRY.get(tool_name)  # get tool executor
         if executor is None:
             return {"error": f"Tool không tồn tại: {tool_name}"}
         tool_started = time.monotonic()
@@ -1843,16 +1908,36 @@ def llm_route_task(task: str, temperature: float = 0.1) -> Specialist:
         "required": ["specialist"]
     }
     messages = [
-        {"role": "system", "content": "You are a routing supervisor. Route the user task to the most appropriate specialist.\n'code' for code editing/creation tasks.\n'toolapp' for application/UI manipulation.\n'research' for searching/reading documentation without changes.\n'chatbot' for conversational queries, explanations, answering questions, or if unclear."},
+        {"role": "system", "content": (
+            "You are a routing supervisor. Route the user task to the most appropriate specialist.\n"
+            "'toolapp' for ANY request that controls the desktop application: loading/opening "
+            "images, 2D images, 3D models, DICOM files, starting reconstruction, running AI "
+            "detection, changing language, opening mail, logging in, or any other UI action. "
+            "Vietnamese examples: 'tải ảnh', 'mở ảnh', 'tải mô hình 3d', 'tải ảnh DICOM', "
+            "'tái tạo 3d', 'chạy nhận diện', 'đổi ngôn ngữ', 'mở hộp thư'.\n"
+            "'code' for code editing, writing, modifying, debugging, or analyzing source code.\n"
+            "'research' for searching/reading documentation without changes.\n"
+            "'chatbot' for conversational queries, explanations, answering questions, "
+            "or if unclear."
+        )},
         {"role": "user", "content": task}
     ]
     response = _structured_agent_completion(messages, max_tokens=100, temperature=temperature, schema=schema)
     try:
         data = json.loads(response)
-        return Specialist(data.get("specialist", "chatbot"))
+        result = Specialist(data.get("specialist", "chatbot"))
     except Exception as e:
         logger.warning("Failed to parse LLM route response: %s", e)
-        return Specialist.CHATBOT
+        result = Specialist.CHATBOT
+
+    # Safety net: if LLM misclassified a UI request as chatbot, the manifest
+    # phrase matcher is authoritative — override to toolapp.
+    if result == Specialist.CHATBOT and _manifest_looks_like_ui_action(task):
+        logger.info("LLM routed to chatbot but manifest matched UI action — overriding to toolapp")
+        result = Specialist.TOOLAPP
+
+    return result
+
 
 @agent_router.post("/v1/agent/execute")
 def agent_execute(request: AgentExecuteRequest, http_req: Request):
@@ -2119,11 +2204,12 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
             })
             break
 
-        think_text = answer
-        if "```tool_call" in answer:
-            think_text = answer.split("```tool_call")[0].strip()
-        elif "{" in answer:
-            think_text = answer.split("{")[0].strip()
+        clean_answer = strip_think_tags(answer)
+        think_text = clean_answer
+        if "```tool_call" in clean_answer:
+            think_text = clean_answer.split("```tool_call")[0].strip()
+        elif "{" in clean_answer:
+            think_text = clean_answer.split("{")[0].strip()
             
         if think_text:
             steps.append({"type": "thinking", "content": think_text, "iteration": iteration})
@@ -2539,11 +2625,12 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
             steps.append({"type": "final_answer", "content": answer})
             break
 
-        think_text = answer
-        if "```tool_call" in answer:
-            think_text = answer.split("```tool_call")[0].strip()
-        elif "{" in answer:
-            think_text = answer.split("{")[0].strip()
+        clean_answer = strip_think_tags(answer)
+        think_text = clean_answer
+        if "```tool_call" in clean_answer:
+            think_text = clean_answer.split("```tool_call")[0].strip()
+        elif "{" in clean_answer:
+            think_text = clean_answer.split("{")[0].strip()
             
         if think_text:
             steps.append({"type": "thinking", "content": think_text, "iteration": iteration})

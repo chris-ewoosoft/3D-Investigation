@@ -64,12 +64,14 @@ def load_model(model_idx: int | None = None):
                 llm = Llama(model_path=model_path, chat_handler=_chat_handler,
                             chat_format="qwen2.5-vl", n_gpu_layers=99,
                             n_ctx=LLM_N_CTX, n_batch=256, verbose=False,
-                            use_mmap=True, use_mlock=False)
+                            use_mmap=True, use_mlock=False,
+                            chat_format_kwargs={"enable_thinking": False})
             else:
                 from llama_cpp import Llama
                 llm = Llama(model_path=model_path, n_gpu_layers=99,
                             n_ctx=LLM_N_CTX, n_batch=512, verbose=False,
-                            use_mmap=True, use_mlock=False)
+                            use_mmap=True, use_mlock=False,
+                            chat_format_kwargs={"enable_thinking": False})
         except Exception as gpu_error:
             logger.warning("GPU model load failed (%s); retrying on CPU", gpu_error)
             _release_ml_memory()

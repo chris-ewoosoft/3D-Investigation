@@ -55,8 +55,8 @@ namespace AppConstants {
         constexpr double DEFAULT_TEMPERATURE        = 0.7;
         constexpr int    DEFAULT_MAX_TOKENS         = 512;
         constexpr int    STOP_SERVER_TIMEOUT_MS     = 3000;
-        constexpr int    TEXT_INFERENCE_TIMEOUT_MS  = 300000;  // 5 min
-        constexpr int    VISION_INFERENCE_TIMEOUT_MS = 900000; // 15 min
+        constexpr int    TEXT_INFERENCE_TIMEOUT_MS  = 1800000; // 30 min
+        constexpr int    VISION_INFERENCE_TIMEOUT_MS = 1800000; // 30 min
         constexpr int    INFERENCE_TIMEOUT_MS       = TEXT_INFERENCE_TIMEOUT_MS;
 
         inline QString apiEndpoint() {

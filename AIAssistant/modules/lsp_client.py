@@ -25,12 +25,11 @@ import json
 import os
 import shutil
 import subprocess
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from .config import PROJECT_DIR, logger
+from .config import PROJECT_DIR
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 

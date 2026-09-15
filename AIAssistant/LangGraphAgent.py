@@ -40,6 +40,7 @@ from modules.action_manifest import (
 from modules.agent_logging import get_agent_logger
 from modules.checkpointing import build_checkpointer
 from modules.coding_agent import coding_workflow_guidance, coding_workflow_status
+from modules.inference import strip_think_tags
 from modules.observability import span
 
 logger = get_agent_logger("reasoning")
@@ -88,7 +89,8 @@ _PLAN_CRITIC_PROMPT = """Bạn là Critic kiểm tra kế hoạch của hệ th�
 khi ngắn gọn, không trùng bước, bao phủ đúng các mục tiêu người dùng và mỗi bước
 đều là một hành động cần thiết có thể thực thi/kiểm chứng. Với yêu cầu giao diện,
 không thêm bước chuẩn bị chung như tìm tài liệu, RAG, tìm mã nguồn hoặc tìm vị trí
-tệp nếu người dùng không yêu cầu. Nếu kế hoạch thừa, thiếu hoặc có bước không thể
+tệp nếu người dùng không yêu cầu. LƯU Ý: Không được yêu cầu gộp các bước hành động
+khác nhau thành một bước duy nhất. Nếu kế hoạch thừa, thiếu hoặc có bước không thể
 ánh xạ tới mục tiêu/tool phù hợp, trả về passed=false để Planner sinh lại.
 Trả về ĐÚNG MỘT JSON object:
 {"passed": true/false, "decision": "continue"/"revise", "reason": "Lý do chi tiết..."}
@@ -96,7 +98,7 @@ Trả về ĐÚNG MỘT JSON object:
 
 _REASONER_PROMPT = """Bạn là Reasoner (Người ra quyết định) của hệ thống AI Assistant.
 Nhiệm vụ của bạn là dựa vào yêu cầu của người dùng, ngữ cảnh hiện tại và kế hoạch đã đề ra để quyết định bước đi tiếp theo.
-Hãy đưa ra lựa chọn gọi tool phù hợp nhất để tiến hành công việc.
+Hãy đưa ra lựa chọn gọi tool phù hợp nhất để tiến hành công việc, hoặc trả về final_answer nếu yêu cầu đã hoàn tất.
 """
 
 
@@ -397,6 +399,7 @@ class LocalAgentGraph:
         ]
         print("[AGENT TRACE] ▶ Plan node: đang sinh kế hoạch...", flush=True)
         raw = self._plan_complete(planning_msgs, max(0.1, state["temperature"] - 0.1)).strip()
+        raw = strip_think_tags(raw)
         print(f"[AGENT TRACE] ── Plan: kế hoạch thô: {raw[:200]}", flush=True)
 
         plan: list[str] | None = None
@@ -412,12 +415,22 @@ class LocalAgentGraph:
                     for step in plan:
                         expanded.extend(split_step_by_manifest_phrases(step))
                     plan = expanded
+                    plan_spec["steps"] = plan
         except (ValueError, json.JSONDecodeError):
             plan = None
 
         if plan:
+            tool_hints = []
+            for step_text in plan:
+                hint = match_action_intent(step_text)
+                if hint:
+                    tool_hints.append({"step": step_text, "tool": "application_action", **hint})
+                else:
+                    tool_hints.append({"step": step_text, "tool": None, "action": None})
+            plan_spec["tool_hints"] = tool_hints
+            
             steps = list(state["steps"])
-            steps.append({"type": "plan", "steps": plan, "spec": plan_spec})
+            steps.append({"type": "plan", "steps": plan, "spec": plan_spec, "tool_hints": tool_hints})
             print(f"[AGENT TRACE] ── Plan: {plan}", flush=True)
             logger.info(f"[NODE: plan] Đã sinh kế hoạch: {plan}")
             return {"plan": plan, "steps": steps,
@@ -469,6 +482,7 @@ class LocalAgentGraph:
             ]
             print("[AGENT TRACE] ▶ Plan Reflect node: LLM đang đánh giá kế hoạch...", flush=True)
             raw = self._plan_reflect_complete(critic_msgs, max(0.1, state["temperature"] - 0.1)).strip()
+            raw = strip_think_tags(raw)
             print(f"[AGENT TRACE] ── Plan Reflect output: {raw[:150]}", flush=True)
             try:
                 payload = json.loads(raw)
@@ -578,6 +592,14 @@ class LocalAgentGraph:
                 messages = [*messages, {
                     "role":    "system",
                     "content": f"[Ke hoach con lai] {json.dumps(remaining, ensure_ascii=False)}",
+                }]
+            else:
+                logger.info("[NODE: reason] Plan progress: completed=%d/%d; all steps finished",
+                            done_count, len(plan))
+                print(f"[AGENT TRACE] ── Reason: plan completed {done_count}/{len(plan)}", flush=True)
+                messages = [*messages, {
+                    "role":    "system",
+                    "content": "[Kế hoạch đã hoàn tất] Mọi bước trong kế hoạch đã được thực hiện xong. Hãy trả về final_answer để kết thúc, KHÔNG gọi thêm tool.",
                 }]
 
         # A manifest workflow is only optional context for the reasoner.  It
@@ -745,11 +767,12 @@ class LocalAgentGraph:
             }
 
         # Extract thinking (text truoc tool_call block)
-        think_text = answer
-        if "```tool_call" in answer:
-            think_text = answer.split("```tool_call")[0].strip()
-        elif "{" in answer:
-            think_text = answer.split("{")[0].strip()
+        clean_answer = strip_think_tags(answer)
+        think_text = clean_answer
+        if "```tool_call" in clean_answer:
+            think_text = clean_answer.split("```tool_call")[0].strip()
+        elif "{" in clean_answer:
+            think_text = clean_answer.split("{")[0].strip()
         if think_text:
             steps.append({"type": "thinking", "content": think_text,
                           "iteration": iteration})

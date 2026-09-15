@@ -3,7 +3,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from urllib.request import Request, urlopen
+
+
+def strip_think_tags(text: str) -> str:
+    """Remove ``<think>…</think>`` blocks emitted by reasoning-mode models.
+
+    Qwen3 and similar models may emit a ``<think>`` block before the actual
+    content even when ``enable_thinking`` is set to ``False`` at the
+    llama-cpp-python level (the flag only controls the *chat format*; the
+    model weights still tend to produce thinking tokens).  Stripping these
+    blocks prevents wasted context and avoids breaking JSON parsers that
+    expect a clean envelope.
+    """
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def backend_mode() -> str:
