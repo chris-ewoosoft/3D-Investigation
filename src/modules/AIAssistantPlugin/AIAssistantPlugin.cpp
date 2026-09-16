@@ -89,6 +89,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->show();
                 m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
             }
+            m_isStartingServer = true;
             m_aiAssistant->restartModel();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -106,6 +107,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->show();
                 m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
             }
+            m_isStartingServer = true;
             m_aiAssistant->restartRAG();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -120,6 +122,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->show();
                 m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
             }
+            m_isStartingServer = true;
             m_aiAssistant->restartAgent();
         });
         connect(m_ribbonUI->btnRestartServer(), &QToolButton::clicked, this, [this]() {
@@ -133,6 +136,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->show();
                 m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
             }
+            m_isStartingServer = true;
             m_aiAssistant->restartServer();
             QTimer::singleShot(5000, btn, [this, btn]() {
                 btn->setEnabled(true);
@@ -186,15 +190,19 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             onToggleChatbot();
             handled = true;
         } else if (action == "assistant.reload_model") {
+            m_isStartingServer = true;
             m_aiAssistant->restartModel();
             handled = true;
         } else if (action == "assistant.reload_rag") {
+            m_isStartingServer = true;
             m_aiAssistant->restartRAG();
             handled = true;
         } else if (action == "assistant.reload_agent") {
+            m_isStartingServer = true;
             m_aiAssistant->restartAgent();
             handled = true;
         } else if (action == "assistant.reload_server") {
+            m_isStartingServer = true;
             m_aiAssistant->restartServer();
             handled = true;
         }

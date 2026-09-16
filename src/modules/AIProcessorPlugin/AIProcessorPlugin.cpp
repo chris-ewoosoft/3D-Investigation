@@ -389,6 +389,8 @@ void AIProcessorPlugin::onViewCharts() {
               "TensorBoard could not start. Make sure it is installed in the Python environment.\n" + output);
       } else if (m_progressDialog) {
           m_progressDialog->setValue((*elapsedMs * 100) / (totalSeconds * 1000));
+          int remainingSeconds = totalSeconds - (*elapsedMs / 1000);
+          m_progressDialog->setLabelText(m_ctx->translate("aiproc.tb_seconds").arg(remainingSeconds));
       }
   });
   connect(m_progressDialog, &CustomProgressDialog::stopRequested, waitTimer, [this, waitTimer]() {
