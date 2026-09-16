@@ -12,10 +12,6 @@ from . import llm_module as llm_runtime
 from . import rag_module as rag_runtime
 from .action_manifest import (
     canonicalise_action_params,
-    looks_like_ui_action as _manifest_looks_like_ui_action,
-    match_action_intent as _manifest_match_action_intent,
-    match_action_sequence as _manifest_match_action_sequence,
-    normalise_text as _normalise_agent_task,
     validate_action_params,
 )
 from .tool_contract import (
@@ -34,11 +30,9 @@ from .observability import record_approval, record_schema_error, record_tool, sp
 from .inference import backend_mode, openai_compatible_completion, strip_think_tags
 from .mcp_client import call_tool as call_mcp_tool
 from .coding_agent import CodingTaskContext, instruction as coding_instruction, is_coding_task
-from .toolapp_agent import ToolAppAgent
 from .agent_tools import ToolRegistry
 from . import lsp_client as _lsp_client
 from .approval_manager import PendingActionStore
-from .ui_action_manager import prepare_next_action
 from .task_coordinator import coordinator as task_coordinator
 from .multi_agent import (
     Specialist,
@@ -46,7 +40,6 @@ from .multi_agent import (
     authorise as authorise_delegation,
     delegate,
     reflect_result,
-    route_task,
     specialist_instruction,
     verify_result,
 )
@@ -62,6 +55,27 @@ except ImportError as error:
 
 # ── Tool Definitions (mô tả cho LLM) ──────────────────────────────────────────
 AGENT_TOOLS = [
+    {
+        "name": "transfer_to_code_agent",
+        "description": "Transfer the user request to the Code Agent, which specializes in writing, modifying, debugging, or analyzing software source code.",
+        "parameters": {
+            "intent": {"type": "string", "description": "Summary of what needs to be coded", "required": True}
+        },
+    },
+    {
+        "name": "transfer_to_toolapp_agent",
+        "description": "Transfer the user request to the ToolApp Agent, which specializes in executing desktop UI actions (loading images, 3D models, AI detection, etc).",
+        "parameters": {
+            "intent": {"type": "string", "description": "Summary of the UI actions needed", "required": True}
+        },
+    },
+    {
+        "name": "transfer_to_chatbot_agent",
+        "description": "Transfer the user request to the Chatbot Agent, which specializes in answering general questions and conversations.",
+        "parameters": {
+            "intent": {"type": "string", "description": "Summary of the user's question", "required": True}
+        },
+    },
     {
         "name": "read_file",
         "description": "Read a focused range from a file. Returns file content as text. "
@@ -204,7 +218,7 @@ AGENT_TOOLS = [
     {
         "name": "app_action_viewer",
         "description": "Run a Viewer desktop action. Use this EXACTLY when the user wants to OPEN or LOAD a pre-existing 3D model, 2D image, or DICOM series from disk. "
-                       "Supported actions: viewer.load_2d, viewer.load_3d, viewer.load_dicom. "
+                       "Supported actions: viewer.load_2d (use this for loading a single 2D image), viewer.load_3d, viewer.load_dicom. "
                        "DO NOT use this tool for viewing reconstructed models. Use it for loading/opening external static files.",
         "parameters": {
             "action": {"type": "string", "description": "One of: viewer.load_2d, viewer.load_3d, viewer.load_dicom", "required": True},
@@ -212,8 +226,8 @@ AGENT_TOOLS = [
     },
     {
         "name": "app_action_reconstruction",
-        "description": "Run a 3D Reconstruction desktop action. Use this when the user wants to perform 3D reconstruction tasks: load source images for reconstruction, start the reconstruction process, or view/close the RESULTING 3D point cloud model. "
-                       "Supported actions: reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model. "
+        "description": "Run a 3D Reconstruction desktop action. Use this when the user wants to perform 3D reconstruction tasks: load a dataset of source images for 3D reconstruction, start the reconstruction process, or view/close the RESULTING 3D point cloud model. "
+                       "Supported actions: reconstruction.load_images (use ONLY for loading multiple images to build a 3D model, NOT for a single 2D image), reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model. "
                        "NOTE: reconstruction.view_3d_model is ONLY for showing the generated reconstruction result, NOT for loading a 3D file from disk.",
         "parameters": {
             "action": {"type": "string", "description": "One of: reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model", "required": True},
@@ -1033,18 +1047,18 @@ def _canonical_desktop_action(params: dict) -> dict | None:
 
 
 def _looks_like_ui_action(text: str) -> bool:
-    return _manifest_looks_like_ui_action(text)
+    return False
 
 
 def _match_desktop_action(task: str) -> dict | None:
-    return _manifest_match_action_intent(task)
+    return None
 
 
 def _match_desktop_action_sequence(task: str) -> list[dict] | None:
-    return _manifest_match_action_sequence(task)
+    return None
 
 
-TOOL_APP_AGENT = ToolAppAgent(_match_desktop_action, _match_desktop_action_sequence)
+
 
 
 def tool_application_action(params: dict) -> dict:
@@ -1198,12 +1212,26 @@ MCP_LOCAL_EXECUTORS = {
 
 # Safe tools use the local Streamable HTTP MCP endpoint. Approval-gated write
 # tools do not enter this map and remain behind the existing approval flow.
+def tool_transfer_to_code_agent(params: dict) -> dict:
+    return {"status": "transferred_to_code", "intent": params.get("intent")}
+
+def tool_transfer_to_toolapp_agent(params: dict) -> dict:
+    return {"status": "transferred_to_toolapp", "intent": params.get("intent")}
+
+def tool_transfer_to_chatbot_agent(params: dict) -> dict:
+    return {"status": "transferred_to_chatbot", "intent": params.get("intent")}
+
 _TOOL_EXECUTORS = {
     name: (lambda params, tool_name=name: call_mcp_tool(
         tool_name, params, timeout=_TOOL_DEFINITIONS.get(tool_name, _TOOL_DEFINITIONS["application_action"])["timeout_seconds"],
     ))
     for name in MCP_LOCAL_EXECUTORS
 }
+_TOOL_EXECUTORS.update({
+    "transfer_to_code_agent": tool_transfer_to_code_agent,
+    "transfer_to_toolapp_agent": tool_transfer_to_toolapp_agent,
+    "transfer_to_chatbot_agent": tool_transfer_to_chatbot_agent,
+})
 TOOL_REGISTRY = ToolRegistry(_TOOL_EXECUTORS)
 
 _TOOLS_REQUIRING_APPROVAL = {
@@ -1315,9 +1343,6 @@ tên tính năng; hãy lấy chúng từ source, CMake, test và kết quả too
 
 User: đổi project sang tiếng việt giúp tôi
 Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"language.change","language":"vi"}}}}
-
-User: tải ảnh chụp và tái tạo 3d
-Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"reconstruction.load_images"}}}}
 
 User: mở hộp thư
 Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"mail.open"}}}}
@@ -1597,7 +1622,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             detail="LangGraph is required for Agent mode. Run: pip install -r AIAssistant/requirements.txt",
         )
     if supervisor_route is None:
-        supervisor_route = route_task(task)
+        supervisor_route = Specialist.SUPERVISOR
 
     def complete(messages: list[dict[str, str]], current_temperature: float) -> str:
         total_chars = sum(len(message.get("content", "")) for message in messages)
@@ -1621,29 +1646,6 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         # trong khi câu hỏi của người dùng mang dáng dấp một lệnh điều khiển
         # UI (rule #11 trong system prompt), cho model MỘT cơ hội tự sửa bằng
         # một system reminder nhấn mạnh rule #11, trước khi chấp nhận đó là
-        # final_answer. Quyết định gọi tool cuối cùng vẫn hoàn toàn do model
-        # đưa ra qua đúng cơ chế parse/execute của LangGraph — không bypass.
-        if len(messages) == 2:
-            tool_name, _ = _parse_tool_call(answer)
-            user_task = messages[-1].get("content", "")
-            if tool_name is None and _looks_like_ui_action(_normalise_agent_task(user_task)):
-                logger.info("LangGraph: chưa thấy tool_call ở lượt đầu nhưng task giống lệnh UI — nhắc lại rule #11 và thử lại")
-                reminder = {
-                    "role": "system",
-                    "content": ("Nhắc lại RULE #11: đây là một yêu cầu điều khiển ứng dụng (application UI "
-                                "request). Bạn PHẢI trả lời CHÍNH XÁC bằng một khối ```tool_call``` gọi "
-                                "application_action. KHÔNG được trả lời bằng văn bản thường, KHÔNG được dịch "
-                                "hay diễn giải bất kỳ nội dung nào — chỉ trả về đúng JSON tool_call theo format "
-                                "đã hướng dẫn."),
-                }
-                retry_answer = call([*messages, reminder])
-                logger.info("LangGraph nhận phản hồi từ Model sau khi nhắc lại (length: %d chars)", len(retry_answer))
-                retry_tool_name, _ = _parse_tool_call(retry_answer)
-                if retry_tool_name is not None:
-                    logger.info("LangGraph: model đã tự sửa và phát tool_call ở lần thử lại")
-                    return retry_answer
-                logger.info("LangGraph: model vẫn không phát tool_call sau khi nhắc — giữ nguyên câu trả lời gốc")
-
         return answer
 
     def execute(tool_name: str, params: dict) -> dict:
@@ -1724,10 +1726,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     # An explicit manifest workflow is optional context only.  A single action
     # match is not promoted to a sequence; every plan step remains an LLM
     # tool-calling decision and is reviewed by Reflect.
-    matched_ui_actions = (
-        TOOL_APP_AGENT.match_sequence(_normalise_agent_task(task)) or []
-        if supervisor_route.value == "toolapp" else []
-    )
+    matched_ui_actions = []
     state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
                       resume_with_reflection=resume_with_reflection,
                       required_ui_actions=matched_ui_actions,
@@ -1895,50 +1894,6 @@ def _stream_langgraph_execution(run: Callable[[Callable[[dict], None]], dict]):
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-def llm_route_task(task: str, temperature: float = 0.1) -> Specialist:
-    """Use LLM to dynamically route the task to a specialist."""
-    schema = {
-        "type": "object",
-        "properties": {
-            "specialist": {
-                "type": "string",
-                "enum": ["code", "toolapp", "chatbot", "research", "desktop_workflow"]
-            }
-        },
-        "required": ["specialist"]
-    }
-    messages = [
-        {"role": "system", "content": (
-            "You are a routing supervisor. Route the user task to the most appropriate specialist.\n"
-            "'toolapp' for ANY request that controls the desktop application: loading/opening "
-            "images, 2D images, 3D models, DICOM files, starting reconstruction, running AI "
-            "detection, changing language, opening mail, logging in, or any other UI action. "
-            "Vietnamese examples: 'tải ảnh', 'mở ảnh', 'tải mô hình 3d', 'tải ảnh DICOM', "
-            "'tái tạo 3d', 'chạy nhận diện', 'đổi ngôn ngữ', 'mở hộp thư'.\n"
-            "'code' for code editing, writing, modifying, debugging, or analyzing source code.\n"
-            "'research' for searching/reading documentation without changes.\n"
-            "'chatbot' for conversational queries, explanations, answering questions, "
-            "or if unclear."
-        )},
-        {"role": "user", "content": task}
-    ]
-    response = _structured_agent_completion(messages, max_tokens=100, temperature=temperature, schema=schema)
-    try:
-        data = json.loads(response)
-        result = Specialist(data.get("specialist", "chatbot"))
-    except Exception as e:
-        logger.warning("Failed to parse LLM route response: %s", e)
-        result = Specialist.CHATBOT
-
-    # Safety net: if LLM misclassified a UI request as chatbot, the manifest
-    # phrase matcher is authoritative — override to toolapp.
-    if result == Specialist.CHATBOT and _manifest_looks_like_ui_action(task):
-        logger.info("LLM routed to chatbot but manifest matched UI action — overriding to toolapp")
-        result = Specialist.TOOLAPP
-
-    return result
-
-
 @agent_router.post("/v1/agent/execute")
 def agent_execute(request: AgentExecuteRequest, http_req: Request):
     """
@@ -1954,12 +1909,8 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     session_id = request.session_id or "agent_default"
     task_coordinator.start(session_id, task=request.task)
     
-    try:
-        supervisor_route = llm_route_task(task, request.temperature)
-    except Exception as e:
-        logger.warning("LLM routing failed, falling back to heuristic: %s", e)
-        supervisor_route = route_task(task)
-    logger.info("[SUPERVISOR] routed task to %s", supervisor_route.value)
+    supervisor_route = Specialist.SUPERVISOR
+    logger.info("[SUPERVISOR] starting task routing logic via A2A Handoff Tools")
     retry_idx  = request.retry_message_index  # None ở request thường
 
     # Exact code citations are a read-only Coding Agent operation. Resolve
@@ -1992,7 +1943,7 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     # loading). Keep it in the Code Agent so the UI matcher cannot hijack the
     # plan or inject an unrelated expected application action.
     if supervisor_route.value == "toolapp":
-        desktop_params, desktop_sequence = TOOL_APP_AGENT.match(task)
+        desktop_params, desktop_sequence = None, None
     else:
         desktop_params, desktop_sequence = None, None
     if desktop_sequence:
@@ -2046,15 +1997,13 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         system_prompt += "\n\n" + coding_instruction(CodingTaskContext(
             task=task, language=request.language, project_root=_safe_relpath(PROJECT_DIR, PROJECT_DIR),
         ))
-    if supervisor_route.value == "toolapp" and _looks_like_ui_action(_normalise_agent_task(task)):
-        system_prompt += "\n\n## TOOLAPP AGENT HANDOFF\n\n" + ToolAppAgent.instruction()
+
 
     # RAG nay duoc cung cap nhu mot tool dong (rag_search) thay vi inject vao system prompt.
     # Chi inject mot luong nho context khi task KHONG phai UI action va RAG san sang,
     # de tranh lam day context window voi thong tin khong lien quan.
     if (ENABLE_RAG and rag_runtime.knowledge_chunks
-            and supervisor_route.value != "code"
-            and not _looks_like_ui_action(_normalise_agent_task(task))):
+            and supervisor_route.value != "code"):
         try:
             doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
             if doc_ctx:
@@ -2385,39 +2334,7 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
     steps.append({"type": "verification", "tool": "application_action", "result": verification,
                   "iteration": action.get("iteration", 0)})
 
-    # A workflow advances only after the desktop has positively acknowledged
-    # the preceding action.  Each continuation has a fresh request_id, so the
-    # Qt client can dispatch it once without replaying the earlier step.
-    next_actions = action.get("next_actions", [])
-    if request.success and next_actions:
-        # Keep an explicit passed reflection for every action that is already
-        # acknowledged.  The next graph/resume uses these reflections as the
-        # cursor for plan-step accounting; without them it would think that
-        # step 1 is still active and could replay the first action.
-        steps.append({
-            "type": "reflection", "tool": "application_action",
-            "result": {"passed": True, "decision": "continue",
-                       "reason": f"Qt acknowledged UI step: {params['action']}."},
-            "iteration": action.get("iteration", 0),
-        })
-        next_action, error = prepare_next_action(
-            action, steps, next_actions, validate_action_params, _generate_action_id,
-        )
-        if error:
-            raise HTTPException(status_code=422, detail=error)
-        next_params = next_action["params"]
-        next_request_id = next_params["request_id"]
-        next_action["created_at"] = time.time()
-        with _pending_lock:
-            _pending_actions[next_request_id] = next_action
-            _save_pending_actions()
-        task_coordinator.update(action["session_id"], next_request_id,
-                                status="waiting_ui_ack")
-        return {"status": "pending_ui_action", "session_id": action["session_id"],
-                "request_id": next_request_id, "prior_step_count": len(action.get("steps", [])),
-                "steps": action.get("steps", []) + steps,
-                "ui_action": {"request_id": next_request_id, "action": next_params["action"],
-                              "params": next_params}}
+
 
     # Nếu LLM (LangGraph) đang chạy, tiếp tục graph để thực hiện bước tiếp theo trong kế hoạch
     if action.get("messages") and USE_LANGGRAPH_AGENT and LANGGRAPH_AVAILABLE:

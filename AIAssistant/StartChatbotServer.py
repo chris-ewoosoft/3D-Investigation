@@ -27,7 +27,6 @@ from modules.config import (
     _safe_relpath,
     logger,
 )
-from modules.multi_agent import route_task
 
 
 class ChatMessage(BaseModel):
@@ -223,7 +222,8 @@ def chat_completions(request: ChatRequest, http_req: Request):
 
     logger.info("[MODE: CHAT] Query from %s: %s…", http_req.client.host,
                 user_query[:60].replace("\n", " "))
-    logger.info("[SUPERVISOR] routed chat request to %s", route_task(user_query, "chatbot").value)
+    from modules.multi_agent import Specialist
+    logger.info("[SUPERVISOR] routed chat request to %s", Specialist.CHATBOT.value)
     rag_start = time.monotonic()
     messages_raw = [message.model_dump() for message in request.messages
                     if message.role != "assistant_agent"]
