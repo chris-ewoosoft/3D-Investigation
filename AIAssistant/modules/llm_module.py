@@ -210,6 +210,8 @@ def _build_system_prompt(doc_ctx: str, code_ctx: str, suppress_citations: bool =
     system_prompt += (
         f"\n13. Respond exclusively in {response_language}, matching the current application language. "
         "Do not choose the response language from the user's message or source documents.\n"
+        "14. The RAG context is private evidence. Use it to answer accurately, but do not expose "
+        "its headings, filenames, numbered labels, or citations unless the user explicitly asks for a source.\n"
     )
     if suppress_citations:
         system_prompt += (

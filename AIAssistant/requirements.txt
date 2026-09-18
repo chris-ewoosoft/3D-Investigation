@@ -43,3 +43,14 @@ opentelemetry-sdk>=1.27.0
 # langgraph-checkpoint-postgres>=2.0.0
 # langgraph-checkpoint-redis>=0.1.0
 langgraph-checkpoint-sqlite>=2.0.0
+
+# ── A2A Protocol (optional: pip install a2a-sdk) ──────────────────────────────
+# Enables Agent-to-Agent protocol for remote agent routing and discovery.
+# Set A2A_ENABLED=1 to activate. Works without it — falls back to in-process.
+# a2a-sdk>=1.0.0
+
+# ── LangSmith Tracing (optional: pip install langsmith) ────────────────────────
+# Enables LLM/agent tracing to the LangSmith dashboard.
+# Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY=... to activate.
+# Works without it — falls back to OpenTelemetry + file logging.
+# langsmith>=0.2.0

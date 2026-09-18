@@ -141,6 +141,28 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
         QJsonArray steps = res["steps"].toArray();
         const int priorStepCount = skipSteps >= 0 ? skipSteps : res["prior_step_count"].toInt();
         QString html;
+        bool transferredToChatbot = false;
+        for (const QJsonValue& value : steps) {
+            const QJsonObject step = value.toObject();
+            if (step["type"].toString() == "tool_call" &&
+                step["tool"].toString() == "transfer_to_chatbot_agent") {
+                transferredToChatbot = true;
+                break;
+            }
+        }
+        if (transferredToChatbot) {
+            // A chatbot handoff is conversational output, not an agent-work
+            // transcript.  Keep planning, delegation, tool and verification
+            // details out of the Qt chat; render only the final response.
+            for (const QJsonValue& value : steps) {
+                const QJsonObject step = value.toObject();
+                if (step["type"].toString() == "final_answer") {
+                    html += ChatTemplates::AI_MESSAGE_CONTAINER.arg(
+                        HtmlUtilities::mdToHtml(step["content"].toString()));
+                }
+            }
+            return html;
+        }
         for (int i = priorStepCount; i < steps.size(); ++i) {
             QJsonObject step = steps[i].toObject();
             QString type = step["type"].toString();

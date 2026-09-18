@@ -26,22 +26,19 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import unicodedata
 from collections.abc import Callable
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from modules.action_manifest import (
-    action_matches_plan_step,
-    canonical_action,
-    match_action_intent,
-    split_step_by_manifest_phrases,
-)
+from modules.action_manifest import canonical_action
 from modules.agent_logging import get_agent_logger
 from modules.checkpointing import build_checkpointer
 from modules.coding_agent import coding_workflow_guidance, coding_workflow_status
 from modules.inference import strip_think_tags
-from modules.observability import span
+from modules.observability import langsmith_trace, span
 
 logger = get_agent_logger("reasoning")
 
@@ -58,6 +55,41 @@ _CONTEXT_MESSAGE_LIMIT = 1800
 _CONTEXT_TOTAL_LIMIT = 14000
 _SEMANTIC_REFLECTION_TOOLS = {"run_command", "write_file", "patch_file", "replace_file_content", "multi_replace_file_content", "create_directory", "application_action"}
 
+
+def _project_research_query(messages: list[dict[str, str]], steps: list[dict[str, Any]]) -> str | None:
+    """Return an evidence query when a project-information request was answered too early."""
+    if any(step.get("type") == "tool_result" for step in steps):
+        return None
+
+    task = next(
+        (message.get("content", "") for message in reversed(messages)
+         if message.get("role") == "user" and not message.get("content", "").startswith("Tool `")),
+        "",
+    ).strip()
+    normalized = "".join(
+        char for char in unicodedata.normalize("NFD", task.casefold())
+        if unicodedata.category(char) != "Mn"
+    )
+    information_markers = (
+        "trong du an", "ky su", "engineer", "thanh vien", "nhan su",
+        "ai la", "who is", "tai lieu", "documentation", "project history",
+    )
+    return task if any(marker in normalized for marker in information_markers) else None
+
+
+def _clean_project_research_answer(answer: str) -> str:
+    """Remove RAG transport labels if a model accidentally repeats them.
+
+    RAG context is an internal evidence format, not user-facing content.  The
+    model is explicitly instructed not to expose it, but this lightweight
+    cleanup keeps a stray heading or numbered source marker out of the chat.
+    """
+    cleaned = re.sub(r"(?im)^\s*=+\s*(?:TÀI LIỆU THAM KHẢO|MÃ NGUỒN LIÊN QUAN)\s*=+\s*$\n?", "", answer)
+    cleaned = re.sub(r"(?im)^\s*(?:TÀI LIỆU THAM KHẢO|MÃ NGUỒN LIÊN QUAN)\s*:?[ \t]*$\n?", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*\[\d+\]\s+[^\n]+\.(?:txt|md|pdf|docx?|pptx?|xlsx?|eml|html?)\s*$\n?", "", cleaned)
+    cleaned = re.sub(r"\s*\[(?:\d+)(?:\s*,\s*\d+)*\]", "", cleaned)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
 _PLANNER_PROMPT = """Bạn là Planner (Người lập kế hoạch) của hệ thống AI Assistant.
 Nhiệm vụ của bạn là phân tích yêu cầu của người dùng và lập ra một kế hoạch ngắn gọn, từng bước một.
 KHÔNG sử dụng bất kỳ công cụ (tool) nào.
@@ -69,9 +101,11 @@ Trả lời CHÍNH XÁC theo JSON object với schema:
 Với yêu cầu điều khiển giao diện (mở/tải ảnh, mô hình, DICOM, tái tạo),
 hãy lập các bước thực thi trực tiếp trong ứng dụng, không lập bước mở ứng dụng, tìm tài liệu,
 tìm mã nguồn, RAG hoặc tìm vị trí tệp.
-Với yêu cầu điều khiển giao diện gồm nhiều hành động nối bằng "và"/"sau đó"/"rồi",
-BẮT BUỘC tách mỗi hành động thành một bước riêng biệt trong "steps".
-Không được gộp 2 hành động canonical vào cùng một bước.
+Với yêu cầu có nhiều hành động liên tiếp, BẮT BUỘC phải tách MỖI hành động thành một bước ĐỘC LẬP.
+MỖI bước (step) PHẢI tương ứng với đúng 1 lần gọi công cụ (tool calling) duy nhất. 
+TUYỆT ĐỐI KHÔNG dùng các từ "và", "rồi", "sau đó" để gộp hành động trong cùng một bước.
+- Ví dụ SAI: "Phân đoạn và theo dõi đối tượng" (Gộp 2 hành động).
+- Ví dụ ĐÚNG: Tách thành 2 bước: 1. "Chạy phân đoạn", 2. "Theo dõi đối tượng".
 Với yêu cầu engineering/coding có thay đổi repository, kế hoạch phải bao phủ
 đọc/định vị source liên quan, thay đổi được duyệt, xem lại diff và kiểm chứng
 bằng test/lint/compile/build phù hợp. Không coi việc tìm thấy file là đã hoàn thành."""
@@ -87,11 +121,14 @@ Hãy trả về ĐÚNG MỘT JSON object (không kèm text) với format:
 _PLAN_CRITIC_PROMPT = """Bạn là Critic kiểm tra kế hoạch của hệ thống AI Assistant.
 Đánh giá kế hoạch trước khi bất kỳ tool nào được gọi. Kế hoạch đạt (passed=true)
 khi ngắn gọn, không trùng bước, bao phủ đúng các mục tiêu người dùng và mỗi bước
-đều là một hành động cần thiết có thể thực thi/kiểm chứng. Với yêu cầu giao diện,
-không thêm bước chuẩn bị chung như tìm tài liệu, RAG, tìm mã nguồn hoặc tìm vị trí
-tệp nếu người dùng không yêu cầu. LƯU Ý: Không được yêu cầu gộp các bước hành động
-khác nhau thành một bước duy nhất. Nếu kế hoạch thừa, thiếu hoặc có bước không thể
-ánh xạ tới mục tiêu/tool phù hợp, trả về passed=false để Planner sinh lại.
+đều là một hành động đơn lẻ có thể thực thi/kiểm chứng bằng ĐÚNG MỘT tool call.
+Với yêu cầu giao diện, không thêm bước chuẩn bị chung như tìm tài liệu, RAG, tìm mã nguồn
+hoặc tìm vị trí tệp nếu người dùng không yêu cầu.
+LƯU Ý CỰC KỲ QUAN TRỌNG VỀ TỪ KHÓA: NẾU TRONG BẤT KỲ BƯỚC NÀO (STEPS) CÓ CHỨA CÁC TỪ "và", "sau đó", "rồi", "tiếp theo",
+ĐIỀU ĐÓ CÓ NGHĨA LÀ KẾ HOẠCH ĐANG GỘP NHIỀU HÀNH ĐỘNG. (Ví dụ: "Tải file và phân tích dữ liệu" là SAI, vì có chữ "và").
+BẠN KHÔNG ĐƯỢC COI ĐÓ LÀ MỘT BƯỚC HỢP LỆ. BẠN BẮT BUỘC PHẢI TRẢ VỀ passed=false VÀ YÊU CẦU TÁCH RA. KHÔNG CÓ NGOẠI LỆ.
+Nếu kế hoạch thừa, thiếu hoặc có bước không thể ánh xạ tới mục tiêu/tool phù hợp, 
+trả về passed=false để Planner sinh lại.
 Trả về ĐÚNG MỘT JSON object:
 {"passed": true/false, "decision": "continue"/"revise", "reason": "Lý do chi tiết..."}
 """
@@ -246,8 +283,36 @@ class LocalAgentGraph:
 
     def _traced(self, name: str, handler: Callable[[AgentState], dict[str, Any]]) -> Callable[[AgentState], dict[str, Any]]:
         def invoke(state: AgentState) -> dict[str, Any]:
-            with span(f"agent.{name}", iteration=str(state.get("iteration", 0))):
-                result = handler(state)
+            iteration = state.get("iteration", 0)
+            latest_delegation = next(
+                (step for step in reversed(state.get("steps", []))
+                 if step.get("type") == "delegation"),
+                {},
+            )
+            specialist = latest_delegation.get("agent", state.get("routing_plan", "supervisor"))
+            tool_name = latest_delegation.get("tool")
+            trace_metadata = {
+                "node": name,
+                "iteration": iteration,
+                "specialist": specialist,
+                "tool_name": tool_name,
+            }
+            with span(f"agent.{name}", **trace_metadata):
+                with langsmith_trace(
+                    f"agent.{name}",
+                    run_type="chain",
+                    inputs={"iteration": iteration,
+                            "routing_plan": state.get("routing_plan", ""),
+                            "done": state.get("done", False),
+                            "specialist": specialist,
+                            "tool_name": tool_name},
+                    metadata=trace_metadata,
+                ) as ls_ctx:
+                    result = handler(state)
+                    ls_ctx["outputs"] = {
+                        "done": result.get("done", False),
+                        "step_count": len(result.get("steps", [])),
+                    }
             if self._emit and result.get("steps"):
                 steps = result["steps"]
                 for step in steps[self._emitted_steps:]:
@@ -356,6 +421,13 @@ class LocalAgentGraph:
         logger.debug(f"[NODE: plan] State hiện tại (iteration: {state.get('iteration')}): messages={len(state.get('messages', []))} steps={len(state.get('steps', []))}")
         messages = state["messages"]
 
+        # A factual question about the project has one deterministic first
+        # action: retrieve evidence. Asking the small local model to plan it
+        # first has repeatedly produced unrelated UI/AI workflows.
+        if _project_research_query(messages, state.get("steps", [])):
+            logger.info("[NODE: plan] Skipping planner for project-information research request.")
+            return {"plan": None, "plan_verified": True}
+
         previous_review = next(
             (step.get("result", {}) for step in reversed(state.get("steps", []))
              if step.get("type") == "plan_reflection"), None)
@@ -411,10 +483,6 @@ class LocalAgentGraph:
             if parsed:
                 plan, plan_spec = _normalise_plan_payload(payload)
                 if plan:
-                    expanded = []
-                    for step in plan:
-                        expanded.extend(split_step_by_manifest_phrases(step))
-                    plan = expanded
                     plan_spec["steps"] = plan
         except (ValueError, json.JSONDecodeError):
             plan = None
@@ -422,11 +490,7 @@ class LocalAgentGraph:
         if plan:
             tool_hints = []
             for step_text in plan:
-                hint = match_action_intent(step_text)
-                if hint:
-                    tool_hints.append({"step": step_text, "tool": "application_action", **hint})
-                else:
-                    tool_hints.append({"step": step_text, "tool": None, "action": None})
+                tool_hints.append({"step": step_text, "tool": None, "action": None})
             plan_spec["tool_hints"] = tool_hints
             
             steps = list(state["steps"])
@@ -468,15 +532,17 @@ class LocalAgentGraph:
         # phrase (for example, "Reconstruct 3D model từ ảnh đã tải"). Log the
         # hints for observability, but let the semantic Plan Critic decide so
         # valid plans are not rejected by exact-string matching.
-        plan_hints = [match_action_intent(step) for step in plan]
+        plan_hints = []
         logger.info("[NODE: plan_reflect] Action hints | hints=%s", plan_hints)
 
         if review is None and self._plan_reflect_complete is not None:
+            spec_to_check = dict(state.get('plan_spec') or {'steps': plan})
+            spec_to_check.pop("tool_hints", None)
             critic_msgs = [
                 {"role": "system", "content": _PLAN_CRITIC_PROMPT},
                 {"role": "user", "content": (
                     f"Yêu cầu ban đầu: {user_msg}\n"
-                    f"Kế hoạch cần kiểm tra: {json.dumps(state.get('plan_spec') or {'steps': plan}, ensure_ascii=False)}\n"
+                    f"Kế hoạch cần kiểm tra: {json.dumps(spec_to_check, ensure_ascii=False)}\n"
                     "Kế hoạch có đạt yêu cầu và sẵn sàng thực thi không?"
                 )},
             ]
@@ -562,6 +628,28 @@ class LocalAgentGraph:
         tool_call_count = state.get("tool_call_count", 0)
         done_count      = _completed_plan_steps(steps, plan)
 
+        # Do not leave this first evidence-gathering action to the model. It
+        # avoids both hallucinated plans and unrelated specialist handoffs.
+        research_query = _project_research_query(state["messages"], steps)
+        if research_query:
+            tool_name = "rag_search"
+            params = {"query": research_query, "top_k": 5}
+            idempotency_key = ""
+            if self._select_specialist:
+                delegation = self._select_specialist(tool_name, params)
+                idempotency_key = delegation.get("idempotency_key", "")
+                steps.append({"type": "delegation", "agent": delegation.get("specialist", "supervisor"),
+                              "tool": tool_name, "idempotency_key": idempotency_key,
+                              "remote_endpoint": delegation.get("remote_endpoint"),
+                              "iteration": iteration})
+            steps.append({"type": "research_required", "query": research_query,
+                          "iteration": iteration})
+            steps.append({"type": "tool_call", "tool": tool_name, "params": params,
+                          "idempotency_key": idempotency_key, "iteration": iteration})
+            logger.info("[NODE: reason] Dispatching required project-information research: %s", params)
+            return {"iteration": iteration, "steps": steps,
+                    "tool_call_count": tool_call_count}
+
         coding_status = None
         if state.get("enforce_coding_workflow"):
             user_task = next(
@@ -613,10 +701,6 @@ class LocalAgentGraph:
         )
         expected_action = (required_actions[completed_ui_actions]
                            if completed_ui_actions < len(required_actions) else None)
-        plan_action_hint = None
-        if plan and done_count < len(plan):
-            plan_action_hint = match_action_intent(plan[done_count])
-        expected_action = expected_action or plan_action_hint
         current_plan_step = (plan[done_count]
                              if plan and done_count < len(plan) else None)
         plan_total = len(plan or [])
@@ -645,8 +729,15 @@ class LocalAgentGraph:
             }]
 
         # Observation summarization
-        if tool_call_count >= _OBSERVATION_SUMMARY_THRESHOLD:
+        # Keep a tool observation from overflowing the next inference request.
+        # The initial system prompt intentionally carries complete tool
+        # descriptions, so preserve it for the first tool-selection turn.
+        message_chars = sum(len(message.get("content", "")) for message in messages)
+        if (tool_call_count >= _OBSERVATION_SUMMARY_THRESHOLD
+                or (tool_call_count > 0 and message_chars > _CONTEXT_TOTAL_LIMIT)):
             messages = _summarize_messages(messages)
+            logger.info("[NODE: reason] Context compacted before inference: chars=%d tool_calls=%d",
+                        message_chars, tool_call_count)
             print(f"[AGENT TRACE] ── Reason: tóm tắt messages (tool_call_count={tool_call_count}).", flush=True)
 
         print("[AGENT TRACE] ── Reason: đang gọi LLM...", flush=True)
@@ -670,6 +761,17 @@ class LocalAgentGraph:
         tool_name, tool_params = self._parse(answer)
         logger.info("[NODE: reason] selected tool=%s action=%s (model output)",
                     tool_name or "final_answer", (tool_params or {}).get("action", ""))
+
+        research_query = _project_research_query(state["messages"], steps)
+        if research_query and tool_name != "rag_search":
+            logger.info("[NODE: reason] Blocking unsupported project-information route (%s); forcing rag_search.",
+                        tool_name or "final_answer")
+            steps.append({"type": "research_required", "query": research_query,
+                          "rejected_tool": tool_name, "iteration": iteration})
+            tool_name = "rag_search"
+            tool_params = {"query": research_query, "top_k": 5}
+            answer = json.dumps({"kind": "tool", "tool": tool_name, "params": tool_params},
+                                ensure_ascii=False)
 
         if tool_name is None:
             print("[AGENT TRACE] ── Reason: final answer.", flush=True)
@@ -725,6 +827,9 @@ class LocalAgentGraph:
             if citation:
                 logger.info("[NODE: reason] Dùng formatter trích dẫn code đầy đủ từ read_file result.")
                 answer = citation
+            elif any(step.get("type") == "tool_call" and step.get("tool") == "rag_search"
+                     for step in steps):
+                answer = _clean_project_research_answer(answer)
             steps.append({"type": "final_answer", "content": answer})
             return {"iteration": iteration, "steps": steps, "done": True}
 
@@ -808,6 +913,7 @@ class LocalAgentGraph:
             idempotency_key = delegation.get("idempotency_key", "")
             steps.append({"type": "delegation", "agent": delegation.get("specialist", "supervisor"),
                           "tool": tool_name, "idempotency_key": idempotency_key,
+                          "remote_endpoint": delegation.get("remote_endpoint"),
                           "iteration": iteration})
         print(f"[AGENT TRACE] ── Reason: tool call → tool='{tool_name}', params={str(params)[:80]}", flush=True)
         logger.info("[NODE: reason] LLM quyết định gọi tool: %s, params: %s", tool_name, params)
@@ -921,6 +1027,11 @@ class LocalAgentGraph:
             })
             return {"steps": steps, "done": True}
 
+        is_project_research = (
+            tool_name == "rag_search"
+            and _project_research_query(state["messages"], state["steps"]) is not None
+        )
+
         logger.info("[NODE: tool] Thực thi: %s, params: %s", tool_name, str(params)[:200])
         print(f"\n--- [LOG: TOOL NODE] Thuc thi: {tool_name} ---")
         try:
@@ -961,6 +1072,36 @@ class LocalAgentGraph:
             steps.append({"type": "verification", "tool": tool_name, "result": verification,
                           "iteration": state["iteration"]})
 
+        if is_project_research:
+            # RAG returns context decorated with headings and source labels.
+            # Showing that transport format made ordinary project questions
+            # sound like a document dump (and exposed "TÀI LIỆU THAM KHẢO").
+            # Keep the verified evidence, but let the response model turn it
+            # into a short, direct conversational answer.
+            evidence = json.dumps(result, ensure_ascii=False, indent=2)
+            messages = list(state["messages"])
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Use the verified RAG evidence below to answer the original question now. "
+                    "Answer naturally and directly in the current application language. "
+                    "Do not mention, quote, or reproduce source headings, filenames, numbered citations, "
+                    "or the phrases 'TÀI LIỆU THAM KHẢO' and 'MÃ NGUỒN LIÊN QUAN'. "
+                    "Do not call another tool; return the final answer only.\n\n"
+                    f"Verified evidence:\n```json\n{evidence[:7000]}\n```"
+                ),
+            })
+            steps.append({
+                "type": "reflection", "tool": tool_name,
+                "result": {"passed": True, "decision": "continue",
+                           "reason": "Verified RAG evidence is ready for response synthesis."},
+                "iteration": state["iteration"],
+            })
+            logger.info("[NODE: tool] Project RAG evidence ready; requesting a natural final response.")
+            return {"steps": steps, "messages": messages,
+                    "tool_call_count": state.get("tool_call_count", 0) + 1,
+                    "error_count": error_count, "skip_reflect": True}
+
         result_text = json.dumps(result, ensure_ascii=False, indent=2)
         if len(result_text) > 8000:
             result_text = result_text[:8000] + "\n... [truncated]"
@@ -989,8 +1130,9 @@ class LocalAgentGraph:
             "role":    "user",
             "content": (
                 f"Tool `{tool_name}` tra ve:\n```json\n{result_text}\n```\n\n"
-                f"Phan tich ket qua va thuc hien buoc tiep theo, "
-                f"hoac tra loi cuoi cung neu da du thong tin."
+                "Use this result as evidence. If it answers the original question, "
+                "return a final answer now; do not delegate or call another tool. "
+                "Only continue when a specific missing fact is necessary."
             ),
         })
         if tool_name in _LOW_RISK_TOOLS and verification.get("passed") and "error" not in result:
@@ -1144,7 +1286,7 @@ class LocalAgentGraph:
             current_step_text = plan[completed_plan_steps]
             selected_action = result_step.get("result", {}).get("action") or call.get("params", {}).get("action", "")
             canonical_selected = canonical_action(str(selected_action))
-            match = action_matches_plan_step(str(selected_action), current_step_text)
+            match = None
             logger.info("[NODE: reflect] Semantic check | plan_step=%s | action=%s | canonical=%s | match=%s",
                         current_step_text, selected_action, canonical_selected or "none", match)
             if match is False:

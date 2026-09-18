@@ -6,12 +6,26 @@ import json
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import Any
 
 from .agent_logging import get_agent_logger
 from .config import APP_DATA_DIR, logger
+
+# A2A protocol integration — graceful no-op when a2a_protocol is unavailable.
+try:
+    from .a2a_protocol import A2A_ENABLED, a2a_available, get_remote_registry
+    _A2A_IMPORT_OK = True
+except ImportError:
+    _A2A_IMPORT_OK = False
+    A2A_ENABLED = False  # type: ignore[assignment]
+
+    def a2a_available() -> bool:  # type: ignore[misc]
+        return False
+
+    def get_remote_registry() -> dict:  # type: ignore[misc]
+        return {}
 
 supervisor_logger = get_agent_logger("supervisor")
 verification_logger = get_agent_logger("verification")
@@ -33,6 +47,7 @@ class Delegation:
     tool: str | None
     reason: str
     idempotency_key: str
+    remote_endpoint: str | None = field(default=None, compare=False)
 
 
 _SPECIALIST_INSTRUCTIONS = {
@@ -58,6 +73,11 @@ CODE_AGENT_TOOLS = frozenset({
     "replace_file_content", "multi_replace_file_content", "create_directory", "run_command",
 })
 _WORKFLOW_TOOLS = {"application_action"}
+_TRANSFER_TARGETS = {
+    "transfer_to_code_agent": Specialist.CODE,
+    "transfer_to_toolapp_agent": Specialist.TOOLAPP,
+    "transfer_to_chatbot_agent": Specialist.CHATBOT,
+}
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_PATH = os.path.join(APP_DATA_DIR, "AIAssistant", "agent_audit.jsonl")
 
@@ -65,26 +85,53 @@ _AUDIT_PATH = os.path.join(APP_DATA_DIR, "AIAssistant", "agent_audit.jsonl")
 def delegate(task: str, session_id: str, tool: str | None = None, parameters: dict[str, Any] | None = None,
              prefer_code: bool = False) -> Delegation:
     """Select exactly one worker role. Workers never delegate further."""
-    if prefer_code and tool in (_RESEARCH_TOOLS | _VERIFICATION_TOOLS | _CODE_TOOLS):
-        specialist, reason = Specialist.CODE, "coding task requires isolated repository context"
+    if tool in _TRANSFER_TARGETS:
+        specialist = _TRANSFER_TARGETS[tool]
+        reason, basis = f"explicit supervisor handoff to {specialist.value}", "explicit_transfer"
+    elif prefer_code and tool in (_RESEARCH_TOOLS | _VERIFICATION_TOOLS | _CODE_TOOLS):
+        specialist, reason, basis = Specialist.CODE, "coding task requires isolated repository context", "coding_preference"
     elif tool in _RESEARCH_TOOLS:
-        specialist, reason = Specialist.RESEARCH, "tool is read/RAG-only"
+        specialist, reason, basis = Specialist.RESEARCH, "tool is read/RAG-only", "research_tool"
     elif tool in _VERIFICATION_TOOLS:
-        specialist, reason = Specialist.VERIFICATION, "tool validates an observable result"
+        specialist, reason, basis = Specialist.VERIFICATION, "tool validates an observable result", "verification_tool"
     elif tool in _CODE_TOOLS:
-        specialist, reason = Specialist.CODE, "tool can change project state and requires approval"
+        specialist, reason, basis = Specialist.CODE, "tool can change project state and requires approval", "code_tool"
     elif tool in _WORKFLOW_TOOLS:
-        specialist, reason = Specialist.WORKFLOW, "tool dispatches a Qt desktop workflow"
+        specialist, reason, basis = Specialist.WORKFLOW, "tool dispatches a Qt desktop workflow", "workflow_tool"
     else:
-        specialist, reason = Specialist.SUPERVISOR, "direct response or unresolved intent"
+        specialist, reason, basis = Specialist.SUPERVISOR, "direct response or unresolved intent", "supervisor_fallback"
+
+    # A2A: check whether a remote agent can handle this specialist role.
+    remote_endpoint: str | None = None
+    if a2a_available():
+        registry = get_remote_registry()
+        for url, agent in registry.items():
+            if specialist.value in agent.skills:
+                remote_endpoint = url
+                reason += f" (A2A remote: {url})"
+                supervisor_logger.info(
+                    "A2A remote match | specialist=%s url=%s", specialist.value, url,
+                )
+                break
+
     source = json.dumps({"session": session_id, "task": task, "tool": tool, "params": parameters or {}},
                         ensure_ascii=False, sort_keys=True, default=str)
-    delegation = Delegation(specialist, tool, reason, hashlib.sha256(source.encode("utf-8")).hexdigest()[:24])
+    delegation = Delegation(specialist, tool, reason,
+                            hashlib.sha256(source.encode("utf-8")).hexdigest()[:24],
+                            remote_endpoint=remote_endpoint)
+    supervisor_logger.info(
+        "SUPERVISOR_ROUTE | session=%s basis=%s tool=%s prefer_code=%s -> specialist=%s remote=%s "
+        "idempotency_key=%s task_chars=%d parameter_keys=%s",
+        session_id, basis, tool or "none", prefer_code, specialist.value,
+        remote_endpoint or "local", delegation.idempotency_key, len(task),
+        sorted((parameters or {}).keys()),
+    )
     # Keep a role-specific trace in addition to the supervisor aggregate log.
     # This creates agent_<role>.log lazily for research/workflow/code roles too.
     get_agent_logger(specialist.value).info(
-        "Delegated | tool=%s reason=%s idempotency_key=%s",
+        "Delegated | tool=%s reason=%s idempotency_key=%s remote=%s",
         tool or "none", reason, delegation.idempotency_key,
+        remote_endpoint or "local",
     )
     return delegation
 

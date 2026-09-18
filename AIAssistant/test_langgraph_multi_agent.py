@@ -40,6 +40,65 @@ class LangGraphMultiAgentTests(unittest.TestCase):
             ["context_compacted", "final_answer"],
         )
 
+    def test_large_rag_observation_is_compacted_before_next_reason_turn(self):
+        context_sizes = []
+        replies = iter(["SEARCH", "DONE"])
+
+        def complete(messages, _temperature):
+            context_sizes.append(sum(len(message.get("content", "")) for message in messages))
+            return next(replies)
+
+        graph = LocalAgentGraph(
+            complete=complete,
+            parse=lambda text: ("rag_search", {"query": "engineers"}) if text == "SEARCH" else (None, None),
+            execute=lambda _tool, _params: {"found": True, "results": [{"content": "e" * 6000}]},
+            needs_approval=lambda _tool: False,
+            max_iterations=3,
+            plan_complete=lambda _messages, _temperature: '{"requires_plan": false, "plan": []}',
+        )
+        state = graph.run(
+            [{"role": "system", "content": "s" * 10000},
+             {"role": "user", "content": "What evidence is available?"}],
+            "rag-context-budget-test", 0.1,
+        )
+
+        self.assertEqual(state["steps"][-1]["type"], "final_answer")
+        self.assertGreaterEqual(len(context_sizes), 2)
+        self.assertLessEqual(context_sizes[-1], 14000)
+
+    def test_project_information_is_synthesized_after_rag_search(self):
+        calls = []
+
+        def execute(tool, params):
+            calls.append((tool, params))
+            return {"found": True, "results": [{
+                "content": "=== TÀI LIỆU THAM KHẢO ===\n[1] people.txt\nEngineer evidence"
+            }]}
+
+        def complete(messages, _temperature):
+            prompt = messages[-1]["content"]
+            self.assertIn("Engineer evidence", prompt)
+            self.assertIn("Do not mention, quote, or reproduce source headings", prompt)
+            return "=== TÀI LIỆU THAM KHẢO ===\n[1] people.txt\nNgười này là kỹ sư trong dự án. [1]"
+
+        graph = LocalAgentGraph(
+            complete=complete,
+            parse=lambda _text: (None, None),
+            execute=execute,
+            needs_approval=lambda _tool: False,
+            max_iterations=3,
+            plan_complete=lambda *_args: self.fail("Planner must not run before project RAG search"),
+        )
+        state = graph.run(
+            [{"role": "system", "content": "test"},
+             {"role": "user", "content": "K\u1ef9 s\u01b0 trong d\u1ef1 \u00e1n l\u00e0 ai?"}],
+            "project-information-rag-test", 0.1,
+        )
+
+        self.assertEqual(calls, [("rag_search", {"query": "K\u1ef9 s\u01b0 trong d\u1ef1 \u00e1n l\u00e0 ai?", "top_k": 5})])
+        self.assertEqual(state["steps"][-1]["content"], "Người này là kỹ sư trong dự án.")
+        self.assertNotIn("TÀI LIỆU THAM KHẢO", state["steps"][-1]["content"])
+
     def test_delegation_and_verification_steps_are_emitted(self):
         replies = iter([
             '{"requires_plan": false, "plan": []}', "CALL",

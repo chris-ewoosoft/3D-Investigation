@@ -901,8 +901,9 @@ def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 30,
     if vector_retriever is None or bm25_retriever is None or not knowledge_chunks or (not query.strip() and not query_image_b64):
         return []
 
-    dense = vector_retriever.retrieve(query)
-    sparse = bm25_retriever.retrieve(query)
+    candidate_limit = max(1, min(int(k), 30))
+    dense = vector_retriever.retrieve(query)[:candidate_limit]
+    sparse = bm25_retriever.retrieve(query)[:candidate_limit]
     dense_ids = [item.node.metadata["chunk_index"] for item in dense
                  if item.score is None or item.score >= SIMILARITY_THRESHOLD]
     sparse_ids = [item.node.metadata["chunk_index"] for item in sparse]
@@ -947,10 +948,9 @@ def _format_context_block(chunks: list, section_title: str) -> str:
         return ""
     lines = [f"=== {section_title} ==="]
     for i, chunk in enumerate(chunks, 1):
-        src  = os.path.basename(getattr(chunk, "source_path", "nguồn"))
         text = getattr(chunk, "text", str(chunk))
         body = text.split("\n", 1)[-1].strip()  # Bỏ dòng prefix [...]
-        lines.append(f"\n[{i}] {src}\n{body}")
+        lines.append(f"\n--- Evidence {i} ---\n{body}")
     return "\n".join(lines)
 
 
@@ -959,7 +959,9 @@ def get_context(query: str, query_image_b64: str | None = None, result_k: int = 
         return "", "", []
 
     # Bước 1: Hybrid retrieve
-    candidates = hybrid_retrieve(query, query_image_b64=query_image_b64, k=30, final_k=12)
+    candidate_pool = min(30, max(12, int(result_k) * 3))
+    candidates = hybrid_retrieve(query, query_image_b64=query_image_b64,
+                                 k=candidate_pool, final_k=candidate_pool)
 
     # Bước 2: Cross-encoder re-rank
     if USE_RERANKER and query:
@@ -1011,8 +1013,8 @@ def get_context(query: str, query_image_b64: str | None = None, result_k: int = 
             code_chunks.append(trimmed_chunk)
         total += len(trimmed_text)
 
-    doc_ctx  = _format_context_block(doc_chunks,  "TÀI LIỆU THAM KHẢO")
-    code_ctx = _format_context_block(code_chunks, "MÃ NGUỒN LIÊN QUAN")
+    doc_ctx  = _format_context_block(doc_chunks,  "PROJECT DOCUMENT EVIDENCE")
+    code_ctx = _format_context_block(code_chunks, "PROJECT CODE EVIDENCE")
     return doc_ctx, code_ctx, image_chunks
 
 

@@ -449,15 +449,18 @@ void AIAssistant::processNextQueuedRequest() {
 
     const QueuedCompletionRequest request = m_queuedRequests.takeFirst();
 
-    QString urlStr = AppConstants::AIServer::apiEndpoint();
+    QString baseUrl = AppConstants::AIServer::baseUrl();
+    QString urlStr;
     if (request.isAgent) {
         if (request.isUiActionAck) {
-            urlStr = urlStr.replace("/chat/completions", "/agent/ui-action-result");
+            urlStr = baseUrl + "/v1/agent/ui-action-result";
         } else if (request.isApproval) {
-            urlStr = urlStr.replace("/chat/completions", "/agent/approve");
+            urlStr = baseUrl + "/v1/agent/approve";
         } else {
-            urlStr = urlStr.replace("/chat/completions", "/agent/execute");
+            urlStr = baseUrl + "/v1/agent/execute";
         }
+    } else {
+        urlStr = baseUrl + "/v1/chat/completions";
     }
     QNetworkRequest req{QUrl(urlStr)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -466,6 +469,7 @@ void AIAssistant::processNextQueuedRequest() {
         : AppConstants::AIServer::TEXT_INFERENCE_TIMEOUT_MS;
     req.setTransferTimeout(timeoutMs);
 
+    qDebug() << "[AI Server] req urlStr:" << urlStr;
     QNetworkReply *reply = networkManager->post(req, QJsonDocument(request.payload).toJson());
     m_pendingRequests[reply] = request;
     m_isThinking = true;

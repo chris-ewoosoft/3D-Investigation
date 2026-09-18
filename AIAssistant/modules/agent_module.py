@@ -26,7 +26,7 @@ from .sandbox import (
     run as run_sandboxed_command,
     write_file as write_sandboxed_file,
 )
-from .observability import record_approval, record_schema_error, record_tool, span
+from .observability import langsmith_trace, record_approval, record_schema_error, record_tool, span
 from .inference import backend_mode, openai_compatible_completion, strip_think_tags
 from .mcp_client import call_tool as call_mcp_tool
 from .coding_agent import CodingTaskContext, instruction as coding_instruction, is_coding_task
@@ -43,6 +43,11 @@ from .multi_agent import (
     specialist_instruction,
     verify_result,
 )
+
+try:
+    from .a2a_protocol import A2ARouter
+except ImportError:  # pragma: no cover - retained for minimal deployments
+    A2ARouter = None  # type: ignore[assignment,misc]
 
 try:
     from LangGraphAgent import LocalAgentGraph
@@ -1667,8 +1672,27 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
         if executor is None:
             return {"error": f"Tool không tồn tại: {tool_name}"}
         tool_started = time.monotonic()
-        with span("agent.tool", tool=tool_name, session_id=session_id):
-            result = executor(params)
+
+        def execute_local(_: str, __: str, ___: dict | None) -> dict:
+            with span("agent.tool", tool=tool_name, session_id=session_id):
+                return executor(params)
+
+        if delegation.remote_endpoint and A2ARouter is not None:
+            remote_payload = {
+                "tool": tool_name,
+                "parameters": params,
+                "session_id": session_id,
+                "idempotency_key": delegation.idempotency_key,
+            }
+            with span("agent.a2a_delegate", tool=tool_name,
+                      specialist=delegation.specialist.value,
+                      remote_endpoint=delegation.remote_endpoint):
+                result = A2ARouter(local_execute=execute_local).route(
+                    delegation.specialist.value, task, remote_payload,
+                )
+            audit_agent("tool_transport", delegation, source=result.get("source", "local"))
+        else:
+            result = execute_local(delegation.specialist.value, task, None)
         audit_agent("tool_completed", delegation, success="error" not in result)
         record_tool(tool_name, "error" not in result, time.monotonic() - tool_started)
         return result
@@ -1682,6 +1706,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             "specialist": str(delegation.specialist),
             "idempotency_key": delegation.idempotency_key,
             "instruction": specialist_instruction(delegation),
+            "remote_endpoint": delegation.remote_endpoint,
         }
 
     def verify_tool_result(tool_name: str, params: dict, result: dict) -> dict:
@@ -1701,6 +1726,17 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
 
     logger.info("Khởi động LangGraph vòng lặp thực thi tool (session: %s)", session_id)
     print(f"[AGENT TRACE] ▶ LangGraph session={session_id} task={task[:80].replace(chr(10), ' ')}", flush=True)
+
+    # LangSmith: wrap entire agent session as a top-level traced run.
+    _ls_ctx_mgr = langsmith_trace(
+        "agent.session",
+        run_type="chain",
+        inputs={"task": task[:200], "session_id": session_id,
+                "supervisor_route": supervisor_route.value if supervisor_route else "none"},
+        metadata={"session_id": session_id, "temperature": temperature,
+                  "language": language},
+    )
+    _ls_ctx = _ls_ctx_mgr.__enter__()
     graph = LocalAgentGraph(
         complete=complete,      # Gọi model để sinh ra câu trả lời
         parse=_parse_tool_call, # Parse tool_call ra khỏi câu trả lời
@@ -1727,15 +1763,20 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     # match is not promoted to a sequence; every plan step remains an LLM
     # tool-calling decision and is reviewed by Reflect.
     matched_ui_actions = []
-    state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
-                      resume_with_reflection=resume_with_reflection,
-                      required_ui_actions=matched_ui_actions,
-                      supervisor_route = supervisor_route.value,
-                      enforce_plan_completion=supervisor_route.value == "code",
-                      approval_granted=approval_granted or bool((initial_steps or []) and
-                                            any(step.get("type") == "approval_granted"
-                                                for step in (initial_steps or []))),
-                      approval_scope=approval_scope)
+    try:
+        state = graph.run(messages, session_id, temperature, initial_steps, initial_iteration,
+                          resume_with_reflection=resume_with_reflection,
+                          required_ui_actions=matched_ui_actions,
+                          supervisor_route=supervisor_route.value,
+                          enforce_plan_completion=supervisor_route.value == "code",
+                          approval_granted=approval_granted or bool((initial_steps or []) and
+                                                any(step.get("type") == "approval_granted"
+                                                    for step in (initial_steps or []))),
+                          approval_scope=approval_scope)
+    except BaseException as error:
+        _ls_ctx["outputs"] = {"status": "error", "error": str(error)}
+        _ls_ctx_mgr.__exit__(type(error), error, error.__traceback__)
+        raise
     pending_state = state.get("pending_tool") or {}
     pending_status = ("pending_ui_action" if pending_state.get("ui_ack")
                       else "pending_approval" if pending_state else "completed")
@@ -1750,6 +1791,15 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
     total_lg_ms = round((time.monotonic() - request_started) * 1000)
     print(f"[AGENT TRACE] ✓ Done (LangGraph) | iter={state.get('iteration', 0)} status={pending_status} | {total_lg_ms}ms", flush=True)
     logger.info("LangGraph hoàn thành vòng lặp execution (iteration: %d, status: %s)", state.get("iteration", 0), pending_status)
+
+    # Close LangSmith session trace with final outputs.
+    _ls_ctx["outputs"] = {
+        "status": pending_status,
+        "iterations": state.get("iteration", 0),
+        "duration_ms": total_lg_ms,
+        "step_count": len(state.get("steps", [])),
+    }
+    _ls_ctx_mgr.__exit__(None, None, None)
     steps = state["steps"]
     pending = state.get("pending_tool")
     if pending:
@@ -1909,397 +1959,50 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
     session_id = request.session_id or "agent_default"
     task_coordinator.start(session_id, task=request.task)
     
-    supervisor_route = Specialist.SUPERVISOR
-    logger.info("[SUPERVISOR] starting task routing logic via A2A Handoff Tools")
-    retry_idx  = request.retry_message_index  # None ở request thường
+    retry_idx = request.retry_message_index
 
-    # Exact code citations are a read-only Coding Agent operation. Resolve
-    # them from disk before any model turn so a constrained completion cannot
-    # truncate the requested source or leave an unclosed Markdown code fence.
-    if supervisor_route.value == "code":
-        citation_result = _build_code_citation_result(task, session_id, req_start)
-        if citation_result is not None:
-            task_coordinator.finish(session_id, success=True)
-            if retry_idx is not None:
-                citation_result["retry_message_index"] = retry_idx
-            return _agent_response(citation_result, http_req)
-
-    # Đưa ra quyết định dùng LangGraph hay legacy loop
-    force_langgraph = FORCE_LANGGRAPH_AGENT
-    if request.force_langgraph is not None:
-        force_langgraph = request.force_langgraph
-
-    if force_langgraph:
-        use_langgraph = LANGGRAPH_AVAILABLE
-    else:
-        use_langgraph = USE_LANGGRAPH_AGENT and LANGGRAPH_AVAILABLE
-
-    print(f"[AGENT TRACE] ▶ Session={session_id} | LangGraph={'ON' if use_langgraph else 'OFF'} | Task={task[:80].replace(chr(10), ' ')}", flush=True)
+    print(f"[AGENT TRACE] ▶ Session={session_id} | LangGraph=ON | Task={task[:80].replace(chr(10), ' ')}", flush=True)
     logger.info("[MODE: AGENT] Task from %s: %s…", http_req.client.host, task[:80].replace("\n", " "))
 
-    # Fast-path key matching: deterministic, khong can LLM.
-    # Bỏ qua khi force_langgraph=True để ép LLM tự suy luận (dùng để test độ chính xác).
-    # A coding request may mention a UI action (for example, fixing DICOM
-    # loading). Keep it in the Code Agent so the UI matcher cannot hijack the
-    # plan or inject an unrelated expected application action.
-    if supervisor_route.value == "toolapp":
-        desktop_params, desktop_sequence = None, None
-    else:
-        desktop_params, desktop_sequence = None, None
-    if desktop_sequence:
-        workflow_id = _generate_action_id()
-        for workflow_params in desktop_sequence:
-            workflow_params["workflow_id"] = workflow_id
-    # Keep the bypass only for an explicit manifest workflow. A single
-    # matching action is insufficient evidence for a compound request, so it
-    # must go through LangGraph planning and LLM tool-calling.
-    if (supervisor_route.value == "toolapp" and desktop_params and desktop_sequence and not force_langgraph
-            and os.getenv("AGENT_UI_FASTPATH", "0") == "1"):
-        print(f"[AGENT TRACE] ⚡ Fast-path match: {desktop_params.get('action', '?')} (bypass LLM)", flush=True)
-        desktop_params, error = validate_action_params(desktop_params)
-        if error:
-            raise HTTPException(status_code=422, detail=error)
-        request_id = _generate_action_id()
-        desktop_params["request_id"] = request_id
-        fastpath_delegation = delegate(task, session_id, "application_action", desktop_params)
-        audit_agent("tool_delegated", fastpath_delegation)
-        with _pending_lock:
-            _pending_actions[request_id] = {
-                "tool": "application_action", "params": desktop_params,
-                "session_id": session_id, "task": task, "messages": [], "steps": [],
-                "iteration": 0, "temperature": request.temperature, "language": request.language,
-                "created_at": time.time(), "ui_ack": True,
-                "next_actions": (desktop_sequence or [])[1:],
-                "retry_message_index": retry_idx,
-            }
-            _save_pending_actions()
-        task_coordinator.update(session_id, request_id, status="waiting_ui_ack")
-        return _agent_response({
-            "status": "pending_ui_action",
-            "session_id": session_id,
-            "prior_step_count": 0,
-            "steps": [
-                {"type": "tool_call", "tool": "application_action", "params": desktop_params,
-                 "idempotency_key": fastpath_delegation.idempotency_key, "iteration": 0},
-            ],
-            "request_id": request_id,
-            "ui_action": {"request_id": request_id, "action": desktop_params["action"], "params": desktop_params},
-            "total_ms": round((time.monotonic() - req_start) * 1000),
-            **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
-        }, http_req)
-    elif desktop_params and force_langgraph:
-        print(f"[AGENT TRACE] ⚡ Fast-path match ignored (force_langgraph=True): {desktop_params.get('action', '?')} → going to LangGraph", flush=True)
-
-    # Build initial messages. The desktop owns persisted history; retain only
-    # conversational roles here so JSON Agent-step snapshots never reach LLM.
     system_prompt = _build_agent_system_prompt(request.language)
     if is_coding_task(task):
         system_prompt += "\n\n" + coding_instruction(CodingTaskContext(
             task=task, language=request.language, project_root=_safe_relpath(PROJECT_DIR, PROJECT_DIR),
         ))
 
-
-    # RAG nay duoc cung cap nhu mot tool dong (rag_search) thay vi inject vao system prompt.
-    # Chi inject mot luong nho context khi task KHONG phai UI action va RAG san sang,
-    # de tranh lam day context window voi thong tin khong lien quan.
-    if (ENABLE_RAG and rag_runtime.knowledge_chunks
-            and supervisor_route.value != "code"):
-        try:
-            doc_ctx, code_ctx, _ = rag_runtime.get_context(task)
-            if doc_ctx:
-                system_prompt += f"\n\n## RELEVANT DOCUMENTATION (tu khoa tim kiem: {task[:60]}):\n{doc_ctx[:1500]}"
-            if code_ctx:
-                system_prompt += f"\n\n## RELEVANT CODE (tu khoa tim kiem: {task[:60]}):\n{code_ctx[:1500]}"
-        except Exception:  # noqa: BLE001
-            pass
+    # Agent mode obtains project evidence through the explicit ``rag_search``
+    # tool. Do not eagerly append the same retrieval to the system prompt: it
+    # duplicates the subsequent tool result and can exhaust the 8k context
+    # window before the agent has a chance to answer from the retrieved data.
 
     history_messages: list[dict[str, str]] = []
     for entry in request.history:
         role = entry.get("role")
-        content = entry.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            history_messages.append({"role": role, "content": content[:32000]})
+        content_msg = entry.get("content")
+        if role in {"user", "assistant"} and isinstance(content_msg, str) and content_msg.strip():
+            history_messages.append({"role": role, "content": content_msg[:32000]})
 
     task_with_attachments = task
     if request.attachments:
         names = [os.path.basename(path) for path in request.attachments]
         task_with_attachments += "\n\n[Attached files: " + ", ".join(names) + "]"
 
-    if supervisor_route.value == "chatbot":
-        logger.info("[MODE: AGENT] Chatbot route fast-path (bypassing agent loop)")
-        from .chatbot_agent import ChatbotAgent
-        chatbot = ChatbotAgent(llm_runtime, rag_runtime)
-        image_uri = request.attachments[0] if request.attachments else None
-        
-        user_msg = {"role": "user", "content": task_with_attachments}
-        if request.attachments:
-            user_msg["attachments"] = request.attachments
-        messages_to_build = [*history_messages, user_msg]
-        
-        prepared_msgs, metadata = chatbot.build_messages(
-            messages_to_build, task, image_uri, request.language
-        )
-
-        def _run_chatbot(sink):
-            if backend_mode() != "llama_cpp":
-                resp = openai_compatible_completion(prepared_msgs, max_tokens=2048, temperature=request.temperature)
-                ans = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            else:
-                with llm_runtime.llm_lock:
-                    resp = llm_runtime.llm.create_chat_completion(
-                        messages=prepared_msgs, max_tokens=2048, temperature=request.temperature
-                    )
-                ans = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-            ans = chatbot.clean_answer(ans, metadata, "stop")
-            sink({"type": "final_answer", "content": ans, "iteration": 0})
-            task_coordinator.finish(session_id, success=True)
-            res = {
-                "status": "completed",
-                "session_id": session_id,
-                "prior_step_count": 0,
-                "steps": [{"type": "final_answer", "content": ans, "iteration": 0}],
-                "total_ms": round((time.monotonic() - req_start) * 1000),
-            }
-            if retry_idx is not None:
-                res["retry_message_index"] = retry_idx
-            return res
-
-        if "text/event-stream" in http_req.headers.get("accept", ""):
-            return _stream_langgraph_execution(_run_chatbot)
-            
-        def _dummy_sink(step): pass
-        return _agent_response(_run_chatbot(_dummy_sink), http_req)
-
-    if use_langgraph:
-        if "text/event-stream" in http_req.headers.get("accept", ""):
-            return _stream_langgraph_execution(
-                lambda sink: _run_langgraph_agent(system_prompt, task_with_attachments, session_id,
-                                                   request.temperature, request.language, req_start,
-                                                   initial_messages=[{"role": "system", "content": system_prompt},
-                                                                     *history_messages,
-                                                                     {"role": "user", "content": task_with_attachments}],
-                                                   event_sink=sink, supervisor_route=supervisor_route))
-        result = _run_langgraph_agent(
-            system_prompt, task_with_attachments, session_id, request.temperature, request.language, req_start,
-            initial_messages=[{"role": "system", "content": system_prompt}, *history_messages,
-                              {"role": "user", "content": task_with_attachments}], supervisor_route=supervisor_route)
-        if retry_idx is not None:
-            result["retry_message_index"] = retry_idx
-        return _agent_response(result, http_req)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        *history_messages,
-        {"role": "user", "content": task_with_attachments},
-    ]
-
-    steps = []
-    iteration = 0
-
-    while iteration < _AGENT_MAX_ITERATIONS:
-        iteration += 1
-
-        if task_coordinator.is_cancelled(session_id):
-            steps.append({"type": "cancelled", "content": "Task cancelled cooperatively.",
-                          "iteration": iteration})
-            break
-
-        # Estimate tokens and calculate budget
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        estimated_tokens = int(total_chars / CHARS_PER_TOKEN)
-        available_tokens = LLM_N_CTX - estimated_tokens - 400
-        max_tokens = min(2048, max(512, available_tokens))
-
-        if estimated_tokens >= LLM_N_CTX - 512:
-            steps.append({
-                "type": "error",
-                "content": "Context quá dài, dừng agent loop.",
-            })
-            break
-
-        # Call LLM
-        print(f"[AGENT TRACE] ── Iter {iteration}/{_AGENT_MAX_ITERATIONS}: Gọi LLM (~{estimated_tokens} tokens)", flush=True)
-        logger.info("Agent iter %d/%d | tokens≈%d", iteration, _AGENT_MAX_ITERATIONS, estimated_tokens)
-
-        try:
-            answer = _constrained_agent_completion(messages, max_tokens, request.temperature)
-        except Exception as e:
-            logger.error("Agent LLM error at iter %d: %s", iteration, e)
-            print(f"[AGENT TRACE] ── Iter {iteration}: Lỗi LLM: {e}", flush=True)
-            steps.append({"type": "error", "content": f"Lỗi LLM: {e}"})
-            break
-
-        answer = answer.strip()
-        print(f"[AGENT TRACE] ── Iter {iteration}: LLM output ({len(answer)} chars): {answer[:120].replace(chr(10), ' ')}", flush=True)
-        if not answer:
-            steps.append({"type": "error", "content": "LLM trả về response rỗng."})
-            break
-
-        # Parse: is it a tool call or final answer?
-        tool_name, tool_params = _parse_tool_call(answer)
-
-        if tool_name == "application_action":
-            canonical_params = _canonical_desktop_action(tool_params)
-            if canonical_params is not None:
-                tool_params = canonical_params
-
-        if tool_name is None:
-            # Final answer — no more tool calls
-            print(f"[AGENT TRACE] ── Iter {iteration}: Final answer", flush=True)
-            steps.append({
-                "type": "final_answer",
-                "content": answer,
-            })
-            break
-
-        clean_answer = strip_think_tags(answer)
-        think_text = clean_answer
-        if "```tool_call" in clean_answer:
-            think_text = clean_answer.split("```tool_call")[0].strip()
-        elif "{" in clean_answer:
-            think_text = clean_answer.split("{")[0].strip()
-            
-        if think_text:
-            steps.append({"type": "thinking", "content": think_text, "iteration": iteration})
-
-        print(f"[AGENT TRACE] ── Iter {iteration}: Tool call → {tool_name}({str(tool_params)[:80]})", flush=True)
-        # It's a tool call
-        steps.append({
-            "type": "tool_call",
-            "tool": tool_name,
-            "params": tool_params,
-            "iteration": iteration,
-        })
-
-        if tool_name == "application_action":
-            tool_params["request_id"] = _generate_action_id()
-            request_id = tool_params["request_id"]
-            with _pending_lock:
-                _pending_actions[request_id] = {
-                    "tool": tool_name, "params": tool_params, "session_id": session_id,
-                    "task": task, "messages": messages.copy(), "steps": steps.copy(),
-                    "iteration": iteration, "temperature": request.temperature,
-                    "language": request.language, "created_at": time.time(), "ui_ack": True,
-                    "retry_message_index": retry_idx,
-                }
-                _save_pending_actions()
-            return _agent_response({"status": "pending_ui_action", "session_id": session_id,
-                "request_id": request_id, "prior_step_count": 0, "steps": steps,
-                "ui_action": {"request_id": request_id, "action": tool_params["action"], "params": tool_params},
-                **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
-            }, http_req)
-
-        # Check if tool requires approval
-        if tool_name in _TOOLS_REQUIRING_APPROVAL:
-            action_id = _generate_action_id()
-            approval_scope = hashlib.sha256(task.encode()).hexdigest()[:16]
-            approval_preview = {"scope_id": approval_scope, "goal": task,
-                                "tool": tool_name, "params": tool_params}
-            with _pending_lock:
-                _pending_actions[action_id] = {
-                    "tool": tool_name,
-                    "params": tool_params,
-                    "session_id": session_id,
-                    "task": task,
-                    "messages": messages.copy(),
-                    "steps": steps.copy(),
-                    "iteration": iteration,
-                    "temperature": request.temperature,
-                    "language": request.language,
-                    "created_at": time.time(),
-                    "retry_message_index": retry_idx,
-                    "approval_scope": approval_scope,
-                    "approval_preview": approval_preview,
-                }
-                _save_pending_actions()
-
-            task_coordinator.update(session_id, action_id, status="waiting_approval")
-
-            steps.append({
-                "type": "pending_approval",
-                "action_id": action_id,
-                "tool": tool_name,
-                "params": tool_params,
-                "description": tool_params.get("description", f"Thực thi {tool_name}"),
-                "approval_scope": approval_scope,
-                "preview": approval_preview,
-            })
-
-            # Return immediately — client must approve/reject
-            total_ms = (time.monotonic() - req_start) * 1000
-            logger.info("Agent paused for approval | action=%s tool=%s | %.0fms", action_id, tool_name, total_ms)
-            return _agent_response({
-                "status": "pending_approval",
-                "session_id": session_id,
-                "prior_step_count": 0,
-                "steps": steps,
-                "action_id": action_id,
-                "total_ms": round(total_ms),
-                "approval_scope": approval_scope,
-                "approval_preview": approval_preview,
-                **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
-            }, http_req)
-
-        # Execute safe tool
-        if tool_name == "_validation_error":
-            tool_result = {"error": f"Lỗi xác thực tham số tool '{tool_params.get('tool')}': {tool_params.get('error')}"}
-        elif tool_name in TOOL_REGISTRY.names():
-            try:
-                tool_result = TOOL_REGISTRY.execute(tool_name, tool_params)
-            except Exception as e:
-                tool_result = {"error": f"Tool exception: {e}"}
-        else:
-            tool_result = {"error": f"Tool không tồn tại: {tool_name}"}
-
-        result_preview = str(tool_result)[:120].replace("\n", " ")
-        print(f"[AGENT TRACE] ── Iter {iteration}: Tool result ← {result_preview}", flush=True)
-        steps.append({
-            "type": "tool_result",
-            "tool": tool_name,
-            "result": tool_result,
-            "iteration": iteration,
-        })
-
-        # Append to conversation for next iteration
-        messages.append({"role": "assistant", "content": answer})
-
-        # Format tool result for LLM
-        result_text = json.dumps(tool_result, ensure_ascii=False, indent=2)
-        if len(result_text) > 8000:
-            result_text = result_text[:8000] + "\n... [truncated]"
-        messages.append({
-            "role": "user",
-            "content": f"Tool `{tool_name}` returned:\n```json\n{result_text}\n```\n\nContinue with your analysis or call another tool if needed.",
-        })
-
-    # If we exhausted iterations without final answer
-    if not any(s["type"] == "final_answer" for s in steps):
-        steps.append({
-            "type": "final_answer",
-            "content": "⚠️ Agent đã đạt giới hạn iterations mà chưa hoàn thành. "
-                       "Vui lòng chia nhỏ task hoặc hỏi cụ thể hơn.",
-        })
-
-    total_ms = (time.monotonic() - req_start) * 1000
-    print(f"[AGENT TRACE] ✓ Done (legacy) | {iteration} iters, {len(steps)} steps, {round(total_ms)}ms", flush=True)
-    logger.info(
-        "Agent done | iterations=%d steps=%d | %.0fms",
-        iteration, len(steps), total_ms,
-    )
-
-    cancelled = task_coordinator.is_cancelled(session_id)
-    task_coordinator.finish(session_id, success=not cancelled, iterations=iteration)
-    return _agent_response({
-        "status": "cancelled" if cancelled else "completed",
-        "session_id": session_id,
-        "prior_step_count": 0,
-        "steps": steps,
-        "iterations": iteration,
-        "total_ms": round(total_ms),
-        **({"retry_message_index": retry_idx} if retry_idx is not None else {}),
-    }, http_req)
-
+    if "text/event-stream" in http_req.headers.get("accept", ""):
+        return _stream_langgraph_execution(
+            lambda sink: _run_langgraph_agent(system_prompt, task_with_attachments, session_id,
+                                               request.temperature, request.language, req_start,
+                                               initial_messages=[{"role": "system", "content": system_prompt},
+                                                                 *history_messages,
+                                                                 {"role": "user", "content": task_with_attachments}],
+                                               event_sink=sink, supervisor_route=Specialist.SUPERVISOR))
+    result = _run_langgraph_agent(
+        system_prompt, task_with_attachments, session_id, request.temperature, request.language, req_start,
+        initial_messages=[{"role": "system", "content": system_prompt}, *history_messages,
+                          {"role": "user", "content": task_with_attachments}], supervisor_route=Specialist.SUPERVISOR)
+    
+    if retry_idx is not None:
+        result["retry_message_index"] = retry_idx
+    return _agent_response(result, http_req)
 
 @agent_router.post("/v1/agent/cancel")
 def agent_cancel(request: AgentCancelRequest):

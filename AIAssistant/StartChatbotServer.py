@@ -169,6 +169,41 @@ def reload_rag():
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
+# ── A2A Agent Card Discovery ─────────────────────────────────────────────────
+# Serves the A2A Agent Card at the well-known endpoint so external agents can
+# discover this server's capabilities.  The card is built dynamically from the
+# Specialist enum — adding a new specialist automatically updates the card.
+
+try:
+    from modules.a2a_protocol import (
+        A2A_ENABLED as _a2a_on,
+    )
+    from modules.a2a_protocol import (
+        A2A_REMOTE_AGENTS as _a2a_remotes,
+    )
+    from modules.a2a_protocol import (
+        build_agent_card,
+        discover_remote_agents,
+    )
+    _a2a_import_ok = True
+except ImportError:
+    _a2a_import_ok = False
+
+if _a2a_import_ok:
+    @app.get("/.well-known/agent.json")
+    def agent_card(request: Request):
+        """A2A Agent Card discovery endpoint."""
+        return build_agent_card(url=str(request.base_url).rstrip("/")).to_dict()
+
+    # Discover remote agents at startup when configured.
+    if _a2a_on and _a2a_remotes:
+        try:
+            discovered = discover_remote_agents(_a2a_remotes)
+            logger.info("A2A: discovered %d remote agent(s)", len(discovered))
+        except Exception as error:  # noqa: BLE001
+            logger.warning("A2A: remote agent discovery failed: %s", error)
+
+
 @app.post("/admin/reload-agent")
 def reload_agent():
     try:

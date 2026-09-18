@@ -106,6 +106,32 @@ warnings.filterwarnings("ignore", module="keras")
 MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR    = os.path.abspath(os.path.join(MODULES_DIR, ".."))
 PROJECT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+
+
+def _load_local_env() -> None:
+    """Load local server settings without requiring python-dotenv.
+
+    ``AIAssistant/.env`` is intentionally Git-ignored and only fills values
+    that the launching process did not already provide.  Process environment
+    variables therefore remain the production/deployment source of truth.
+    """
+    env_path = os.path.join(BASE_DIR, ".env")
+    try:
+        with open(env_path, encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key.replace("_", "").isalnum():
+                    os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
+_load_local_env()
 APP_DATA_DIR = os.environ.get("APP_DATA_DIR", PROJECT_DIR)
 DOCS_DIR    = os.path.join(PROJECT_DIR, "Docs")
 AI_ASSISTANT_DOCS_DIR = os.path.join(BASE_DIR, "Docs")

@@ -59,8 +59,8 @@ namespace AppConstants {
         constexpr int    VISION_INFERENCE_TIMEOUT_MS = 1800000; // 30 min
         constexpr int    INFERENCE_TIMEOUT_MS       = TEXT_INFERENCE_TIMEOUT_MS;
 
-        inline QString apiEndpoint() {
-            return QStringLiteral("http://127.0.0.1:%1/v1/chat/completions").arg(SERVER_PORT);
+        inline QString baseUrl() {
+            return QStringLiteral("http://127.0.0.1:%1").arg(SERVER_PORT);
         }
 
         inline QString adminEndpoint(const QString &path) {
