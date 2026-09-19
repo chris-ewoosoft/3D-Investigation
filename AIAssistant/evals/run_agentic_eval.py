@@ -269,26 +269,28 @@ def _eval_a2a_agent_cards() -> list[EvalResult]:
     return results
 
 
-def _eval_a2a_fallback() -> list[EvalResult]:
-    """A2A router falls back to local when disabled or no remote agents."""
+def _eval_a2a_unavailable() -> list[EvalResult]:
+    """A2A router reports unavailable instead of silently executing locally."""
     results: list[EvalResult] = []
     if not _a2a_eval_ok:
         results.append(EvalResult(
-            tool="(a2a)", scenario="a2a-fallback-skipped",
+            tool="(a2a)", scenario="a2a-unavailable-skipped",
             passed=True, specialist="n/a",
             detail="a2a_protocol not importable — test skipped",
         ))
         return results
 
-    router = A2ARouter(local_execute=lambda sid, t, p: {"executed": True})
-    # With no remote agents registered, should always fall back to local.
+    router = A2ARouter()
+    # With no remote agent registered, the caller receives an explicit remote
+    # outcome and decides whether a separately-authorised local execution is
+    # appropriate.
     for specialist in Specialist:
         result = router.route(specialist.value, "eval-task")
-        ok = result.get("source") == "local"
+        ok = result.get("source") == "remote" and result.get("status") == "unavailable"
         results.append(EvalResult(
-            tool=specialist.value, scenario="a2a-fallback",
+            tool=specialist.value, scenario="a2a-unavailable",
             passed=ok, specialist=specialist.value,
-            detail="" if ok else f"source={result.get('source')}",
+            detail="" if ok else f"source={result.get('source')} status={result.get('status')}",
         ))
     return results
 
@@ -361,7 +363,7 @@ _ALL_SCENARIOS = [
     _eval_prefer_code_override,
     _eval_none_tool,
     _eval_a2a_agent_cards,
-    _eval_a2a_fallback,
+    _eval_a2a_unavailable,
     _eval_langsmith_fallback,
 ]
 

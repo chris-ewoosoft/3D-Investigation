@@ -1,0 +1,5 @@
+[agents]
+# Capability manifest for this deployment.  Agent Cards are derived from this
+# configuration, not source-code enums. Plugins may extend it through a future
+# deployment manifest without changing the application core.
+capabilities = ["supervisor", "chatbot", "research", "code", "desktop_workflow"]

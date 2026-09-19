@@ -9,7 +9,6 @@ contract.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -26,18 +25,11 @@ MCP_AVAILABLE = FastMCP is not None
 
 
 def _dispatch(tool_name: str, parameters: dict[str, Any]) -> str:
-    """Call the existing, policy-enforced implementation and encode MCP text."""
-    # Import lazily: agent_module imports the MCP client adapter.
-    from . import agent_module
+    """Adapt an MCP call to the platform's single policy-enforced tool path."""
+    from ai_assistant.bootstrap.runtime import execute_tool
 
     parameters = {name: value for name, value in parameters.items() if value is not None}
-    executor: Callable[[dict[str, Any]], dict[str, Any]] | None = agent_module.MCP_LOCAL_EXECUTORS.get(tool_name)
-    if executor is None:
-        return json.dumps({"error": f"MCP tool is not available: {tool_name}"}, ensure_ascii=False)
-    try:
-        return json.dumps(executor(parameters), ensure_ascii=False)
-    except Exception as error:  # noqa: BLE001 - MCP must return tool failures to the model.
-        return json.dumps({"error": f"MCP tool failed: {error}"}, ensure_ascii=False)
+    return json.dumps(execute_tool(tool_name, parameters), ensure_ascii=False)
 
 
 mcp = None

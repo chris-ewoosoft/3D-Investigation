@@ -1,0 +1,9 @@
+[runtime]
+enable_mcp = true
+enable_a2a = true
+allow_remote_a2a = false
+
+[a2a]
+# Remote delegation is disabled until each endpoint has been reviewed and
+# added here. Restricted and regulated payloads are never sent remotely.
+trusted_endpoints = []

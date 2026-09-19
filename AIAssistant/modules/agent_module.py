@@ -28,7 +28,10 @@ from .sandbox import (
 )
 from .observability import langsmith_trace, record_approval, record_schema_error, record_tool, span
 from .inference import backend_mode, openai_compatible_completion, strip_think_tags
-from .mcp_client import call_tool as call_mcp_tool
+from ai_assistant.bootstrap.runtime import (
+    execute_approved_tool as execute_approved_platform_tool,
+    execute_tool as execute_platform_tool,
+)
 from .coding_agent import CodingTaskContext, instruction as coding_instruction, is_coding_task
 from .agent_tools import ToolRegistry
 from . import lsp_client as _lsp_client
@@ -1215,8 +1218,8 @@ MCP_LOCAL_EXECUTORS = {
     # multi_replace_file_content, create_directory require approval
 }
 
-# Safe tools use the local Streamable HTTP MCP endpoint. Approval-gated write
-# tools do not enter this map and remain behind the existing approval flow.
+# Safe tools invoke the platform directly. MCP is an external protocol adapter
+# and is deliberately not used as an HTTP loopback transport.
 def tool_transfer_to_code_agent(params: dict) -> dict:
     return {"status": "transferred_to_code", "intent": params.get("intent")}
 
@@ -1227,9 +1230,7 @@ def tool_transfer_to_chatbot_agent(params: dict) -> dict:
     return {"status": "transferred_to_chatbot", "intent": params.get("intent")}
 
 _TOOL_EXECUTORS = {
-    name: (lambda params, tool_name=name: call_mcp_tool(
-        tool_name, params, timeout=_TOOL_DEFINITIONS.get(tool_name, _TOOL_DEFINITIONS["application_action"])["timeout_seconds"],
-    ))
+    name: (lambda params, tool_name=name: execute_platform_tool(tool_name, params))
     for name in MCP_LOCAL_EXECUTORS
 }
 _TOOL_EXECUTORS.update({
@@ -1289,6 +1290,26 @@ def _execute_approved_run_command(params: dict) -> dict:
         return {"error": f"Invalid command working directory: {cwd}"}
 
     return run_sandboxed_command(command, abs_cwd, timeout)
+
+
+def platform_executors() -> dict[str, Callable[[dict], dict]]:
+    """Return all legacy implementations for the new platform adapter.
+
+    This function is the migration seam: registration happens at composition
+    time, rather than through module import side effects.
+    """
+    return {
+        **MCP_LOCAL_EXECUTORS,
+        "transfer_to_code_agent": tool_transfer_to_code_agent,
+        "transfer_to_toolapp_agent": tool_transfer_to_toolapp_agent,
+        "transfer_to_chatbot_agent": tool_transfer_to_chatbot_agent,
+        "write_file": _execute_approved_write_file,
+        "run_command": _execute_approved_run_command,
+        "patch_file": _execute_approved_patch_file,
+        "replace_file_content": _execute_approved_replace_file_content,
+        "multi_replace_file_content": _execute_approved_multi_replace_file_content,
+        "create_directory": _execute_approved_create_directory,
+    }
 
 
 # ── Agent System Prompt ───────────────────────────────────────────────────────
@@ -1687,7 +1708,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
             with span("agent.a2a_delegate", tool=tool_name,
                       specialist=delegation.specialist.value,
                       remote_endpoint=delegation.remote_endpoint):
-                result = A2ARouter(local_execute=execute_local).route(
+                result = A2ARouter().route(
                     delegation.specialist.value, task, remote_payload,
                 )
             audit_agent("tool_transport", delegation, source=result.get("source", "local"))
@@ -2139,20 +2160,7 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
     tool_params = action["params"]
 
     approved_tool_started = time.monotonic()
-    if tool_name == "write_file":
-        tool_result = _execute_approved_write_file(tool_params)
-    elif tool_name == "run_command":
-        tool_result = _execute_approved_run_command(tool_params)
-    elif tool_name == "patch_file":
-        tool_result = _execute_approved_patch_file(tool_params)
-    elif tool_name == "replace_file_content":
-        tool_result = _execute_approved_replace_file_content(tool_params)
-    elif tool_name == "multi_replace_file_content":
-        tool_result = _execute_approved_multi_replace_file_content(tool_params)
-    elif tool_name == "create_directory":
-        tool_result = _execute_approved_create_directory(tool_params)
-    else:
-        tool_result = {"error": f"Unknown approval tool: {tool_name}"}
+    tool_result = execute_approved_platform_tool(tool_name, tool_params)
     record_tool(tool_name, "error" not in tool_result, time.monotonic() - approved_tool_started)
 
     prior_step_count = len(action["steps"])

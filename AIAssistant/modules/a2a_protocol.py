@@ -200,7 +200,7 @@ def get_remote_registry() -> dict[str, RemoteAgent]:
 
 
 class A2ARouter:
-    """Route delegations to remote A2A agents with in-process fallback.
+    """Route delegations to remote A2A agents without implicit fallback.
 
     The router checks whether a matching remote agent exists for the target
     specialist.  If so, it sends the task via JSON-RPC 2.0 over HTTP.  If the
@@ -212,9 +212,6 @@ class A2ARouter:
     it will simply always use the local path.
     """
 
-    def __init__(self, local_execute: Any | None = None) -> None:
-        self._local_execute = local_execute
-
     def find_remote(self, specialist_id: str) -> RemoteAgent | None:
         """Find a remote agent whose skills include ``specialist_id``."""
         for agent in _remote_registry.values():
@@ -224,7 +221,7 @@ class A2ARouter:
 
     def route(self, specialist_id: str, task: str,
               params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Attempt remote A2A dispatch; fall back to local execution.
+        """Attempt remote A2A dispatch and return its explicit outcome.
 
         Parameters
         ----------
@@ -241,11 +238,19 @@ class A2ARouter:
         actual result payload.
         """
         if not a2a_available():
-            return self._execute_local(specialist_id, task, params)
+            return {
+                "source": "remote",
+                "status": "unavailable",
+                "error": "A2A transport is disabled or unavailable",
+            }
 
         remote = self.find_remote(specialist_id)
         if remote is None:
-            return self._execute_local(specialist_id, task, params)
+            return {
+                "source": "remote",
+                "status": "unavailable",
+                "error": f"No trusted remote agent supports {specialist_id}",
+            }
 
         # Attempt remote JSON-RPC call.
         try:
@@ -258,17 +263,12 @@ class A2ARouter:
                 "A2A remote call failed (specialist=%s url=%s): %s — falling back to local",
                 specialist_id, remote.url, error,
             )
-            return self._execute_local(specialist_id, task, params)
-
-    def _execute_local(self, specialist_id: str, task: str,
-                       params: dict[str, Any] | None) -> dict[str, Any]:
-        """Fallback: delegate to the in-process execution path."""
-        if self._local_execute is not None:
-            result = self._local_execute(specialist_id, task, params)
-            if isinstance(result, dict):
-                return {"source": "local", **result}
-            return {"source": "local", "result": result}
-        return {"source": "local", "status": "no_executor"}
+            return {
+                "source": "remote",
+                "status": "failed",
+                "agent_url": remote.url,
+                "error": str(error),
+            }
 
     @staticmethod
     def _call_remote(agent: RemoteAgent, specialist_id: str,

@@ -93,6 +93,9 @@ CMakeLists.txt.user*
 /AIAssistant/Docs/
 /AIAssistant/logs/
 /AIAssistant/agent_audit.jsonl
+/AIAssistant/tasks.sqlite
+/AIAssistant/AIAssistant/
+/AIAssistant/.env
 /AIComputerVision/runs/
 
 # Custom App Ignores

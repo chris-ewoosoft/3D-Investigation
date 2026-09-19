@@ -9,9 +9,17 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+_PACKAGE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from ai_assistant.adapters.a2a import build_a2a_router
+from ai_assistant.adapters.orchestration import LegacyConstrainedCompletion
+from ai_assistant.application.agent_runs import AgentRunService
+from ai_assistant.bootstrap import PlatformContainer, build_container, create_app
+from ai_assistant.domain.tasks import AgentTask
 from modules import agent_module, llm_module, mcp_server, rag_module
 from modules.chatbot_agent import ChatbotAgent
 from modules.config import (
@@ -61,24 +69,44 @@ async def lifespan(_: FastAPI):
     total = time.monotonic() - _SERVER_START_TIME
     logger.info("Server ready in %.1fs — http://127.0.0.1:8080", total)
     print(f"[SUCCESS] AI Server started successfully ({total:.1f}s)", flush=True)
-    if mcp_server.MCP_AVAILABLE:
-        async with mcp_server.lifespan():
+    try:
+        if mcp_server.MCP_AVAILABLE:
+            async with mcp_server.lifespan():
+                yield
+        else:
+            logger.warning("MCP SDK is not installed; MCP endpoint is unavailable")
             yield
-    else:
-        logger.warning("MCP SDK is not installed; MCP endpoint is unavailable")
-        yield
-    logger.info("Server shutdown after %.1fs", time.monotonic() - _SERVER_START_TIME)
+    finally:
+        platform.tasks.close()
+        logger.info("Server shutdown after %.1fs", time.monotonic() - _SERVER_START_TIME)
 
 
-app = FastAPI(title="3D-Reconstruction AI Server", version="2.4.0", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "GET", "DELETE"],
-    allow_headers=["*"],
-    expose_headers=["Mcp-Session-Id"],
+def _execute_a2a_task(task: AgentTask) -> dict:
+    """Run a framework-independent agent loop inside the durable A2A lifecycle."""
+    if llm_module.llm is None:
+        raise RuntimeError("LLM is not initialized")
+    return _agent_run_service.run(task)
+
+
+platform: PlatformContainer = build_container(
+    BASE_DIR,
+    agent_module.AGENT_TOOLS,
+    agent_module.platform_executors(),
+    _execute_a2a_task,
 )
+
+_agent_run_service = AgentRunService(
+    complete=LegacyConstrainedCompletion(agent_module._constrained_agent_completion),
+    tools=platform.tools,
+    tool_descriptions=lambda: "\n".join(
+        f"- {spec.name}: {spec.description}" for spec in platform.plugins.specs()
+    ),
+)
+
+app = create_app(platform.settings, lifespan)
 app.include_router(agent_module.agent_router)
+if platform.settings.enable_a2a:
+    app.include_router(build_a2a_router(platform.tasks, "3D-Reconstruction AI Assistant", "3.0.0"))
 chatbot_agent = ChatbotAgent(llm_module, rag_module)
 if mcp_server.MCP_AVAILABLE:
     app.mount("/mcp", mcp_server.asgi_app())
@@ -173,36 +201,6 @@ def reload_rag():
 # Serves the A2A Agent Card at the well-known endpoint so external agents can
 # discover this server's capabilities.  The card is built dynamically from the
 # Specialist enum — adding a new specialist automatically updates the card.
-
-try:
-    from modules.a2a_protocol import (
-        A2A_ENABLED as _a2a_on,
-    )
-    from modules.a2a_protocol import (
-        A2A_REMOTE_AGENTS as _a2a_remotes,
-    )
-    from modules.a2a_protocol import (
-        build_agent_card,
-        discover_remote_agents,
-    )
-    _a2a_import_ok = True
-except ImportError:
-    _a2a_import_ok = False
-
-if _a2a_import_ok:
-    @app.get("/.well-known/agent.json")
-    def agent_card(request: Request):
-        """A2A Agent Card discovery endpoint."""
-        return build_agent_card(url=str(request.base_url).rstrip("/")).to_dict()
-
-    # Discover remote agents at startup when configured.
-    if _a2a_on and _a2a_remotes:
-        try:
-            discovered = discover_remote_agents(_a2a_remotes)
-            logger.info("A2A: discovered %d remote agent(s)", len(discovered))
-        except Exception as error:  # noqa: BLE001
-            logger.warning("A2A: remote agent discovery failed: %s", error)
-
 
 @app.post("/admin/reload-agent")
 def reload_agent():
@@ -322,6 +320,13 @@ async def health():
         "max_context": rag_module.MAX_CONTEXT_CHARS, "model": llm_module.active_model_desc,
         "is_vision": llm_module.is_vision_model,
         "model_idx": MODEL_IDX,
+        "platform": {
+            "version": app.version,
+            "registered_tools": len(platform.plugins.specs()),
+            "mcp_enabled": platform.settings.enable_mcp,
+            "a2a_enabled": platform.settings.enable_a2a,
+            "remote_a2a_enabled": platform.settings.allow_remote_a2a,
+        },
     }
 
 

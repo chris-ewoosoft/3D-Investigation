@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from time import time
+from typing import Any
+from uuid import uuid4
+
+from .security import DataClassification, ExecutionOrigin
+
+
+class TaskStatus(StrEnum):
+    SUBMITTED = "submitted"
+    WORKING = "working"
+    INPUT_REQUIRED = "input_required"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
+
+
+_TERMINAL = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELED, TaskStatus.REJECTED}
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTask:
+    id: str
+    capability: str
+    message: str
+    context_id: str | None
+    metadata: dict[str, Any]
+    classification: DataClassification
+    status: TaskStatus = TaskStatus.SUBMITTED
+    origin: ExecutionOrigin = ExecutionOrigin.LOCAL
+    created_at: float = field(default_factory=time)
+    updated_at: float = field(default_factory=time)
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+    @classmethod
+    def new(cls, capability: str, message: str, *, context_id: str | None = None,
+            metadata: dict[str, Any] | None = None,
+            classification: DataClassification = DataClassification.INTERNAL) -> "AgentTask":
+        return cls(
+            id=f"task-{uuid4()}", capability=capability, message=message,
+            context_id=context_id, metadata=metadata or {}, classification=classification,
+        )
+
+    def transition(self, status: TaskStatus, *, result: dict[str, Any] | None = None,
+                   error: str | None = None) -> "AgentTask":
+        if self.status in _TERMINAL:
+            raise ValueError(f"Task {self.id} is terminal ({self.status})")
+        if status == TaskStatus.SUBMITTED:
+            raise ValueError("A task cannot transition back to submitted")
+        return AgentTask(
+            id=self.id, capability=self.capability, message=self.message, context_id=self.context_id,
+            metadata=dict(self.metadata), classification=self.classification, status=status, origin=self.origin,
+            created_at=self.created_at, updated_at=time(), result=result, error=error,
+        )
+
+    def with_metadata(self, metadata: dict[str, Any]) -> "AgentTask":
+        """Return a durable task snapshot with updated execution metadata."""
+        return AgentTask(
+            id=self.id, capability=self.capability, message=self.message, context_id=self.context_id,
+            metadata=dict(metadata), classification=self.classification, status=self.status, origin=self.origin,
+            created_at=self.created_at, updated_at=time(), result=self.result, error=self.error,
+        )

@@ -1,0 +1,2 @@
+[plugins]
+enabled = ["builtin.legacy-tools"]

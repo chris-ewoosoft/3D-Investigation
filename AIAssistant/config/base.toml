@@ -1,0 +1,9 @@
+[runtime]
+enable_mcp = true
+enable_a2a = true
+allow_remote_a2a = false
+
+[api]
+# Desktop UI uses loopback requests; browser clients must be explicitly added
+# per deployment instead of accepting every origin.
+allowed_origins = ["http://127.0.0.1", "http://localhost"]
