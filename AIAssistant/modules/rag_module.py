@@ -1,6 +1,8 @@
 from .config import *  # noqa: I001
 from .config import _safe_relpath
 
+import re
+
 
 class _E5LlamaEmbedding:
     """Adapter that lets LlamaIndex use the application's E5 encoder/prefixes."""
@@ -57,6 +59,34 @@ def _tokenize_vn(text: str) -> list:
     
     tokens = latin_tokens + viet_tokens
     return [tk for tk in tokens if tk not in stopwords]
+
+
+_PROJECT_ROLE_QUERY_ALIASES = (
+    (r"\bteam\s*lead\b|\bteamlead\b|\btruong\s*nhom\b|\btrưởng\s*nhóm\b",
+     "team lead trưởng nhóm leader"),
+    (r"\bdev\s*manager\b|\bdevmanager\b|\bdevelopment\s*manager\b|\bquản\s*lý\s*phát\s*triển\b",
+     "dev manager development manager quản lý phát triển"),
+    (r"\bproject\s*manager\b|\bquan\s*ly\s*du\s*an\b|\bquản\s*lý\s*dự\s*án\b|\bpm\b",
+     "project manager quản lý dự án pm"),
+    (r"\bhr\s*manager\b|\bhrmanager\b|\bhuman\s*resources\s*manager\b|\bquản\s*lý\s*nhân\s*sự\b",
+     "hr manager human resources manager quản lý nhân sự"),
+    (r"\bky\s*su\b|\bkỹ\s*sư\b|\bengineer\b|\bdeveloper\b",
+     "kỹ sư engineer developer"),
+)
+
+
+def _expand_project_role_query(query: str) -> str:
+    """Make role-title searches robust to English/Vietnamese title variants.
+
+    The expansion happens at retrieval time, so it improves existing indexes
+    immediately and does not require rebuilding cached embeddings.
+    """
+    normalized = " ".join(_tokenize_vn(query))
+    aliases = [aliases for pattern, aliases in _PROJECT_ROLE_QUERY_ALIASES
+               if re.search(pattern, normalized)]
+    if not aliases:
+        return query
+    return f"{query} {' '.join(aliases)} thông tin vai trò nhiệm vụ trách nhiệm"
 
 
 # ─── 8. Typed chunk ───────────────────────────────────────────────────────────
@@ -902,8 +932,9 @@ def hybrid_retrieve(query: str, query_image_b64: str | None = None, k: int = 30,
         return []
 
     candidate_limit = max(1, min(int(k), 30))
-    dense = vector_retriever.retrieve(query)[:candidate_limit]
-    sparse = bm25_retriever.retrieve(query)[:candidate_limit]
+    retrieval_query = _expand_project_role_query(query)
+    dense = vector_retriever.retrieve(retrieval_query)[:candidate_limit]
+    sparse = bm25_retriever.retrieve(retrieval_query)[:candidate_limit]
     dense_ids = [item.node.metadata["chunk_index"] for item in dense
                  if item.score is None or item.score >= SIMILARITY_THRESHOLD]
     sparse_ids = [item.node.metadata["chunk_index"] for item in sparse]
@@ -958,14 +989,16 @@ def get_context(query: str, query_image_b64: str | None = None, result_k: int = 
     if not ENABLE_RAG:
         return "", "", []
 
-    # Bước 1: Hybrid retrieve
+    # Bước 1: Hybrid retrieve.  Use the same title expansion for reranking so
+    # English/Vietnamese role aliases are scored consistently end-to-end.
+    retrieval_query = _expand_project_role_query(query)
     candidate_pool = min(30, max(12, int(result_k) * 3))
     candidates = hybrid_retrieve(query, query_image_b64=query_image_b64,
                                  k=candidate_pool, final_k=candidate_pool)
 
     # Bước 2: Cross-encoder re-rank
     if USE_RERANKER and query:
-        candidates = _rerank(query, candidates)
+        candidates = _rerank(retrieval_query, candidates)
         candidates = candidates[:RERANKER_TOP_K]
     else:
         candidates = candidates[:12]

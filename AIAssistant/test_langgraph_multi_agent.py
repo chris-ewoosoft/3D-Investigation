@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -8,6 +9,96 @@ from LangGraphAgent import LocalAgentGraph, _summarize_messages
 
 
 class LangGraphMultiAgentTests(unittest.TestCase):
+    def test_project_role_without_a_plan_forces_rag_before_answering(self):
+        calls = []
+
+        graph = LocalAgentGraph(
+            complete=lambda _messages, _temperature: '{"kind":"step_answer","content":"Teamlead điều phối dự án."}',
+            parse=lambda _text: ("_step_answer", {"content": "Teamlead điều phối dự án."}),
+            execute=lambda tool, params: calls.append((tool, params)) or {
+                "found": True, "results": [{"content": "Teamlead evidence"}],
+            },
+            needs_approval=lambda _tool: False,
+            max_iterations=3,
+            plan_complete=lambda _messages, _temperature: '{"requires_plan": false, "steps": []}',
+        )
+
+        state = graph.run(
+            [{"role": "system", "content": "test"},
+             {"role": "user", "content": "Teamlead trong dự án là ai?"}],
+            "single-turn-step-answer-test", 0.1,
+        )
+
+        self.assertEqual(state["iteration"], 2)
+        self.assertEqual(state["steps"][-1]["type"], "final_answer")
+        self.assertEqual(state["steps"][-1]["content"], "Teamlead điều phối dự án.")
+        self.assertEqual(calls[0][0], "rag_search")
+        self.assertEqual(calls[0][1]["top_k"], 8)
+        self.assertIn("team lead", calls[0][1]["query"])
+
+    def test_mixed_plan_enforces_rag_llm_and_2d_ui_steps_independently(self):
+        calls = []
+        answers = iter([
+            '{"kind":"step_answer","content":"Kỹ sư A phụ trách phần xử lý ảnh."}',
+            "AI Agent là hệ thống có thể nhận biết mục tiêu, suy luận và thực hiện hành động.",
+        ])
+
+        def parse(text):
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                return None, None
+            if payload.get("kind") == "step_answer":
+                return "_step_answer", {"content": payload["content"]}
+            if payload.get("kind") == "tool":
+                return payload["tool"], payload["params"]
+            return None, None
+
+        def execute(tool, params):
+            calls.append((tool, params))
+            if tool == "rag_search":
+                return {"found": True, "results": [{"content": "Kỹ sư A"}]}
+            self.assertEqual((tool, params), ("application_action", {"action": "viewer.load_2d"}))
+            return {"pending_ui_ack": True, "action": "viewer.load_2d"}
+
+        graph = LocalAgentGraph(
+            complete=lambda _messages, _temperature: next(answers),
+            parse=parse,
+            execute=execute,
+            needs_approval=lambda _tool: False,
+            max_iterations=6,
+            plan_complete=lambda _messages, _temperature: json.dumps({
+                "requires_plan": True,
+                "steps": [
+                    "Thông tin Kỹ sư trong dự án",
+                    "Khái niệm AI Agent",
+                    "Tải ảnh 2D",
+                ],
+            }),
+        )
+        state = graph.run(
+            [{"role": "system", "content": "test"},
+             {"role": "user", "content": "Kỹ sư trong dự án, AI Agent và tải ảnh 2D"}],
+            "mixed-plan-contract-test", 0.1,
+        )
+
+        self.assertEqual(calls, [
+            ("rag_search", {"query": "Thông tin Kỹ sư trong dự án"}),
+            ("application_action", {"action": "viewer.load_2d"}),
+        ])
+        self.assertEqual(
+            [step["content"] for step in state["steps"] if step.get("type") == "step_answer"],
+            [
+                "Kỹ sư A phụ trách phần xử lý ảnh.",
+                "AI Agent là hệ thống có thể nhận biết mục tiêu, suy luận và thực hiện hành động.",
+            ],
+        )
+        self.assertEqual(
+            [step["params"]["action"] for step in state["steps"]
+             if step.get("type") == "tool_call" and step.get("tool") == "application_action"],
+            ["viewer.load_2d"],
+        )
+
     def test_context_compactor_keeps_task_and_stays_bounded(self):
         messages = [
             {"role": "system", "content": "SYSTEM " + "x" * 9000},
@@ -18,7 +109,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
             for _ in range(8)
         )
         compacted = _summarize_messages(messages)
-        self.assertLessEqual(sum(len(item["content"]) for item in compacted), 14000)
+        self.assertLessEqual(sum(len(item["content"]) for item in compacted), 32000)
         self.assertIn("original task", "\n".join(item["content"] for item in compacted))
 
     def test_context_compaction_returns_to_reasoning_without_a_tool_call(self):
@@ -64,7 +155,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
 
         self.assertEqual(state["steps"][-1]["type"], "final_answer")
         self.assertGreaterEqual(len(context_sizes), 2)
-        self.assertLessEqual(context_sizes[-1], 14000)
+        self.assertLessEqual(context_sizes[-1], 32000)
 
     def test_project_information_is_synthesized_after_rag_search(self):
         calls = []
@@ -75,19 +166,25 @@ class LangGraphMultiAgentTests(unittest.TestCase):
                 "content": "=== TÀI LIỆU THAM KHẢO ===\n[1] people.txt\nEngineer evidence"
             }]}
 
+        replies = iter([
+            "=== TÀI LIỆU THAM KHẢO ===\n[1] people.txt\nNgười này là kỹ sư trong dự án. [1]"
+        ])
+
         def complete(messages, _temperature):
-            prompt = messages[-1]["content"]
-            self.assertIn("Engineer evidence", prompt)
-            self.assertIn("Do not mention, quote, or reproduce source headings", prompt)
-            return "=== TÀI LIỆU THAM KHẢO ===\n[1] people.txt\nNgười này là kỹ sư trong dự án. [1]"
+            # The prompt on the second turn should contain the tool observation
+            if len(calls) > 0:
+                prompt = messages[-1]["content"]
+                self.assertIn("Engineer evidence", prompt)
+                self.assertIn("KHÔNG đề cập tiêu đề nguồn, tên file, số trích dẫn", prompt)
+            return next(replies)
 
         graph = LocalAgentGraph(
             complete=complete,
-            parse=lambda _text: (None, None),
+            parse=lambda text: ("rag_search", {"query": "Kỹ sư trong dự án là ai?", "top_k": 5}) if text == "SEARCH" else (None, None),
             execute=execute,
             needs_approval=lambda _tool: False,
             max_iterations=3,
-            plan_complete=lambda *_args: self.fail("Planner must not run before project RAG search"),
+            plan_complete=lambda _messages, _temperature: '{"requires_plan": false, "plan": []}',
         )
         state = graph.run(
             [{"role": "system", "content": "test"},
@@ -189,8 +286,8 @@ class LangGraphMultiAgentTests(unittest.TestCase):
             "plan-progress-test", 0.1,
             steps=[
                 {"type": "plan", "steps": ["step 1", "step 2", "step 3"]},
-                {"type": "reflection", "tool": "read_file", "result": {"passed": True}},
-                {"type": "reflection", "tool": "read_file", "result": {"passed": False}},
+                {"type": "reflection", "tool": "application_action", "result": {"passed": True}},
+                {"type": "reflection", "tool": "application_action", "result": {"passed": False}},
             ],
         )
         self.assertIn('[Ke hoach con lai] ["step 2", "step 3"]',
@@ -405,7 +502,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
         self.assertFalse(any(step.get("type") == "final_answer" and step.get("content") == "DONE"
                              for step in state["steps"]))
 
-    def test_wrong_desktop_action_is_rejected_before_dispatch(self):
+    def test_ui_step_contract_dispatches_the_manifest_action(self):
         replies = iter(["WRONG", "RIGHT"])
         dispatched = []
 
@@ -425,7 +522,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
         state = graph.run([{"role": "system", "content": "test"},
                            {"role": "user", "content": "ẩn mô hình 3D"}], "step-guard-test", 0.1)
         self.assertEqual(dispatched, ["reconstruction.close_3d_model"])
-        self.assertTrue(any(s.get("reason") == "step_action_mismatch" for s in state["steps"]))
+        self.assertFalse(any(s.get("reason") == "step_action_mismatch" for s in state["steps"]))
 
 if __name__ == "__main__":
     unittest.main()

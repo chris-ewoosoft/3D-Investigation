@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping
+from time import monotonic
 
 from ..domain.security import DataClassification
 from ..domain.tasks import AgentTask, TaskStatus
@@ -15,6 +16,10 @@ class TaskService:
         self._store = store
         self._executor = executor
         self._capabilities = capabilities
+        self._workers: set[threading.Thread] = set()
+        self._worker_lock = threading.RLock()
+        self._closing = False
+        self._store_closed = False
 
     def submit(self, capability: str, message: str, metadata: Mapping | None = None,
                context_id: str | None = None, classification: DataClassification = DataClassification.INTERNAL) -> AgentTask:
@@ -26,7 +31,7 @@ class TaskService:
             return task
         self._store.create(task)
         self._store.append_event(task.id, "status", {"status": task.status})
-        threading.Thread(target=self._run, args=(task.id,), daemon=True, name=f"a2a-{task.id[-8:]}").start()
+        self._start(task.id)
         return task
 
     def get(self, task_id: str) -> AgentTask | None:
@@ -42,10 +47,24 @@ class TaskService:
     def list(self, *, context_id: str | None = None, limit: int = 100) -> tuple[AgentTask, ...]:
         return tuple(self._store.list(context_id=context_id, limit=limit))
 
-    def close(self) -> None:
-        close = getattr(self._store, "close", None)
-        if callable(close):
-            close()
+    def close(self, timeout_seconds: float = 5.0) -> None:
+        """Gracefully drain active workers before releasing durable storage."""
+        with self._worker_lock:
+            self._closing = True
+            if self._workers or self._store_closed:
+                workers = tuple(self._workers)
+            else:
+                self._close_store()
+                return
+        deadline = monotonic() + max(0.0, timeout_seconds)
+        for worker in workers:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            worker.join(remaining)
+        with self._worker_lock:
+            if not self._workers:
+                self._close_store()
 
     def cancel(self, task_id: str) -> AgentTask | None:
         task = self._store.get(task_id)
@@ -61,7 +80,7 @@ class TaskService:
         task = self._store.get(task_id)
         if task is None or task.status != TaskStatus.INPUT_REQUIRED:
             return None
-        continuation = (task.result or {}).get("continuation")
+        continuation = task.metadata.get("agent_run.continuation")
         if not isinstance(continuation, dict):
             return None
         metadata = dict(task.metadata)
@@ -70,8 +89,33 @@ class TaskService:
         resumed = task.with_metadata(metadata).transition(TaskStatus.WORKING)
         self._store.save(resumed)
         self._store.append_event(task_id, "status", {"status": resumed.status, "resumed": True})
-        threading.Thread(target=self._run, args=(task_id, True), daemon=True, name=f"a2a-{task.id[-8:]}").start()
+        self._start(task_id, already_working=True)
         return resumed
+
+    def _start(self, task_id: str, *, already_working: bool = False) -> None:
+        def worker() -> None:
+            try:
+                self._run(task_id, already_working)
+            finally:
+                with self._worker_lock:
+                    self._workers.discard(threading.current_thread())
+                    if self._closing and not self._workers:
+                        self._close_store()
+
+        thread = threading.Thread(target=worker, daemon=True, name=f"a2a-{task_id[-8:]}")
+        with self._worker_lock:
+            if self._closing:
+                raise RuntimeError("Task service is shutting down")
+            self._workers.add(thread)
+        thread.start()
+
+    def _close_store(self) -> None:
+        if self._store_closed:
+            return
+        close = getattr(self._store, "close", None)
+        if callable(close):
+            close()
+        self._store_closed = True
 
     def _run(self, task_id: str, already_working: bool = False) -> None:
         task = self._store.get(task_id)
@@ -95,7 +139,8 @@ class TaskService:
                     metadata["agent_run.continuation"] = continuation
                     metadata.pop("agent_run.resume", None)
                     latest = latest.with_metadata(metadata)
-                waiting = latest.transition(TaskStatus.INPUT_REQUIRED, result=result)
+                public_result = {key: value for key, value in result.items() if key != "continuation"}
+                waiting = latest.transition(TaskStatus.INPUT_REQUIRED, result=public_result)
                 self._store.save(waiting)
                 self._store.append_event(task_id, "status", {"status": waiting.status, "result": result})
                 return

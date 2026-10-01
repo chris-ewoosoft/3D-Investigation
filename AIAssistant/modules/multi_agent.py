@@ -11,6 +11,7 @@ from enum import StrEnum
 from typing import Any
 
 from .agent_logging import get_agent_logger
+from .coding_agent import is_coding_task
 from .config import APP_DATA_DIR, logger
 
 # A2A protocol integration — graceful no-op when a2a_protocol is unavailable.
@@ -80,6 +81,15 @@ _TRANSFER_TARGETS = {
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_PATH = os.path.join(APP_DATA_DIR, "AIAssistant", "agent_audit.jsonl")
+
+
+def route_task(task: str) -> Specialist:
+    """Compatibility classifier for callers that route before choosing a tool.
+
+    The authoritative coding-intent policy stays in ``coding_agent``; this
+    facade prevents older Qt/LangGraph integrations from duplicating it.
+    """
+    return Specialist.CODE if is_coding_task(task) else Specialist.SUPERVISOR
 
 
 def delegate(task: str, session_id: str, tool: str | None = None, parameters: dict[str, Any] | None = None,

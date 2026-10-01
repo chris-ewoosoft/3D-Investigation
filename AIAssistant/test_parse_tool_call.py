@@ -1,9 +1,11 @@
 # ruff: noqa: I001, S101
 """Regression checks for grammar-constrained tool envelopes."""
 import sys
+from unittest.mock import patch
 sys.path.insert(0, '..')   # f:\PROJECTS\QT\3D-Reconstruction\AIAssistant is cwd
 sys.path.insert(0, '.')
 
+from modules import agent_module
 from modules.agent_module import _parse_tool_call
 
 def test(name, text, expected_tool, expected_action=None):
@@ -42,5 +44,22 @@ test("invalid desktop params",
 test("start_reconstruction",
      '{"kind": "tool", "tool": "application_action", "params": {"action": "reconstruction.start_reconstruction"}}',
      "application_action", "reconstruction.start_reconstruction")
+
+# 7. The constrained llama.cpp adapter must preserve a step-answer envelope.
+# Otherwise LangGraph receives raw text and repeatedly executes the same plan step.
+class _StepAnswerModel:
+    def create_chat_completion(self, **_kwargs):
+        return {"choices": [{"message": {"content":
+                '{"kind":"step_answer","content":"Teamlead điều phối dự án."}'}}]}
+
+
+with (patch.object(agent_module, "backend_mode", return_value="llama_cpp"),
+      patch.object(agent_module.llm_runtime, "llm", _StepAnswerModel()),
+      patch.dict(agent_module.os.environ, {"AGENT_NATIVE_TOOL_CALLS": "1"})):
+    response = agent_module._constrained_agent_completion([], max_tokens=32, temperature=0.0)
+
+assert response == '{"kind": "step_answer", "content": "Teamlead điều phối dự án."}', response
+assert _parse_tool_call(response)[0] == "_step_answer"
+print("[PASS] constrained step_answer envelope is preserved")
 
 print("\nALL TESTS PASSED")

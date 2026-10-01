@@ -4,8 +4,12 @@ import unittest
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from modules.action_manifest import (
-    action_ids, action_intents, canonical_action, manifest,
-    rank_actions_for_step, step_matches_action,
+    action_ids,
+    action_intents,
+    canonical_action,
+    manifest,
+    rank_actions_for_step,
+    step_matches_action,
 )
 
 

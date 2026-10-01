@@ -70,10 +70,10 @@ async def lifespan(_: FastAPI):
     logger.info("Server ready in %.1fs — http://127.0.0.1:8080", total)
     print(f"[SUCCESS] AI Server started successfully ({total:.1f}s)", flush=True)
     try:
-        if mcp_server.MCP_AVAILABLE:
+        if platform.settings.enable_mcp and mcp_server.MCP_AVAILABLE:
             async with mcp_server.lifespan():
                 yield
-        else:
+        elif platform.settings.enable_mcp:
             logger.warning("MCP SDK is not installed; MCP endpoint is unavailable")
             yield
     finally:
@@ -108,7 +108,7 @@ app.include_router(agent_module.agent_router)
 if platform.settings.enable_a2a:
     app.include_router(build_a2a_router(platform.tasks, "3D-Reconstruction AI Assistant", "3.0.0"))
 chatbot_agent = ChatbotAgent(llm_module, rag_module)
-if mcp_server.MCP_AVAILABLE:
+if platform.settings.enable_mcp and mcp_server.MCP_AVAILABLE:
     app.mount("/mcp", mcp_server.asgi_app())
 
 

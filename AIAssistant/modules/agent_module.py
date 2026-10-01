@@ -1369,11 +1369,22 @@ thấy file hoặc đề xuất patch là đã hoàn thành. Không suy ra file/
 tên tính năng; hãy lấy chúng từ source, CMake, test và kết quả tool thực tế.
 
 17. QUAN TRỌNG: Với câu hỏi kiến thức chung (định nghĩa khái niệm, giải thích thuật ngữ công nghệ,
-lý thuyết khoa học, v.v.), trả lời trực tiếp bằng final_answer mà KHÔNG gọi rag_search hoặc
-bất kỳ tool nào. Chỉ dùng rag_search khi câu hỏi CẦN thông tin nội bộ dự án (nhân sự,
-vai trò, lịch sử dự án, tài liệu nội bộ, code cụ thể trong project).
+lý thuyết khoa học, v.v.) mà KHÔNG CẦN tra cứu tài liệu dự án, trả lời trực tiếp mà KHÔNG gọi tool.
+ĐỐI VỚI thông tin NỘI BỘ dự án (nhân sự, kỹ sư, vai trò, lịch sử dự án, tài liệu, code), BẠN KHÔNG ĐƯỢC TỰ BỊA ĐẶT CÂU TRẢ LỜI. BẠN BẮT BUỘC PHẢI gọi tool `rag_search` (với tham số query phù hợp) để lấy thông tin chính xác.
+Nếu KHÔNG có kế hoạch, dùng {{"kind":"final","content":"..."}}.
+Nếu ĐANG THỰC HIỆN KẾ HOẠCH, dùng {{"kind":"step_answer","content":"..."}} để trả lời bước hiện tại.
+và tiếp tục các bước còn lại.
+
+18. KHÔNG ĐƯỢC gọi transfer_to_toolapp_agent cho các thao tác UI. Hãy gọi TRỰC TIẾP application_action
+với action canonical phù hợp (ví dụ: viewer.load_2d, ai.run_detection).
 
 ## EXAMPLE:
+
+User: Kỹ sư trong dự án là ai?
+Assistant: {{"kind":"tool","tool":"rag_search","params":{{"query":"kỹ sư trong dự án"}}}}
+
+User: AI Agent là gì?
+Assistant: {{"kind":"step_answer","content":"AI Agent là trí tuệ nhân tạo..."}}
 
 User: đổi project sang tiếng việt giúp tôi
 Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"language.change","language":"vi"}}}}
@@ -1386,6 +1397,9 @@ Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"reco
 
 User: chạy nhận diện đối tượng
 Assistant: {{"kind":"tool","tool":"application_action","params":{{"action":"ai.run_detection"}}}}
+
+User: AI Agent là gì? (trong kế hoạch nhiều bước)
+Assistant: {{"kind":"step_answer","content":"AI Agent là hệ thống trí tuệ nhân tạo có khả năng tự chủ..."}}
 
 ## PROJECT INFORMATION:
 - Project root: {_safe_relpath(PROJECT_DIR, PROJECT_DIR)} (thư mục gốc)
@@ -1457,7 +1471,11 @@ def _parse_tool_call(response_text: str) -> tuple:
         data = json.loads(response_text.strip())
     except (json.JSONDecodeError, TypeError):
         return None, None
-    if not isinstance(data, dict) or data.get("kind") != "tool":
+    if not isinstance(data, dict):
+        return None, None
+    if data.get("kind") == "step_answer":
+        return "_step_answer", {"content": str(data.get("content", ""))}
+    if data.get("kind") != "tool":
         return None, None
     tool_name = _normalise_tool_name(str(data.get("tool", "")))
     params = data.get("params")
@@ -1572,8 +1590,16 @@ def _constrained_agent_completion(messages: list[dict], max_tokens: int, tempera
         logger.warning("Constrained decoder returned non-JSON text, treating as final response: %s", error)
         return content
         
+    if not isinstance(envelope, dict):
+        logger.warning("Constrained decoder returned a non-object JSON value, treating as raw text.")
+        return content
     if envelope.get("kind") == "final" and isinstance(envelope.get("content"), str):
         return envelope["content"]
+    if envelope.get("kind") == "step_answer" and isinstance(envelope.get("content"), str):
+        # Preserve the envelope so LangGraph can mark the active plan step as
+        # complete.  Returning only its text makes it indistinguishable from a
+        # final answer and causes the reasoning loop to repeat the same step.
+        return json.dumps(envelope, ensure_ascii=False)
     if envelope.get("kind") == "tool":
         return json.dumps(envelope, ensure_ascii=False)
         
@@ -1797,7 +1823,7 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
                           resume_with_reflection=resume_with_reflection,
                           required_ui_actions=matched_ui_actions,
                           supervisor_route=supervisor_route.value,
-                          enforce_plan_completion=supervisor_route.value == "code",
+                          enforce_plan_completion=True,
                           approval_granted=approval_granted or bool((initial_steps or []) and
                                                 any(step.get("type") == "approval_granted"
                                                     for step in (initial_steps or []))),
@@ -2065,6 +2091,41 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
     audit_agent("tool_verified", delegation, **verification)
     steps.append({"type": "verification", "tool": "application_action", "result": verification,
                   "iteration": action.get("iteration", 0)})
+
+    # Transitional Qt clients may send a server-generated sequence of already
+    # canonical actions. Keep it as a compatibility adapter only: selection is
+    # still made by the planner, and the next action receives its own durable
+    # acknowledgement request rather than being executed implicitly.
+    next_actions = action.get("next_actions") or []
+    if request.success and isinstance(next_actions, list) and next_actions:
+        queued = next_actions[0]
+        if not isinstance(queued, dict):
+            raise HTTPException(status_code=422, detail="Invalid queued UI action")
+        next_params, error = validate_action_params(queued)
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+        next_request_id = _generate_action_id()
+        next_params["request_id"] = next_request_id
+        all_steps = action.get("steps", []) + steps + [{
+            "type": "tool_call", "tool": "application_action", "params": next_params,
+            "iteration": action.get("iteration", 0) + 1,
+        }]
+        with _pending_lock:
+            _pending_actions[next_request_id] = {
+                "ui_ack": True, "params": next_params, "task": action["task"],
+                "session_id": action["session_id"], "steps": all_steps,
+                "messages": action.get("messages", []), "next_actions": next_actions[1:],
+                "iteration": action.get("iteration", 0) + 1,
+                "temperature": action.get("temperature", 0.3),
+                "language": action.get("language", "vi"), "created_at": time.time(),
+            }
+            _save_pending_actions()
+        return {
+            "status": "pending_ui_action", "session_id": action["session_id"],
+            "request_id": next_request_id, "prior_step_count": len(action.get("steps", [])),
+            "steps": all_steps,
+            "ui_action": {"request_id": next_request_id, "action": next_params["action"], "params": next_params},
+        }
 
 
 

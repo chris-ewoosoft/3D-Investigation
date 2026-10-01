@@ -178,13 +178,13 @@ def _safe_relpath(path: str, start: str) -> str:
 # CLIP was useful for image similarity, but is not a reliable embedding model for
 # Vietnamese project documents and source-code questions.  The prefixes below are
 # part of the E5 contract and must be applied consistently while indexing/querying.
-EMBED_MODEL_NAME = "intfloat/multilingual-e5-base"
+EMBED_MODEL_NAME = "intfloat/multilingual-e5-small"
 EMBEDDING_QUERY_PREFIX = "query: "
 EMBEDDING_PASSAGE_PREFIX = "passage: "
 # Keep image analysis with the vision LLM.  This text model deliberately does
 # not accept PIL images, so image attachments fall back to their textual query.
 EMBEDDING_SUPPORTS_IMAGES = False
-EMBEDDING_DIMENSION = 768
+EMBEDDING_DIMENSION = 384
 RAG_CACHE_VERSION = 6
 
 # [FIX-7] Cross-encoder re-ranking — bật/tắt tùy tài nguyên

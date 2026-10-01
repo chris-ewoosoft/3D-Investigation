@@ -110,10 +110,16 @@ def grammar_schema(tool_definitions: list[dict[str, Any]]) -> str:
 
     A response is either a normal final answer or one exact tool envelope.
     """
-    variants: list[dict[str, Any]] = [{
-        "type": "object", "properties": {"kind": {"const": "final"}, "content": {"type": "string"}},
-        "required": ["kind", "content"], "additionalProperties": False,
-    }]
+    variants: list[dict[str, Any]] = [
+        {
+            "type": "object", "properties": {"kind": {"const": "final"}, "content": {"type": "string"}},
+            "required": ["kind", "content"], "additionalProperties": False,
+        },
+        {
+            "type": "object", "properties": {"kind": {"const": "step_answer"}, "content": {"type": "string"}},
+            "required": ["kind", "content"], "additionalProperties": False,
+        },
+    ]
     for tool in tool_definitions:
         properties = {
             name: {key: value for key, value in spec.items()

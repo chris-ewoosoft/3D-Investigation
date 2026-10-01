@@ -1,6 +1,7 @@
 """Contract tests for the modular AI Agent Platform boundary."""
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -89,7 +90,7 @@ class PlatformArchitectureTests(unittest.TestCase):
             with TestClient(app) as client:
                 card = client.get("/.well-known/agent.json")
                 self.assertEqual(card.status_code, 200)
-                self.assertEqual(card.json()["protocolVersion"], "1.0")
+                self.assertEqual(card.json()["protocolVersion"], "0.3")
                 response = client.post("/a2a/tasks/send", json={
                     "capability": "supervisor",
                     "message": {"role": "user", "parts": [{"kind": "text", "text": "hello"}]},
@@ -104,6 +105,47 @@ class PlatformArchitectureTests(unittest.TestCase):
                     time.sleep(0.01)
                 self.assertEqual(state, TaskStatus.COMPLETED)
                 self.assertEqual(len(client.get("/a2a/tasks").json()["tasks"]), 1)
+            service.close()
+
+    def test_current_a2a_rest_contract_and_redacted_pause(self):
+        self.registry.register_tool(
+            ToolSpec("write", "Write", {"type": "object", "properties": {"password": {"type": "string"}},
+                                            "required": ["password"]}, 1, side_effect=SideEffect.WRITE,
+                     requires_approval=True, required_scope="project.write", plugin_id="test.plugin"),
+            lambda _params: {"saved": True},
+        )
+        agent = AgentRunService(
+            complete=lambda _messages, _temperature: '{"kind":"tool","tool":"write","params":{"password":"secret"}}',
+            tools=ToolExecutionService(self.registry), tool_descriptions=lambda: "write", max_iterations=1,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = TaskService(SqliteTaskStore(Path(directory) / "tasks.sqlite"), agent.run, frozenset({"supervisor"}))
+            app = FastAPI()
+            app.include_router(build_a2a_router(service, "test-agent", "1.0.0"))
+            with TestClient(app) as client:
+                response = client.post("/message:send", headers={"A2A-Version": "0.3"}, json={
+                    "message": {"role": "ROLE_USER", "messageId": "m1", "parts": [{"text": "change"}]},
+                })
+                self.assertEqual(response.status_code, 200)
+                task_id = response.json()["task"]["id"]
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    task = client.get(f"/tasks/{task_id}", headers={"A2A-Version": "0.3"}).json()["task"]
+                    if task["status"]["state"] == "input-required":
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(task["status"]["state"], "input-required")
+                self.assertNotIn("secret", json.dumps(task))
+                resumed = client.post(f"/tasks/{task_id}:resume", headers={"A2A-Version": "0.3"},
+                                      json={"input": {"approved": True}})
+                self.assertEqual(resumed.status_code, 200)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    completed = client.get(f"/tasks/{task_id}", headers={"A2A-Version": "0.3"}).json()["task"]
+                    if completed["status"]["state"] == "completed":
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(completed["status"]["state"], "completed")
             service.close()
 
     def test_framework_independent_agent_loop_stops_for_approval(self):
