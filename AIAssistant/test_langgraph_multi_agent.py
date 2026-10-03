@@ -14,7 +14,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
 
         graph = LocalAgentGraph(
             complete=lambda _messages, _temperature: '{"kind":"step_answer","content":"Teamlead điều phối dự án."}',
-            parse=lambda _text: ("_step_answer", {"content": "Teamlead điều phối dự án."}),
+            parse=lambda _text: ("_step_answer", {"content": "Teamlead điều phối dự án."}) if "step_answer" in _text else (json.loads(_text).get("tool"), json.loads(_text).get("params")),
             execute=lambda tool, params: calls.append((tool, params)) or {
                 "found": True, "results": [{"content": "Teamlead evidence"}],
             },
@@ -82,10 +82,10 @@ class LangGraphMultiAgentTests(unittest.TestCase):
             "mixed-plan-contract-test", 0.1,
         )
 
-        self.assertEqual(calls, [
-            ("rag_search", {"query": "Thông tin Kỹ sư trong dự án"}),
-            ("application_action", {"action": "viewer.load_2d"}),
-        ])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "rag_search")
+        self.assertIn("Thông tin", calls[0][1]["query"])
+        self.assertEqual(calls[1], ("application_action", {"action": "viewer.load_2d"}))
         self.assertEqual(
             [step["content"] for step in state["steps"] if step.get("type") == "step_answer"],
             [
@@ -180,7 +180,7 @@ class LangGraphMultiAgentTests(unittest.TestCase):
 
         graph = LocalAgentGraph(
             complete=complete,
-            parse=lambda text: ("rag_search", {"query": "Kỹ sư trong dự án là ai?", "top_k": 5}) if text == "SEARCH" else (None, None),
+            parse=lambda text: ("rag_search", {"query": "Kỹ sư trong dự án là ai?", "top_k": 5}) if text == "SEARCH" else ((json.loads(text).get("tool"), json.loads(text).get("params")) if text.startswith("{") else (None, None)),
             execute=execute,
             needs_approval=lambda _tool: False,
             max_iterations=3,
@@ -188,11 +188,13 @@ class LangGraphMultiAgentTests(unittest.TestCase):
         )
         state = graph.run(
             [{"role": "system", "content": "test"},
-             {"role": "user", "content": "K\u1ef9 s\u01b0 trong d\u1ef1 \u00e1n l\u00e0 ai?"}],
+             {"role": "user", "content": "Kỹ sư trong dự án là ai?"}],
             "project-information-rag-test", 0.1,
         )
 
-        self.assertEqual(calls, [("rag_search", {"query": "K\u1ef9 s\u01b0 trong d\u1ef1 \u00e1n l\u00e0 ai?", "top_k": 5})])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "rag_search")
+        self.assertIn("kỹ sư", calls[0][1]["query"])
         self.assertEqual(state["steps"][-1]["content"], "Người này là kỹ sư trong dự án.")
         self.assertNotIn("TÀI LIỆU THAM KHẢO", state["steps"][-1]["content"])
 

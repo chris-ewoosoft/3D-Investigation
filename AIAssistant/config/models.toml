@@ -1,0 +1,39 @@
+# LLM models available for selection
+[[models]]
+repo_id = "Qwen/Qwen3-8B-GGUF"
+filename = "Qwen3-8B-Q4_K_M.gguf"
+desc = "Qwen3-8B (Q4_K_M) — Text / Agent / Coder"
+
+[[models]]
+repo_id = "bartowski/Qwen2.5-7B-Instruct-GGUF"
+filename = "Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+desc = "Qwen2.5-7B (Q4_K_M) — Text"
+
+[[models]]
+repo_id = "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF"
+filename = "qwen2.5-coder-7b-instruct-q4_k_m.gguf"
+desc = "Qwen2.5-coder-7B (Q4_K_M) — Coder"
+
+[[models]]
+repo_id = "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF"
+filename = "Qwen_Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+desc = "Qwen2.5-VL-7B (Q4_K_M) — Vision"
+is_vision = true
+mmproj_repo_id = "bartowski/Qwen_Qwen2.5-VL-7B-Instruct-GGUF"
+mmproj_filename = "mmproj-Qwen_Qwen2.5-VL-7B-Instruct-f16.gguf"
+
+[fallback]
+repo_id = "bartowski/Qwen2.5-3B-Instruct-GGUF"
+filename = "Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+desc = "Qwen2.5-3B (Q4_K_M) — Text Fallback"
+
+[llm]
+n_ctx = 8192
+chars_per_token = 2.2
+
+[rag]
+chunk_chars = 1200
+overlap_chars = 300
+similarity_threshold = 0.30
+max_context_chars = 9000
+use_reranker = true

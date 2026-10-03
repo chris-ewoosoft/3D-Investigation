@@ -34,7 +34,7 @@ except ImportError:
     _a2a_eval_ok = False
 
 try:
-    from modules.observability import langsmith_available, langsmith_trace, span
+    from ai_assistant.observability import langsmith_available, langsmith_trace, span
     _obs_eval_ok = True
 except ImportError:
     _obs_eval_ok = False

@@ -928,7 +928,7 @@ bool ReconstructionPipeline::reconstruct() {
     qDebug() << "Raw points:" << points3D.size();
     processPointCloud();
 
-    return!points3D.empty();
+   // return!points3D.empty();
 
     // filterFarOutliers không cần nữa vì vòm sinh ra từ Poisson, đã trim trong poissonMeshing
     densifyPointCloudMLS(points3D, colors, 1000000);

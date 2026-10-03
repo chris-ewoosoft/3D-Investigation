@@ -1,0 +1,400 @@
+[
+  {
+    "name": "transfer_to_code_agent",
+    "description": "Transfer the user request to the Code Agent, which specializes in writing, modifying, debugging, or analyzing software source code.",
+    "parameters": {
+      "intent": {
+        "type": "string",
+        "description": "Summary of what needs to be coded",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "transfer_to_toolapp_agent",
+    "description": "Transfer the user request to the ToolApp Agent, which specializes in executing desktop UI actions (loading images, 3D models, AI detection, etc).",
+    "parameters": {
+      "intent": {
+        "type": "string",
+        "description": "Summary of the UI actions needed",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "transfer_to_chatbot_agent",
+    "description": "Transfer the user request to the Chatbot Agent, which specializes in answering general questions and conversations.",
+    "parameters": {
+      "intent": {
+        "type": "string",
+        "description": "Summary of the user's question",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "read_file",
+    "description": "Read a focused range from a file. Returns file content as text. For source files, first use search_text/analyze_code to locate a symbol, then provide start_line/end_line (or symbol) instead of reading a large file in full.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root (e.g. 'src/main.cpp')",
+        "required": true
+      },
+      "start_line": {
+        "type": "integer",
+        "description": "Start line (1-indexed, inclusive). Required for large source files unless symbol is provided.",
+        "required": false
+      },
+      "end_line": {
+        "type": "integer",
+        "description": "End line (1-indexed, inclusive). Required for large source files unless symbol is provided.",
+        "required": false
+      },
+      "symbol": {
+        "type": "string",
+        "description": "Optional C/C++/Python function or method name; returns only its source range.",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "list_directory",
+    "description": "List files and subdirectories in a directory. Returns a structured listing with file sizes and types.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root (e.g. 'src/modules'). Use '.' for project root.",
+        "required": true
+      },
+      "recursive": {
+        "type": "boolean",
+        "description": "If true, list recursively. Default false.",
+        "required": false
+      },
+      "max_depth": {
+        "type": "integer",
+        "description": "Max depth for recursive listing. Default 3.",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "search_text",
+    "description": "Search for text/pattern in project files. Returns matching lines with file paths and line numbers. Similar to grep. Use this to find usages, definitions, or occurrences of text.",
+    "parameters": {
+      "query": {
+        "type": "string",
+        "description": "Text or pattern to search for",
+        "required": true
+      },
+      "path": {
+        "type": "string",
+        "description": "Relative path to search in. Default: entire project.",
+        "required": false
+      },
+      "file_pattern": {
+        "type": "string",
+        "description": "Glob pattern to filter files, e.g. '*.cpp' or '*.py'",
+        "required": false
+      },
+      "case_sensitive": {
+        "type": "boolean",
+        "description": "Case sensitive search. Default true.",
+        "required": false
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Max results to return. Default 50.",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "analyze_code",
+    "description": "Analyze the structure of a source code file. Returns classes, functions, imports, and a structural summary. Supports Python and C/C++ files.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path to the source file",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "find_files",
+    "description": "Find source and project files by glob pattern without reading their contents.",
+    "parameters": {
+      "pattern": {
+        "type": "string",
+        "description": "Glob pattern such as '*.cpp' or 'test_*.py'",
+        "required": true
+      },
+      "path": {
+        "type": "string",
+        "description": "Relative directory to search. Default: project root.",
+        "required": false
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Maximum number of paths to return. Default 100.",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "git_diff",
+    "description": "Read the current Git diff for a file or the project without changing state.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Optional relative file or directory to inspect.",
+        "required": false
+      },
+      "staged": {
+        "type": "boolean",
+        "description": "Read staged changes instead of working-tree changes.",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "write_file",
+    "description": "Write content to a file. THIS REQUIRES USER APPROVAL before execution. Use this to fix bugs, add code, modify configs, etc.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root",
+        "required": true
+      },
+      "content": {
+        "type": "string",
+        "description": "Full content to write to the file",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Brief description of what this change does",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "run_command",
+    "description": "Execute a shell command. THIS REQUIRES USER APPROVAL before execution. Use for building, testing, or other project tasks.",
+    "parameters": {
+      "command": {
+        "type": "string",
+        "description": "The shell command to run",
+        "required": true
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Working directory (relative to project root). Default: project root.",
+        "required": false
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Timeout in seconds. Default 30.",
+        "minimum": 1,
+        "maximum": 120,
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "get_project_status",
+    "description": "Inspect the project safely: current Git branch, changed files and high-level source file counts. Does not change files.",
+    "parameters": {}
+  },
+  {
+    "name": "validate_file",
+    "description": "Validate a Python or JSON file without modifying it. Python files are syntax-checked; JSON files are parsed.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative Python or JSON file path",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "patch_file",
+    "description": "Replace an exact text fragment in an existing file. THIS REQUIRES USER APPROVAL. Read the file first and use a unique fragment.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root",
+        "required": true
+      },
+      "find": {
+        "type": "string",
+        "description": "Exact existing text to replace",
+        "required": true
+      },
+      "replace": {
+        "type": "string",
+        "description": "Replacement text",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Brief description of the change",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "replace_file_content",
+    "description": "Replace a single contiguous block of code in an existing file. THIS REQUIRES USER APPROVAL. Read the file first and provide EXACT original text.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root",
+        "required": true
+      },
+      "targetContent": {
+        "type": "string",
+        "description": "Exact existing text to replace, including whitespaces",
+        "required": true
+      },
+      "replacementContent": {
+        "type": "string",
+        "description": "Replacement text",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Brief description of the change",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "multi_replace_file_content",
+    "description": "Edit an existing file by replacing multiple non-contiguous blocks of code. THIS REQUIRES USER APPROVAL. Read the file first.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative path from project root",
+        "required": true
+      },
+      "replacements": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "targetContent": {
+              "type": "string",
+              "description": "Exact text to replace",
+              "required": true
+            },
+            "replacementContent": {
+              "type": "string",
+              "description": "Replacement text",
+              "required": true
+            }
+          }
+        },
+        "description": "List of replacements",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Brief description of the change",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "create_directory",
+    "description": "Create a directory inside the project. THIS REQUIRES USER APPROVAL.",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "description": "Relative directory path",
+        "required": true
+      },
+      "description": {
+        "type": "string",
+        "description": "Why this directory is needed",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "app_action_viewer",
+    "description": "Run a Viewer desktop action. Use this EXACTLY when the user wants to OPEN or LOAD a pre-existing 3D model, 2D image, or DICOM series from disk. Supported actions: viewer.load_2d (use this for loading a single 2D image), viewer.load_3d, viewer.load_dicom. DO NOT use this tool for viewing reconstructed models. Use it for loading/opening external static files.",
+    "parameters": {
+      "action": {
+        "type": "string",
+        "description": "One of: viewer.load_2d, viewer.load_3d, viewer.load_dicom",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "app_action_reconstruction",
+    "description": "Run a 3D Reconstruction desktop action. Use this when the user wants to perform 3D reconstruction tasks: load a dataset of source images for 3D reconstruction, start the reconstruction process, or view/close the RESULTING 3D point cloud model. Supported actions: reconstruction.load_images (use ONLY for loading multiple images to build a 3D model, NOT for a single 2D image), reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model. NOTE: reconstruction.view_3d_model is ONLY for showing the generated reconstruction result, NOT for loading a 3D file from disk.",
+    "parameters": {
+      "action": {
+        "type": "string",
+        "description": "One of: reconstruction.load_images, reconstruction.start_reconstruction, reconstruction.view_3d_model, reconstruction.close_3d_model",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "app_action_ai",
+    "description": "Run an AI / Deep Learning desktop action. Use this for AI detection, segmentation, video tracking, hiding results, training a model, or viewing training charts. Supported actions: ai.run_detection, ai.run_segmentation, ai.video_tracking, ai.hide_results, ai.training_model, ai.view_training_charts.",
+    "parameters": {
+      "action": {
+        "type": "string",
+        "description": "One of the supported ai.* actions",
+        "required": true
+      }
+    }
+  },
+  {
+    "name": "app_action_general",
+    "description": "Run general application actions: opening/closing AI assistant, reloading assistant components, mail, settings, language, and authentication. Supported actions: assistant.open, assistant.close, assistant.reload_model, assistant.reload_rag, assistant.reload_agent, assistant.reload_server, mail.open, mail.close, mail.settings, help.about, language.change, admin.settings, admin.change_avatar, admin.change_password, admin.logout, admin.login. Use language.change with language='vi' or language='en'.",
+    "parameters": {
+      "action": {
+        "type": "string",
+        "description": "One of the supported general actions",
+        "required": true
+      },
+      "language": {
+        "type": "string",
+        "description": "Only for language.change: 'vi' or 'en'",
+        "required": false
+      },
+      "username": {
+        "type": "string",
+        "description": "Only for admin.login",
+        "required": false
+      },
+      "password": {
+        "type": "string",
+        "description": "Only for admin.login",
+        "required": false
+      }
+    }
+  },
+  {
+    "name": "rag_search",
+    "description": "Search PROJECT-SPECIFIC documentation and source code using semantic similarity. Use ONLY when the question requires internal project information such as project members, roles, project history, internal APIs, code patterns, or project documentation. Do NOT use for general knowledge questions (e.g. 'NLP là gì?', 'RAG là gì?', 'OOP là gì?') — answer those directly with final_answer without calling any tool.",
+    "parameters": {
+      "query": {
+        "type": "string",
+        "description": "The question or topic to search for",
+        "required": true
+      },
+      "top_k": {
+        "type": "integer",
+        "description": "Max number of results to return (default 5, max 10)",
+        "required": false
+      }
+    }
+  }
+]

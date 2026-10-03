@@ -35,28 +35,69 @@ def _side_effect(legacy: dict[str, Any]) -> SideEffect:
     return SideEffect.READ
 
 
-def build_container(base_dir: Path, legacy_tools: list[dict[str, Any]],
+def build_container(base_dir: Path, legacy_tools: "list[Any]",
                     legacy_executors: dict[str, ToolExecutor], task_executor: AgentTaskExecutor) -> PlatformContainer:
+    """Build the DI container.
+
+    ``legacy_tools`` may be either:
+    - A list of ToolSpec-like objects (with .name, .description, .policy, …
+      attributes) — the preferred path when coming from TOOL_REGISTRY.get_all().
+    - A list of dicts with at minimum a ``name`` key — the old format.
+    """
     settings = ArchitectureSettings.load(base_dir)
     plugins = PluginRegistry(settings.allowed_plugins)
     for legacy in legacy_tools:
-        name = str(legacy["name"])
-        executor = legacy_executors.get(name)
-        if executor is None:
-            continue
-        policy = str(legacy.get("policy", "read_only"))
-        scope = {
-            "desktop_ack": "desktop.action",
-            "code_write": "project.write",
-            "code_execute": "project.execute",
-        }.get(policy, "project.read")
-        spec = ToolSpec(
-            name=name, description=str(legacy["description"]), input_schema=dict(legacy.get("schema", {})),
-            timeout_seconds=int(legacy.get("timeout_seconds", 10)), side_effect=_side_effect(legacy),
-            requires_approval=bool(legacy.get("requires_approval", False)), required_scope=scope,
-            idempotent=bool(legacy.get("idempotent", True)),
-            maximum_classification=DataClassification.RESTRICTED, plugin_id="builtin.legacy-tools",
-        )
+        # Support both ToolSpec objects and legacy dicts
+        if hasattr(legacy, "name"):
+            # ToolSpec object from the new registry
+            name = str(legacy.name)
+            executor = legacy_executors.get(name) or getattr(legacy, "handler", None)
+            if executor is None:
+                continue
+            policy = str(getattr(legacy, "policy", "read_only"))
+            scope = {
+                "desktop_ack": "desktop.action",
+                "code_write": "project.write",
+                "code_execute": "project.execute",
+            }.get(policy, "project.read")
+            parameters = getattr(legacy, "parameters", {})
+            spec = ToolSpec(
+                name=name,
+                description=str(getattr(legacy, "description", "")),
+                input_schema=dict(parameters) if isinstance(parameters, dict) else {},
+                timeout_seconds=int(getattr(legacy, "timeout_seconds", 10)),
+                side_effect=_side_effect({"policy": policy}),
+                requires_approval=bool(getattr(legacy, "requires_approval", False)),
+                required_scope=scope,
+                idempotent=bool(getattr(legacy, "idempotent", True)),
+                maximum_classification=DataClassification.RESTRICTED,
+                plugin_id="builtin.legacy-tools",
+            )
+        else:
+            # Legacy dict format — must have 'name' key
+            if "name" not in legacy:
+                continue  # skip malformed entries (e.g. raw JSON schemas)
+            name = str(legacy["name"])
+            executor = legacy_executors.get(name)
+            if executor is None:
+                continue
+            policy = str(legacy.get("policy", "read_only"))
+            scope = {
+                "desktop_ack": "desktop.action",
+                "code_write": "project.write",
+                "code_execute": "project.execute",
+            }.get(policy, "project.read")
+            spec = ToolSpec(
+                name=name, description=str(legacy.get("description", "")),
+                input_schema=dict(legacy.get("schema", {})),
+                timeout_seconds=int(legacy.get("timeout_seconds", 10)),
+                side_effect=_side_effect(legacy),
+                requires_approval=bool(legacy.get("requires_approval", False)),
+                required_scope=scope,
+                idempotent=bool(legacy.get("idempotent", True)),
+                maximum_classification=DataClassification.RESTRICTED,
+                plugin_id="builtin.legacy-tools",
+            )
         plugins.register_tool(spec, executor)
     load_entrypoint_plugins(plugins)
     tools = ToolExecutionService(plugins)

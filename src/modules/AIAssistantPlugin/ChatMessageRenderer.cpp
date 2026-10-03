@@ -163,6 +163,19 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
             }
             return html;
         }
+        // The planner can regenerate its plan several times while the plan
+        // critic rejects earlier drafts.  Only the last (verified) plan is
+        // shown so the chat does not repeat the same block once per attempt.
+        int lastPlanIndex = -1;
+        for (int i = priorStepCount; i < steps.size(); ++i) {
+            if (steps[i].toObject()["type"].toString() == "plan") lastPlanIndex = i;
+        }
+        // Only the final verification outcome is shown; intermediate failed
+        // drafts are folded away together with their plan blocks.
+        int lastReflectionIndex = -1;
+        for (int i = priorStepCount; i < steps.size(); ++i) {
+            if (steps[i].toObject()["type"].toString() == "plan_reflection") lastReflectionIndex = i;
+        }
         for (int i = priorStepCount; i < steps.size(); ++i) {
             QJsonObject step = steps[i].toObject();
             QString type = step["type"].toString();
@@ -172,6 +185,7 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                 if (title == "🤔 ai.thinking") title = "🤔 Thinking...";
                 html += ChatTemplates::AGENT_THINKING.arg(title, step["content"].toString().toHtmlEscaped());
             } else if (type == "plan") {
+                if (i != lastPlanIndex) continue; // superseded draft
                 const QJsonArray planSteps = step["steps"].toArray();
                 QString planHtml;
                 for (int pi = 0; pi < planSteps.size(); ++pi) {
@@ -181,6 +195,7 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                 }
                 html += ChatTemplates::AGENT_THINKING.arg("📌 Kế hoạch", planHtml);
             } else if (type == "plan_reflection") {
+                if (i != lastReflectionIndex) continue; // superseded draft
                 const QJsonObject review = step["result"].toObject();
                 const bool passed = review.value("passed").toBool();
                 const QString status = passed ? "Plan verification passed" : "Plan verification failed";
