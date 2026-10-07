@@ -62,7 +62,7 @@ def get_file_system_hash(paths: AppPaths, settings: RAGSettings) -> str:
     entries.append(f"cache_version={settings.cache_version}")
 
     combined = "\n".join(entries).encode("utf-8")
-    return hashlib.md5(combined).hexdigest()
+    return hashlib.sha256(combined).hexdigest()
 
 
 def is_cache_valid(paths: AppPaths, settings: RAGSettings) -> bool:
@@ -128,10 +128,10 @@ def load_cache(paths: AppPaths, settings: RAGSettings) -> tuple[Any, list[ChunkR
             raise ValueError(f"FAISS dimension {index.d} does not match {settings.embedding_dimension}")
             
         with paths.cache_chunks.open("rb") as f:
-            chunks = pickle.load(f)
+            chunks = pickle.load(f)  # noqa: S301 - trusted local cache
             
         with paths.cache_bm25.open("rb") as f:
-            bm25 = pickle.load(f)
+            bm25 = pickle.load(f)  # noqa: S301 - trusted local cache
             
         logger.info("Cache loaded: %.1fs | chunks=%d", time.monotonic()-t, len(chunks))
         print(f"       chunks={len(chunks)}  (from Cache/)")

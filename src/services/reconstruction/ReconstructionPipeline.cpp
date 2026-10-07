@@ -36,6 +36,7 @@
 
 namespace {
 constexpr const char *kReconstructionCacheFileName = "recon_cache_quality_v3.ply";
+constexpr const char *kMeshCacheFileName            = "recon_mesh_cache_v3.ply";
 
 std::vector<cv::DMatch> filterMatchesByFundamental(
     const std::vector<cv::DMatch> &matches,
@@ -865,8 +866,11 @@ bool ReconstructionPipeline::reconstruct() {
     m_usedTrackBasedGroundTruth = false;
 
     QString cachePath;
+    QString meshCachePath;
     if (!imageFiles.empty()) {
-        cachePath = QFileInfo(imageFiles[0]).absolutePath() + "/" + kReconstructionCacheFileName;
+        QString dir = QFileInfo(imageFiles[0]).absolutePath();
+        cachePath     = dir + "/" + kReconstructionCacheFileName;
+        meshCachePath = dir + "/" + kMeshCacheFileName;
     }
 
     // ---- NHÁNH CACHE ----
@@ -882,7 +886,7 @@ bool ReconstructionPipeline::reconstruct() {
             }
             qDebug() << "Reconstruction: Loaded" << points3D.size() << "pts from cache.";
 
-            // Texture lại bằng best-view
+            // Re-texture point cloud bằng best-view
             textureFromImages(points3D, colors, images, camParams);
 
             // Lưu lại cache đã texture best-view
@@ -898,10 +902,24 @@ bool ReconstructionPipeline::reconstruct() {
                 qDebug() << "Reconstruction: Saved TEXTURED cache to" << cachePath;
             }
 
-            // Tạo lại mesh riêng để xuất file, không dùng làm cache
-            auto mesh = poissonMeshing(points3D, colors, 10);
-            textureMeshFromImages(mesh, images, camParams);
-            return!points3D.empty();
+            // Nếu mesh cache đã tồn tại → load trực tiếp, skip Poisson
+            if (!meshCachePath.isEmpty() && QFile::exists(meshCachePath)) {
+                qDebug() << "Reconstruction: Found MESH cache at" << meshCachePath
+                         << "— skipping Poisson.";
+                // Mesh đã được lưu sẵn, chỉ cần re-texture nếu muốn
+                // (mesh file đã textured, không cần làm gì thêm)
+            } else {
+                // Mesh cache chưa có → Poisson lần đầu, sau đó lưu cache
+                qDebug() << "Reconstruction: No mesh cache — running Poisson...";
+                auto mesh = poissonMeshing(points3D, colors, 10);
+                textureMeshFromImages(mesh, images, camParams);
+                // Lưu mesh cache
+                if (!meshCachePath.isEmpty()) {
+                    pcl::io::savePLYFileBinary(meshCachePath.toStdString(), mesh);
+                    qDebug() << "Reconstruction: Saved MESH cache to" << meshCachePath;
+                }
+            }
+            return !points3D.empty();
         }
     }
 
@@ -937,7 +955,7 @@ bool ReconstructionPipeline::reconstruct() {
     textureFromImages(points3D, colors, images, camParams);
 
     // 2. Lưu cache 988k cho Qt - KHÔNG lấy mesh 3.2M làm cache
-    if (!cachePath.isEmpty() &&!points3D.empty()) {
+    if (!cachePath.isEmpty() && !points3D.empty()) {
         PointCloudT::Ptr cloud(new PointCloudT);
         cloud->resize(points3D.size());
         for (size_t i=0;i<points3D.size();++i){
@@ -953,7 +971,13 @@ bool ReconstructionPipeline::reconstruct() {
     auto mesh = poissonMeshing(points3D, colors, 10);
     textureMeshFromImages(mesh, images, camParams);
 
-    return!points3D.empty();
+    // 4. Lưu mesh cache để lần sau skip Poisson
+    if (!meshCachePath.isEmpty()) {
+        pcl::io::savePLYFileBinary(meshCachePath.toStdString(), mesh);
+        qDebug() << "Reconstruction: Saved MESH cache to" << meshCachePath;
+    }
+
+    return !points3D.empty();
 }
 
 // ─── Accessors ───────────────────────────────────────────────────────────────

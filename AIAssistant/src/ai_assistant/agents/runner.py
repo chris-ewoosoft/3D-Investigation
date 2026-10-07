@@ -93,7 +93,7 @@ def run_langgraph_agent(
         if generate_action_id_fn:
             return generate_action_id_fn()
         import hashlib
-        return hashlib.md5(f"{time.time()}".encode()).hexdigest()[:12]
+        return hashlib.sha256(f"{time.time()}".encode()).hexdigest()[:12]
 
     def _save_pending() -> None:
         if save_pending_fn:
