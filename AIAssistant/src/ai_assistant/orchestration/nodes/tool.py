@@ -11,15 +11,17 @@ from typing import Any, Callable
 
 from modules.agent_logging import get_agent_logger
 
-from ..state import AgentState, Executor, VerifyResult
+from ..state import (
+    COMPLETION_TOOLS,
+    LOW_RISK_TOOLS,
+    SEMANTIC_REFLECTION_TOOLS,
+    AgentState,
+    Executor,
+    VerifyResult,
+)
 from .summarize import summarize_messages
 
 logger = get_agent_logger("tool")
-
-# Global variables imported from original constants
-COMPLETION_TOOLS = {"transfer_to_chatbot_agent"}
-LOW_RISK_TOOLS = {"list_directory", "read_file", "search_text", "find_files"}
-SEMANTIC_REFLECTION_TOOLS = {"read_file", "rag_search"}
 
 
 @dataclass

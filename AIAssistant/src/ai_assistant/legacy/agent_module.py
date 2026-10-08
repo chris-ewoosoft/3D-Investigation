@@ -1,5 +1,4 @@
 # ruff: noqa: I001
-import queue
 import re
 from collections.abc import Callable
 
@@ -627,56 +626,14 @@ def _run_langgraph_agent(system_prompt: str, task: str, session_id: str,
 _load_pending_actions()
 
 
-from fastapi import APIRouter  # noqa: E402,I001
-from fastapi.responses import StreamingResponse  # noqa: E402,I001
-agent_router = APIRouter()
+import sys
+from ai_assistant.adapters.http.agent_routes import (  # noqa: E402
+    _agent_response,
+    _stream_langgraph_execution,
+    build_agent_router,
+)
 
 
-def _agent_response(payload: dict, request: Request):
-    """Negotiate JSON (Qt compatibility) or SSE on the same execute URL."""
-    if "text/event-stream" not in request.headers.get("accept", ""):
-        return payload
-
-    def events():
-        yield f"event: status\ndata: {json.dumps({'status': payload.get('status'), 'session_id': payload.get('session_id')})}\n\n"
-        for step in payload.get("steps", []):
-            yield f"event: step\ndata: {json.dumps(step, ensure_ascii=False)}\n\n"
-        yield f"event: done\ndata: {json.dumps({key: value for key, value in payload.items() if key != 'steps'}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-def _stream_langgraph_execution(run: Callable[[Callable[[dict], None]], dict]):
-    """Stream LangGraph node/tool steps as they happen over SSE."""
-    events: queue.Queue[tuple[str, object]] = queue.Queue()
-
-    def worker() -> None:
-        try:
-            events.put(("result", run(lambda step: events.put(("step", step)))))
-        except Exception as error:  # noqa: BLE001
-            events.put(("error", str(error)))
-
-    threading.Thread(target=worker, daemon=True, name="agent-sse").start()
-
-    def stream():
-        yield "event: status\ndata: {\"status\": \"running\"}\n\n"
-        while True:
-            kind, value = events.get()
-            if kind == "step":
-                yield f"event: step\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
-            elif kind == "result":
-                payload = value
-                yield f"event: done\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                return
-            else:
-                yield f"event: error\ndata: {json.dumps({'detail': value}, ensure_ascii=False)}\n\n"
-                return
-
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-@agent_router.post("/v1/agent/execute")
 def agent_execute(request: AgentExecuteRequest, http_req: Request):
     """
     Execute an agentic task with tool-calling loop.
@@ -736,7 +693,6 @@ def agent_execute(request: AgentExecuteRequest, http_req: Request):
         result["retry_message_index"] = retry_idx
     return _agent_response(result, http_req)
 
-@agent_router.post("/v1/agent/cancel")
 def agent_cancel(request: AgentCancelRequest):
     """Request cooperative cancellation for a running session/request."""
     cancelled = task_coordinator.cancel(request.session_id, request.request_id)
@@ -745,7 +701,6 @@ def agent_cancel(request: AgentCancelRequest):
     return {"status": "cancelled", **cancelled}
 
 
-@agent_router.post("/v1/agent/ui-action-result")
 def agent_ui_action_result(request: AgentUiActionResultRequest):
     """Close the desktop-action loop after the Qt slot has run."""
     _cleanup_pending_actions()
@@ -851,7 +806,6 @@ def agent_ui_action_result(request: AgentUiActionResultRequest):
     }
 
 
-@agent_router.post("/v1/agent/approve")
 def agent_approve(request: AgentApproveRequest, http_req: Request):
     """
     Approve or reject a pending agent action (write_file, run_command).
@@ -1093,6 +1047,9 @@ def agent_approve(request: AgentApproveRequest, http_req: Request):
         "iterations": iteration,
         "total_ms": round(total_ms),
     }
+
+
+agent_router = build_agent_router(sys.modules[__name__])
 
 
 # Cleanup expired pending actions (older than 10 minutes)

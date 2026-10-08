@@ -25,6 +25,7 @@ if _PACKAGE_ROOT not in sys.path:
 from ai_assistant.adapters.a2a import build_a2a_router
 from ai_assistant.adapters.http import (
     build_admin_router,
+    build_agent_router,
     build_chat_router,
     build_health_router,
 )
@@ -118,12 +119,12 @@ app = create_app(platform.settings, lifespan)
 
 def _refresh_agent_routes() -> None:
     """Replace FastAPI's old Agent handlers after reloading agent_module."""
-    agent_paths = {"/v1/agent/execute", "/v1/agent/approve", "/v1/agent/ui-action-result"}
+    agent_paths = {"/v1/agent/execute", "/v1/agent/approve", "/v1/agent/ui-action-result", "/v1/agent/cancel"}
     app.router.routes[:] = [
         route for route in app.router.routes
         if getattr(route, "path", None) not in agent_paths
     ]
-    app.include_router(agent_module.agent_router)
+    app.include_router(build_agent_router(agent_module))
     app.openapi_schema = None
 
 
@@ -162,8 +163,8 @@ app.include_router(build_admin_router(
     logger=logger,
 ))
 
-# Agent endpoints (still in agent_module; migration tracked in Pha 5)
-app.include_router(agent_module.agent_router)
+# Agent endpoints
+app.include_router(build_agent_router(agent_module))
 
 # Optional protocol adapters
 if platform.settings.enable_a2a:

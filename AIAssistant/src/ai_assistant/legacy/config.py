@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field, field_validator
 # --- NEW PLATFORM INTEGRATION ---
 # Temporary sys.path modification to ensure ai_assistant is found during migration
 # without requiring developers to run `pip install -e .` immediately.
-_src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+_src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
 
@@ -77,7 +77,7 @@ warnings.filterwarnings("ignore", module="keras")
 
 # ─── Path Resolution ──────────────────────────────────────────────────────────
 MODULES_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = os.path.abspath(os.path.join(MODULES_DIR, ".."))
+BASE_DIR = os.path.abspath(os.path.join(MODULES_DIR, "..", "..", ".."))
 
 def _load_local_env() -> None:
     env_path = os.path.join(BASE_DIR, ".env")
