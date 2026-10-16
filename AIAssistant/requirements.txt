@@ -1,0 +1,61 @@
+# ─── 3D-Reconstruction AI Server — Dependencies ───────────────────────────────
+# Cài 1 lần duy nhất:
+#   pip install -r AIAssistant/requirements.txt
+#
+# Với GPU CUDA 12.2 (khuyến nghị):
+#   pip install llama-cpp-python[server] \
+#       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu122
+#
+# CPU only:
+#   pip install llama-cpp-python
+
+# ── LLM ────────────────────────────────────────────────────────────────────────
+# llama-cpp-python cài thủ công theo hướng dẫn trên (GPU/CPU)
+huggingface_hub>=0.23.0
+
+# ── Embedding & RAG ────────────────────────────────────────────────────────────
+sentence-transformers>=2.7.0
+faiss-gpu>=1.8.0; platform_system != "Windows"
+faiss-cpu>=1.8.0; platform_system == "Windows"
+#faiss-cpu>=1.8.0              # Đổi thành faiss-gpu nếu muốn encode nhanh hơn
+rank_bm25>=0.2.2
+numpy>=1.26.0
+llama-index-core>=0.11.0
+llama-index-vector-stores-faiss>=0.3.0
+llama-index-embeddings-huggingface>=0.3.0
+llama-index-retrievers-bm25>=0.3.0
+
+# ── Document loaders ───────────────────────────────────────────────────────────
+python-docx>=1.1.0
+pdfplumber>=0.11.0
+pdfminer.six>=20231228
+
+# ── API server ─────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+mcp>=1.0.0
+langgraph>=1.0.0
+prometheus-client>=0.20.0
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+# ── OTLP span export (optional: pip install opentelemetry-exporter-otlp-proto-http)
+# With AGENT_OBSERVABILITY=1 and AGENT_OTLP_ENDPOINT=http://host:4318/v1/traces
+# the tracer ships spans to that collector. Without the package the wiring
+# logs one warning and spans stay in-process (no-op), never a crash.
+# opentelemetry-exporter-otlp-proto-http>=1.27.0
+# Optional persistent checkpoints: install one matching AGENT_CHECKPOINT_BACKEND.
+# langgraph-checkpoint-postgres>=2.0.0
+# langgraph-checkpoint-redis>=0.1.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# ── A2A Protocol (optional: pip install a2a-sdk) ──────────────────────────────
+# Enables Agent-to-Agent protocol for remote agent routing and discovery.
+# Set A2A_ENABLED=1 to activate. Works without it — falls back to in-process.
+# a2a-sdk>=1.0.0
+
+# ── LangSmith Tracing (optional: pip install langsmith) ────────────────────────
+# Enables LLM/agent tracing to the LangSmith dashboard.
+# Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY=... to activate.
+# Works without it — falls back to OpenTelemetry + file logging.
+# langsmith>=0.2.0

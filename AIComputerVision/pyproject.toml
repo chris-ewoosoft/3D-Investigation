@@ -1,0 +1,93 @@
+# Tooling configuration for the AIComputerVision training pipeline.
+# This directory is not an installable package; runtime dependencies are listed
+# in requirements.txt. Ruff discovers this file when linting AIComputerVision/.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["runs", "Models"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "BLE", "S", "RUF"]
+ignore = [
+    "E501",   # long lines are acceptable (absolute paths in log messages)
+    "E402",   # imports after lazy dependency gates
+    "BLE001", # broad except at the CLI boundary
+    "RUF001", # unicode punctuation in user-facing messages
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+# Static typing is part of the contract: this package is the source of the
+# model file names the Qt application hard-codes, so a wrong type must be a
+# build failure rather than a runtime surprise. Run with `python -m mypy`.
+[tool.mypy]
+python_version = "3.11"
+files = ["cvtrain", "tests", "TrainModel.py"]
+ignore_missing_imports = false
+show_error_codes = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_calls = true
+disallow_subclassing_any = true
+disallow_any_generics = true
+check_untyped_defs = true
+warn_unreachable = true
+no_implicit_optional = true
+no_implicit_reexport = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unused_configs = true
+warn_return_any = true
+strict_equality = true
+
+# ``ultralytics`` re-exports ``YOLO`` from a submodule in its ``__init__``
+# without listing it in ``__all__``. That is the framework's packaging choice,
+# not a re-export of ours: ``no_implicit_reexport`` is a rule about *this*
+# package's module boundaries, and applying it to site-packages would only
+# produce a suppression comment that rots when the dependency is absent.
+# ``ignore_missing_imports`` is scoped here (and to ``yaml`` / ``tensorboard``
+# below) for the same import-light reason: the adapter imports the ML stack
+# lazily, so ``--help``, linting and the unit suite must type-check with it
+# absent.
+[[tool.mypy.overrides]]
+module = ["ultralytics", "ultralytics.*"]
+no_implicit_reexport = false
+ignore_missing_imports = true
+
+# ``yaml`` is parsed lazily by ``dataset`` for the same reason (PyYAML ships
+# no type hints, so without this the import-light design would fail
+# type-checking on a machine that simply has no stubs installed).
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
+
+# ``tensorboard`` is probed (not used) by the adapter so ``--tensorboard``
+# fails fast instead of silently writing no logs; it ships no stubs either, and
+# it must stay out of the import set of everything else.
+[[tool.mypy.overrides]]
+module = ["tensorboard"]
+ignore_missing_imports = true
+
+# Every statement *and* branch of cvtrain is exercised. The package carries two
+# contracts — the ONNX file names the Qt app hard-codes, and the stdout protocol
+# it parses — so an untested line is an unverified contract. `fail_under` is
+# therefore 100: new code lands together with its test.
+#
+#   coverage run -m unittest discover -s tests
+#   coverage report
+[tool.coverage.run]
+source = ["cvtrain"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+

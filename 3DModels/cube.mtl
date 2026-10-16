@@ -1,0 +1,17 @@
+newmtl red
+Kd 1.0 0.0 0.0   # đỏ
+
+newmtl green
+Kd 0.0 1.0 0.0   # xanh lá
+
+newmtl blue
+Kd 0.0 0.0 1.0   # xanh dương
+
+newmtl yellow
+Kd 1.0 1.0 0.0   # vàng
+
+newmtl purple
+Kd 0.6 0.0 1.0   # tím
+
+newmtl orange
+Kd 1.0 0.5 0.0   # cam

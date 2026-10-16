@@ -1,0 +1,14 @@
+path: F:/PROJECTS/QT/3D-Reconstruction/Dataset
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names: ['Instance-Segmentation']
+
+roboflow:
+  workspace: temple-pf4bc
+  project: instance-segmentation-93yan
+  version: 3
+  license: Private
+  url: https://app.roboflow.com/temple-pf4bc/instance-segmentation-93yan/3

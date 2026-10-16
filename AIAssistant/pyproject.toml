@@ -1,0 +1,196 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "three-d-reconstruction-ai-assistant"
+version = "3.0.0"
+description = "Modular, policy-first AI Agent Platform for 3D-Reconstruction"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "BLE", "S", "RUF", "C90", "N", "TRY"]
+
+ignore = [
+    "BLE001", "S110", "RUF012",
+    "S603", "S602", "S607", "S310",
+    "W291", "W293", "RUF001",
+    "E501",   # long lines acceptable in this codebase
+    "E402",   # module-level imports after code (post-install, post-init patterns)
+]
+
+[tool.ruff.lint.mccabe]
+# Every function stays at or below 15 branches (ADR 0014, tightened ADR 0016).
+# The gate was enabled debt-free: the nine functions that exceeded it across
+# both tightenings were decomposed rather than suppressed, so nothing in the
+# tree carries a ``# noqa: C901``.
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures intentionally embed sample secrets and grant tokens; S104 is
+# for the bind-address assertions, which assert policy rather than bind a socket.
+"tests/**" = ["S105", "S106", "S104"]
+
+[tool.coverage.run]
+# Branch coverage is enabled so every conditional in the ReAct loop, the
+# approval policy and the transport adapters is counted, not just statements.
+branch = true
+source = ["ai_assistant"]
+
+[tool.coverage.report]
+# ``exclude_also`` *extends* coverage's defaults (pragma, TYPE_CHECKING,
+# overload, NotImplementedError) instead of replacing them. What it claims is
+# only the one-line interpreter dispatch: the entry *bodies* live in
+# ``server.main`` and ``server_manager.configure_stdio_for_qt``/``qt_entry``
+# and are unit-tested (``tests/integration/test_main_entry_points.py``,
+# ADR 0015), so nothing behind the guard is unmeasured.
+exclude_also = [
+    "if __name__ == .__main__.:",
+]
+# Measured, not aspirational (ADR 0015): 100.00% of 8359 statements and 2186
+# branches on 2026-10-16 with the full suite (1791 tests) on Python 3.11 with
+# ``faiss``/``sentence-transformers`` installed. The number is recorded in
+# README.md (section ``## Kiểm thử``) together with the excluded entry
+# points; a stripped-down environment (no optional RAG stack) reports less
+# because the optional-dependency branches flip with the environment.
+fail_under = 100
+# legacy package removed
+show_missing = true
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+# Full strictness (ADR 0022): ``python -m mypy src/ai_assistant --strict``
+# reports 0 issues over all 135 files, so the config holds the whole tree to
+# it — no gradual overrides left. Third-party packages without stubs are
+# imported as Any (ignore_missing_imports). ``warn_unused_ignores`` ships with
+# strict, so a stale ``# type: ignore`` cannot outlive the code it excuses;
+# the one import where the comment is version-dependent (mcp 1.x vs 2.x) opts
+# out below, with its reason in the source.
+strict = true
+
+# Env-portability exception (ADR 0022): these three modules integrate
+# third-party SDKs whose typing differs between the full local env and the
+# minimal CI test env (requirements-test.txt): a missing or unstubbed import
+# degrades to Any there, tripping warn_return_any / disallow_subclassing_any
+# while the same code is precisely typed locally. Every other strict flag
+# holds for them, and full strict holds for the other 132 files — CI's mypy
+# step reports exactly these three errors without this override, nothing else.
+[[tool.mypy.overrides]]
+module = [
+    "ai_assistant.observability.metrics",
+    "ai_assistant.rag.embeddings",
+    "ai_assistant.rag.loaders",
+]
+warn_return_any = false
+disallow_subclassing_any = false
+
+[[tool.mypy.overrides]]
+# The ``# type: ignore[attr-defined]`` on the ``mcp.server.fastmcp`` import is
+# required on one major version of mcp and unused on the other, so unused-ignore
+# reporting would flip with the installed version (see the comment in the module).
+module = "ai_assistant.adapters.mcp"
+warn_unused_ignores = false
+
+[tool.importlinter]
+root_package = "ai_assistant"
+# forbid frameworks (fastapi, langgraph, ...) from the pure core; the external
+# packages must be present in the import graph for that check to work.
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Domain and ports only touch the standard library and their own layer"
+type = "forbidden"
+source_modules = ["ai_assistant.domain", "ai_assistant.ports"]
+forbidden_modules = [
+    "ai_assistant.adapters", "ai_assistant.application", "ai_assistant.agents",
+    "ai_assistant.bootstrap", "ai_assistant.config", "ai_assistant.legacy",
+    "ai_assistant.llm", "ai_assistant.observability", "ai_assistant.orchestration",
+    "ai_assistant.rag", "ai_assistant.tools",
+    "fastapi", "langgraph", "langchain", "pydantic", "mcp", "httpx", "uvicorn",
+]
+
+[[tool.importlinter.contracts]]
+name = "Application depends inward only (domain, ports, plugins)"
+type = "forbidden"
+source_modules = ["ai_assistant.application"]
+forbidden_modules = [
+    "ai_assistant.adapters", "ai_assistant.agents", "ai_assistant.bootstrap",
+    "ai_assistant.config", "ai_assistant.legacy", "ai_assistant.llm",
+    "ai_assistant.observability", "ai_assistant.orchestration", "ai_assistant.rag",
+    "ai_assistant.tools",
+    "fastapi", "langgraph", "langchain", "pydantic", "mcp", "httpx", "uvicorn",
+]
+
+[[tool.importlinter.contracts]]
+name = "The legacy modules package stays removed"
+type = "forbidden"
+source_modules = ["ai_assistant"]
+forbidden_modules = ["modules"]
+
+[[tool.importlinter.contracts]]
+name = "Agents and orchestration do not import HTTP, bootstrap or legacy directly"
+type = "forbidden"
+source_modules = ["ai_assistant.agents", "ai_assistant.orchestration"]
+forbidden_modules = ["ai_assistant.adapters.http", "ai_assistant.bootstrap", "ai_assistant.legacy"]
+# Indirect reachability counts too: neither package may get to the HTTP
+# adapter or the composition root *through* another package. The agent layer's
+# stricter "may not import an adapter at all" rule is the next contract.
+
+[[tool.importlinter.contracts]]
+name = "The LLM layer never imports RAG (the dependency stays one-directional)"
+type = "forbidden"
+source_modules = ["ai_assistant.llm"]
+forbidden_modules = ["ai_assistant.rag"]
+# rag/index.py → llm.hardware is the intended direction; the reverse edge was
+# llm/prompts.py → rag.image_utils, which made the two packages a cycle. The
+# image helpers moved to the package-root leaf (ai_assistant/image_utils.py),
+# so both packages now import the same neutral module.
+
+[[tool.importlinter.contracts]]
+name = "The internal engine wrapper imports no application layer"
+type = "forbidden"
+source_modules = ["ai_assistant.internal"]
+forbidden_modules = [
+    "ai_assistant.adapters", "ai_assistant.agents", "ai_assistant.application",
+    "ai_assistant.bootstrap", "ai_assistant.config", "ai_assistant.image_utils",
+    "ai_assistant.legacy", "ai_assistant.llm", "ai_assistant.observability",
+    "ai_assistant.orchestration", "ai_assistant.ports", "ai_assistant.rag",
+    "ai_assistant.settings", "ai_assistant.tools",
+]
+# internal/ owns the LangGraph wrapper and imports the framework — that is its
+# job — but no ai_assistant layer: orchestration/graph.py passes the state
+# schema into LangGraphEngine instead of the wrapper importing AgentState, so
+# the old orchestration → internal → orchestration package cycle is gone.
+
+[[tool.importlinter.contracts]]
+name = "Agents never import an adapter (persistence is injected)"
+type = "forbidden"
+source_modules = ["ai_assistant.agents"]
+forbidden_modules = ["ai_assistant.adapters"]
+# The last sanctioned touchpoint is gone: agents/pending_store.py now holds
+# the layer's own MemoryPendingStore fallback, and the composition root
+# injects adapters.persistence.PendingActionStore behind PendingActionPort,
+# so the agent layer has no adapter import left to permit. AST twin:
+# test_the_agent_layer_imports_no_adapter_at_all.
+
+[[tool.importlinter.contracts]]
+name = "Orchestration never imports any adapter (A2A via dependency inversion)"
+type = "forbidden"
+source_modules = ["ai_assistant.orchestration"]
+forbidden_modules = ["ai_assistant.adapters"]
+# ADR 0002: adapters depend on orchestration, never back. The supervisor
+# reaches A2A only through set_remote_specialist_lookup installed by the
+# composition root. AST twin: test_orchestration_does_not_import_any_adapter.
+# The narrower adapters.http guard above is subsumed here and kept for its
+# sharper error message.

@@ -1,0 +1,105 @@
+#include "ReconstructionService.h"
+#include <QDir>
+
+ReconstructionService::ReconstructionService()
+    : m_pipeline(std::make_unique<ReconstructionPipeline>())
+{
+}
+
+void ReconstructionService::setImages(const QStringList& paths) {
+    if (m_running) return;
+    std::vector<QString> stdPaths;
+    stdPaths.reserve(static_cast<size_t>(paths.size()));
+    for (const QString& p : paths)
+        stdPaths.push_back(QDir::toNativeSeparators(p));
+    
+    std::unique_lock lock(m_mutex);
+    m_pipeline->setImages(stdPaths);
+}
+
+bool ReconstructionService::loadCameraParams(const QString& filePath) {
+    if (m_running) return false;
+    std::unique_lock lock(m_mutex);
+    return m_pipeline->loadCameraParams(filePath);
+}
+
+void ReconstructionService::configure(int densityLevel, int maxFeatures, bool autoClean) {
+    if (m_running) return;
+    std::unique_lock lock(m_mutex);
+    
+    ReconstructionConfig cfg = m_pipeline->config();
+    cfg.sift.nfeatures = maxFeatures;
+    
+    // Map density Level (0: Thấp, 1: TB, 2: Cao, 3: Rất cao) to leafSize
+    switch (densityLevel) {
+        case 0: cfg.filter.voxelLeafSizeTrack = 0.005f; break; // Thấp
+        case 1: cfg.filter.voxelLeafSizeTrack = 0.001f; break; // TB
+        case 2: cfg.filter.voxelLeafSizeTrack = 0.0005f; break;// Cao
+        case 3: cfg.filter.voxelLeafSizeTrack = 0.0001f; break;// Rất cao
+        default: cfg.filter.voxelLeafSizeTrack = 0.001f; break;
+    }
+    
+    if (!autoClean) {
+        cfg.filter.sorMeanKTrack = 0; // Disable SOR
+        cfg.filter.rorMinNeighborsTrack = 0; // Disable ROR
+    } else {
+        cfg.filter.sorMeanKTrack = 15;
+        cfg.filter.rorMinNeighborsTrack = 2;
+    }
+    
+    m_pipeline->setConfig(cfg);
+}
+
+bool ReconstructionService::reconstruct() {
+    if (m_running.exchange(true)) return false; // Already running
+    
+    bool ok;
+    {
+        std::unique_lock lock(m_mutex);
+        ok = m_pipeline->reconstruct();
+    }
+    m_running = false;
+    return ok;
+}
+
+bool ReconstructionService::isRunning() const {
+    return m_running;
+}
+
+void ReconstructionService::stopReconstruction() {
+    // ReconstructionPipeline doesn't have a stop API yet.
+    // This is a placeholder — thread termination handled by ReconstructThread.
+    m_running = false;
+}
+
+QStringList ReconstructionService::getImageList() const {
+    std::shared_lock lock(m_mutex);
+    QStringList result;
+    for (const QString& p : m_pipeline->getImages())
+        result.append(p);
+    return result;
+}
+
+std::vector<cv::Point3f> ReconstructionService::getPointCloud() const {
+    if (m_running) return {};
+    std::shared_lock lock(m_mutex);
+    return m_pipeline->getPointCloud();
+}
+
+std::vector<cv::Vec3b> ReconstructionService::getPointColors() const {
+    if (m_running) return {};
+    std::shared_lock lock(m_mutex);
+    return m_pipeline->getPointColors();
+}
+
+bool ReconstructionService::hasResult() const {
+    if (m_running) return false;
+    std::shared_lock lock(m_mutex);
+    return !m_pipeline->getPointCloud().empty();
+}
+
+void ReconstructionService::processPointCloud() {
+    if (m_running) return;
+    std::unique_lock lock(m_mutex);
+    m_pipeline->processPointCloud();
+}

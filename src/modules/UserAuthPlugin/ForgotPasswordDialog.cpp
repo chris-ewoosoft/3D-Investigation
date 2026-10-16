@@ -1,0 +1,162 @@
+#include "ForgotPasswordDialog.h"
+#include "UserManager.h"
+#include "UserAuthPlugin.h"
+#include "LanguageManager.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLineEdit>
+#include <QLabel>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QTimer>
+#include "../../utils/ModernMessageBox.h"
+#include <QRegularExpression>
+
+ForgotPasswordDialog::ForgotPasswordDialog(QWidget *parent)
+    : ModernDialog(UserAuthPlugin::translate("forgot.title"), parent)
+{
+    setFixedSize(400, 350);
+    setupUi();
+    applyStyle();
+}
+
+void ForgotPasswordDialog::setupUi() {
+    auto *content = new QWidget(this);
+    auto *vl = new QVBoxLayout(content);
+    vl->setContentsMargins(20, 20, 20, 20);
+    vl->setSpacing(15);
+
+    m_stack = new QStackedWidget(content);
+    
+    // Step 1: Email
+    auto *step1 = new QWidget;
+    auto *s1l = new QVBoxLayout(step1);
+    s1l->setContentsMargins(0, 0, 0, 0);
+    s1l->addWidget(new QLabel(UserAuthPlugin::translate("forgot.email_label"), step1));
+    m_emailEdit = new QLineEdit(step1);
+    m_emailEdit->setPlaceholderText("example@mail.com");
+    m_emailEdit->setFixedHeight(40);
+    s1l->addWidget(m_emailEdit);
+    m_sendOtpBtn = new QPushButton(UserAuthPlugin::translate("forgot.send_otp"), step1);
+    m_sendOtpBtn->setObjectName("primary");
+    m_sendOtpBtn->setFixedHeight(40);
+    s1l->addWidget(m_sendOtpBtn);
+    s1l->addStretch();
+    m_stack->addWidget(step1);
+
+    // Step 2: OTP
+    auto *step2 = new QWidget;
+    auto *s2l = new QVBoxLayout(step2);
+    s2l->setContentsMargins(0, 0, 0, 0);
+    s2l->addWidget(new QLabel(UserAuthPlugin::translate("forgot.otp_label"), step2));
+    m_otpEdit = new QLineEdit(step2);
+    m_otpEdit->setPlaceholderText("OTP");
+    m_otpEdit->setFixedHeight(40);
+    s2l->addWidget(m_otpEdit);
+    m_verifyOtpBtn = new QPushButton(UserAuthPlugin::translate("common.ok"), step2);
+    m_verifyOtpBtn->setObjectName("primary");
+    m_verifyOtpBtn->setFixedHeight(40);
+    m_verifyOtpBtn->setDefault(true);
+    s2l->addWidget(m_verifyOtpBtn);
+    s2l->addStretch();
+    m_stack->addWidget(step2);
+
+    // Step 3: New Password
+    auto *step3 = new QWidget;
+    auto *s3l = new QVBoxLayout(step3);
+    s3l->setContentsMargins(0, 0, 0, 0);
+    s3l->addWidget(new QLabel(UserAuthPlugin::translate("forgot.new_pass"), step3));
+    m_newPassEdit = new QLineEdit(step3);
+    m_newPassEdit->setEchoMode(QLineEdit::Password);
+    m_newPassEdit->setFixedHeight(40);
+    s3l->addWidget(m_newPassEdit);
+    s3l->addWidget(new QLabel(UserAuthPlugin::translate("changepw.confirm"), step3));
+    m_confirmPassEdit = new QLineEdit(step3);
+    m_confirmPassEdit->setEchoMode(QLineEdit::Password);
+    m_confirmPassEdit->setFixedHeight(40);
+    s3l->addWidget(m_confirmPassEdit);
+    m_resetBtn = new QPushButton(UserAuthPlugin::translate("forgot.reset_btn"), step3);
+    m_resetBtn->setObjectName("primary");
+    m_resetBtn->setFixedHeight(40);
+    s3l->addWidget(m_resetBtn);
+    s3l->addStretch();
+    m_stack->addWidget(step3);
+
+    vl->addWidget(m_stack);
+
+    m_statusLabel = new QLabel(content);
+    m_statusLabel->setWordWrap(true);
+    m_statusLabel->setVisible(false);
+    vl->addWidget(m_statusLabel);
+
+    connect(m_sendOtpBtn,   &QPushButton::clicked, this, &ForgotPasswordDialog::onSendOtp);
+    connect(m_verifyOtpBtn, &QPushButton::clicked, this, &ForgotPasswordDialog::onVerifyOtp);
+    connect(m_resetBtn,     &QPushButton::clicked, this, &ForgotPasswordDialog::onResetPassword);
+
+    setContentLayout(vl);
+}
+
+void ForgotPasswordDialog::applyStyle() {
+    setStyleSheet("QLabel { color: #94a3b8; font-size: 13px; } "
+                  "#statusLabel { font-size: 13px; padding: 5px; border-radius: 4px; }");
+}
+
+void ForgotPasswordDialog::setError(const QString &msg) {
+    m_statusLabel->setText(msg);
+    m_statusLabel->setStyleSheet("color: #f87171; background: rgba(248,113,113,0.1);");
+    m_statusLabel->setVisible(true);
+}
+
+void ForgotPasswordDialog::onSendOtp() {
+    QString email = m_emailEdit->text().trimmed();
+    if (email.isEmpty()) {
+        ModernMessageBox::warning(this, UserAuthPlugin::translate("common.error"), UserAuthPlugin::translate("forgot.err_empty_email"));
+        return;
+    }
+    
+    QRegularExpression mailRegex("^[\\w\\.-]+@([\\w-]+\\.)+[\\w-]{2,4}$");
+    if (!mailRegex.match(email).hasMatch()) {
+        ModernMessageBox::warning(this, UserAuthPlugin::translate("common.error"), UserAuthPlugin::translate("forgot.err_invalid_email"));
+        return;
+    }
+
+    if (UserManager::instance()->findUsernameByEmail(email).isEmpty()) {
+        ModernMessageBox::warning(this, UserAuthPlugin::translate("common.error"), UserAuthPlugin::translate("forgot.err_no_email"));
+        return;
+    }
+    
+    QString msg;
+    if (UserManager::instance()->sendPasswordResetOtp(email, msg)) {
+        m_pendingEmail = email;
+        m_stack->setCurrentIndex(1);
+        m_statusLabel->setVisible(false);
+    } else {
+        setError(msg);
+    }
+}
+
+void ForgotPasswordDialog::onVerifyOtp() {
+    QString otp = m_otpEdit->text().trimmed();
+    if (UserManager::instance()->verifyOtp(m_pendingEmail, otp)) {
+        m_stack->setCurrentIndex(2);
+        m_statusLabel->setVisible(false);
+    } else {
+        setError(UserAuthPlugin::translate("forgot.err_otp"));
+    }
+}
+
+void ForgotPasswordDialog::onResetPassword() {
+    QString p1 = m_newPassEdit->text();
+    QString p2 = m_confirmPassEdit->text();
+    if (p1.isEmpty() || p1 != p2) { setError(UserAuthPlugin::translate("changepw.err_mismatch")); return; }
+
+    if (UserManager::instance()->resetPassword(m_pendingEmail, p1)) {
+        m_statusLabel->setText(UserAuthPlugin::translate("changepw.success"));
+        m_statusLabel->setStyleSheet("color: #4ade80; background: rgba(74,222,128,0.1);");
+        m_statusLabel->setVisible(true);
+        m_resetBtn->setEnabled(false);
+        QTimer::singleShot(2000, this, &QDialog::accept);
+    } else {
+        setError(UserAuthPlugin::translate("forgot.err_reset"));
+    }
+}

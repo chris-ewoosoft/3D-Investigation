@@ -1,0 +1,615 @@
+"""Architecture boundary guards for the modular AI Assistant platform.
+
+These tests fail when a lower layer starts importing an outer layer or a
+framework, which is how Clean Architecture boundaries rot over time. They are
+pure AST scans (no application code is imported), so they are fast and safe to
+run in CI. See ``Docs/adr/0001-platform-boundaries.md``,
+`0002-mcp-a2a-trust-and-execution.md` and `0003-single-execution-core.md`.
+"""
+from __future__ import annotations
+
+import ast
+import sys
+import unittest
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parents[2] / "src"
+PACKAGE = SRC / "ai_assistant"
+
+FRAMEWORKS = frozenset(
+    {
+        "fastapi",
+        "starlette",
+        "pydantic",
+        "langgraph",
+        "langchain",
+        "langchain_core",
+        "langsmith",
+        "llama_cpp",
+        "mcp",
+        "a2a",
+        "httpx",
+        "uvicorn",
+    }
+)
+
+# Top-level ai_assistant subpackages the application layer may import.
+APPLICATION_ALLOWED = {"application", "domain", "plugins", "ports"}
+
+
+def _iter_python(layer: str | None = None):
+    base = PACKAGE if layer is None else PACKAGE / layer
+    yield from sorted(base.rglob("*.py"))
+
+
+def _imports(path: Path) -> list[str]:
+    """Return the absolute dotted module name for every import in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parts = path.relative_to(PACKAGE).with_suffix("").parts
+    # Works for both ``pkg/module.py`` and ``pkg/__init__.py``.
+    package_parts = parts[:-1]
+    modules: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                trim = (
+                    package_parts[: len(package_parts) - (node.level - 1)]
+                    if node.level > 1
+                    else package_parts
+                )
+                base = "ai_assistant" + ("." + ".".join(trim) if trim else "")
+                module = f"{base}.{node.module}" if node.module else base
+            else:
+                module = node.module or ""
+            if module:
+                modules.append(module)
+    return modules
+
+
+def _attribute_calls(path: Path, attribute: str) -> list[int]:
+    """Return line numbers of ``something.attribute(...)`` calls in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == attribute
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
+def _legacy(module: str) -> bool:
+    return module == "modules" or module.startswith("modules.")
+
+
+def _call_targets(path: Path) -> set[str]:
+    """Dotted targets of the calls in ``path`` (``obj.attr``/``name``).
+
+    Structural replacement for source substring matching: ``"gateway.execute"``
+    no longer accidentally matches ``gateway.execute_approved``.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {ast.unparse(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+
+
+def _defined_names(path: Path) -> set[str]:
+    """Names of every class/function/method defined in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+
+
+def _identifiers(path: Path) -> set[str]:
+    """Every bare name and attribute name referenced in ``path``."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return names
+
+
+def _keyword_values(path: Path) -> dict[str, set[str]]:
+    """Keyword-argument name -> set of unparsed values (call targets unwrapped).
+
+    Lets a test assert ``orchestrator=LangGraphAgentOrchestrator`` structurally
+    instead of grepping for that exact source text.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    values: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if not keyword.arg:
+                continue
+            value = keyword.value
+            rendered = ast.unparse(value.func if isinstance(value, ast.Call) else value)
+            values.setdefault(keyword.arg, set()).add(rendered)
+    return values
+
+
+def _format(violations: list[tuple[str, str, str]]) -> str:
+    return "\n".join(f"{path}: {module} ({reason})" for path, module, reason in violations)
+
+
+def _is_env_read(node: ast.AST) -> bool:
+    """True for ``os.getenv(...)`` and ``os.environ[...]`` expressions."""
+    if isinstance(node, ast.Call):
+        return (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+            and node.func.attr == "getenv"
+        )
+    if isinstance(node, ast.Subscript):
+        return (
+            isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "os"
+            and node.value.attr == "environ"
+        )
+    return False
+
+
+class _ImportTimeEnvReader(ast.NodeVisitor):
+    """Detect environment reads that execute when a module is imported.
+
+    Covers module/class scope, function default arguments and decorators, and
+    lambda bodies. Function *bodies* are skipped on purpose: reading the
+    environment on demand inside a function is the approved pattern.
+    """
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[int, str]] = []
+
+    def _scan(self, nodes: list[ast.AST | None]) -> None:
+        for node in nodes:
+            if node is None:
+                continue
+            for nested in ast.walk(node):
+                if _is_env_read(nested):
+                    self.hits.append((nested.lineno, ast.unparse(nested)))
+
+    def _visit_callable_defaults(self, node: ast.AST) -> None:
+        args = getattr(node, "args", None)  # type: ignore[attr-defined]
+        if args is not None:
+            self._scan(list(args.defaults) + list(args.kw_defaults))
+        for decorator in getattr(node, "decorator_list", []):
+            self._scan([decorator])
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_callable_defaults(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_callable_defaults(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._scan(list(node.args.defaults) + list(node.args.kw_defaults))
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if _is_env_read(node):
+            self.hits.append((node.lineno, ast.unparse(node)[:80]))
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if _is_env_read(node):
+            self.hits.append((node.lineno, ast.unparse(node)[:80]))
+        self.generic_visit(node)
+
+
+class ArchitectureBoundaryTests(unittest.TestCase):
+    def test_domain_is_pure(self):
+        """Domain may import only the standard library and other domain code."""
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("domain"):
+            for module in _imports(path):
+                if module == "modules" or module.startswith("modules."):
+                    reason = "imports top-level legacy package"
+                elif module.split(".")[0] in FRAMEWORKS:
+                    reason = "imports forbidden framework"
+                elif module.startswith("ai_assistant"):
+                    if module.startswith("ai_assistant.domain"):
+                        continue
+                    reason = "imports outer layer"
+                elif module.split(".")[0] in sys.stdlib_module_names:
+                    continue
+                else:
+                    reason = "imports non-stdlib module"
+                violations.append((str(path.relative_to(PACKAGE)), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_application_does_not_depend_on_adapters_or_frameworks(self):
+        """Application depends inward only (domain/ports/plugins)."""
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("application"):
+            for module in _imports(path):
+                top_level = module.split(".")[0]
+                if module == "modules" or module.startswith("modules."):
+                    reason = "imports top-level legacy package"
+                elif module.split(".")[0] in FRAMEWORKS:
+                    reason = "imports forbidden framework"
+                elif module.startswith("ai_assistant"):
+                    sub = module.split(".")[1] if "." in module else ""
+                    if sub in APPLICATION_ALLOWED:
+                        continue
+                    reason = f"imports outer layer 'ai_assistant.{sub}'"
+                elif top_level in sys.stdlib_module_names:
+                    continue
+                else:
+                    reason = "imports non-stdlib module"
+                violations.append((str(path.relative_to(PACKAGE)), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_no_new_code_imports_the_legacy_modules_package(self):
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python():
+            for module in _imports(path):
+                if module == "modules" or module.startswith("modules."):
+                    violations.append(
+                        (str(path.relative_to(PACKAGE)), module, "imports top-level legacy package")
+                    )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_agents_and_orchestration_do_not_import_the_http_adapter(self):
+        """Guards the fix for the service -> HTTP adapter coupling."""
+        violations: list[tuple[str, str, str]] = []
+        for layer in ("agents", "orchestration"):
+            for path in _iter_python(layer):
+                for module in _imports(path):
+                    if module.startswith("ai_assistant.adapters.http"):
+                        violations.append(
+                            (str(path.relative_to(PACKAGE)), module, "imports HTTP adapter")
+                        )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_orchestration_does_not_import_any_adapter(self):
+        """ADR 0002: orchestration is inner — adapters depend on it, never back.
+
+        The A2A integration uses dependency inversion: the supervisor exposes
+        ``set_remote_specialist_lookup`` and the composition root installs the
+        adapter's resolver, so no orchestration module imports
+        ``ai_assistant.adapters`` (that was an import cycle).
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("orchestration"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant.adapters"):
+                    violations.append(
+                        (str(path.relative_to(PACKAGE)), module, "imports an adapter from orchestration")
+                    )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_the_internal_engine_wrapper_imports_no_layer(self):
+        """``internal/`` is infrastructure: frameworks in, layers out.
+
+        ``internal/langgraph_engine.py`` used to import
+        ``orchestration.state.AgentState``, which tied the wrapper back to the
+        layer that consumes it (``orchestration → internal → orchestration``).
+        The state schema is a constructor argument now, so the wrapper names no
+        ``ai_assistant`` module except the pure domain. This test pins the
+        removal of that reverse edge.
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("internal"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant") and not module.startswith(
+                    "ai_assistant.domain"
+                ):
+                    reason = "internal imports a layer it is supposed to serve"
+                    violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_the_llm_layer_does_not_import_rag(self):
+        """``rag`` may reach ``llm``, never the other way round.
+
+        The reverse edge came from ``llm/prompts.py`` encoding vision
+        attachments through ``rag.image_utils``, which made the two packages a
+        dependency cycle. The image helpers moved to the package root
+        (``ai_assistant/image_utils.py``) — a leaf both packages import — so
+        exactly one direction remains: ``rag/index.py`` → ``llm.hardware``.
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("llm"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant.rag"):
+                    reason = "llm imports rag (cycle with rag → llm.hardware)"
+                    violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_the_agent_layer_imports_no_adapter_at_all(self):
+        """ADR 0003: persistence reaches agents by injection, never by import.
+
+        The last sanctioned touchpoint (``agents/pending_store.py``
+        re-exporting the file-backed ``PendingActionStore``) is gone: the
+        composition root injects the adapter behind the ``PendingActionPort``
+        protocol and the agent layer keeps only its own in-memory fallback
+        (``MemoryPendingStore``). Any ``ai_assistant.adapters`` import
+        anywhere under ``agents/`` is now a CI failure — the boundary is
+        structural, not a documented exception.
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("agents"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant.adapters"):
+                    reason = "imports an adapter (persistence is injected, not imported)"
+                    violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_langgraph_framework_stays_isolated(self):
+        """The graph framework is replaceable: only two modules may import it.
+
+        ``orchestration/graph.py`` is the decision-loop engine and
+        ``adapters/persistence/checkpointing.py`` is the checkpointer adapter.
+        Every other module reaches the agent loop through ports, so the
+        LangGraph/LangChain stack can be swapped without touching callers.
+        """
+        allowed = {
+            "orchestration/graph.py",
+            "internal/langgraph_engine.py",
+            "adapters/persistence/checkpointing.py",
+        }
+        frameworks = ("langgraph", "langchain", "langchain_core")
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python():
+            rel = path.relative_to(PACKAGE).as_posix()
+            if rel in allowed:
+                continue
+            for module in _imports(path):
+                root = module.split(".")[0]
+                if root in frameworks:
+                    violations.append((rel, module, "imports the graph framework outside its isolation boundary"))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_langsmith_tracing_stays_isolated(self):
+        """The LangSmith tracing backend is isolated to its observability adapter.
+
+        Tracing is an infrastructure concern; only
+        ``observability/langsmith_integration.py`` may import the SDK, and it
+        does so lazily so the dependency stays optional.
+        """
+        allowed = {"observability/langsmith_integration.py"}
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python():
+            rel = path.relative_to(PACKAGE).as_posix()
+            if rel in allowed:
+                continue
+            for module in _imports(path):
+                if module.split(".")[0] == "langsmith":
+                    violations.append((rel, module, "imports the tracing SDK outside its adapter"))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_tool_execution_has_a_single_choke_point(self):
+        """ADR 0003: nothing may invoke ``ToolSpec.handler`` directly."""
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python():
+            for line in _attribute_calls(path, "handler"):
+                violations.append(
+                    (str(path.relative_to(PACKAGE)), f"line {line}", "direct handler() call")
+                )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_tool_models_are_not_duplicated(self):
+        """ADR 0003: exactly one type named ``ToolSpec`` — the domain policy model."""
+        definitions: list[str] = []
+        for path in _iter_python():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if isinstance(node, ast.ClassDef) and node.name == "ToolSpec":
+                    definitions.append(path.relative_to(PACKAGE).as_posix())
+        self.assertEqual(definitions, ["domain/tools.py"], definitions)
+
+    def test_no_code_imports_the_removed_core_package(self):
+        """The old ``ai_assistant.core`` tool models were unified into ``tools``."""
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python():
+            for module in _imports(path):
+                if module == "ai_assistant.core" or module.startswith("ai_assistant.core."):
+                    violations.append(
+                        (str(path.relative_to(PACKAGE)), module, "imports removed core package")
+                    )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_agents_and_application_do_not_import_the_legacy_package(self):
+        """ADR 0001: legacy shims are adapters; agent/application code stays clean."""
+        violations: list[tuple[str, str, str]] = []
+        for layer in ("agents", "application"):
+            for path in _iter_python(layer):
+                for module in _imports(path):
+                    if module == "ai_assistant.legacy" or module.startswith("ai_assistant.legacy."):
+                        violations.append(
+                            (str(path.relative_to(PACKAGE)), module, "imports ai_assistant.legacy")
+                        )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_no_framework_free_layer_imports_the_removed_compatibility_adapter(self):
+        """ADR 0013: ``adapters.legacy_agent`` is gone; nothing may resurrect it.
+
+        The bridge built a second ``AgentService`` and a second tool catalog at
+        import time and had no production importer. The boundary test now pins
+        the deletion the same way ADR 0012 pins the removed ``modules``
+        package.
+        """
+        removed = PACKAGE / "adapters" / "legacy_agent.py"
+        self.assertFalse(removed.exists(), "adapters/legacy_agent.py must stay removed (ADR 0013)")
+        violations: list[tuple[str, str, str]] = []
+        for layer in ("agents", "application", "domain", "orchestration", "ports", "tools", "llm"):
+            for path in _iter_python(layer):
+                for module in _imports(path):
+                    if module == "ai_assistant.adapters.legacy_agent":
+                        violations.append(
+                            (str(path.relative_to(PACKAGE)), module, "imports removed compatibility adapter")
+                        )
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_no_import_time_environment_reads_outside_settings_and_bootstrap(self):
+        """ADR 0001: environment reads happen only in settings/bootstrap.
+
+        ``os.getenv``/``os.environ[key]`` at module/class scope or in function
+        defaults run at import time and are forbidden outside the two approved
+        owners. ``legacy`` used to need an exemption here because its shim
+        parsed ``.env``, set library defaults and read the toggles inline; it
+        now delegates all of that to ``settings`` (ADR 0014) and is scanned
+        like every other module. Reads inside function bodies are allowed —
+        that is the on-demand pattern.
+        """
+        excluded = {"settings.py"}
+        violations: list[str] = []
+        for path in _iter_python():
+            rel = path.relative_to(PACKAGE).as_posix()
+            if rel in excluded or path.parts[-2] == "bootstrap":
+                continue
+            reader = _ImportTimeEnvReader()
+            reader.visit(ast.parse(path.read_text(encoding="utf-8")))
+            for lineno, snippet in reader.hits:
+                violations.append(f"{rel}:{lineno}: {snippet}")
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_agent_engines_use_the_shared_execution_gateway(self):
+        """Both orchestration strategies execute tools via one gateway (ADR 0003)."""
+        runner_calls = _call_targets(PACKAGE / "agents" / "runner.py")
+        wiring_calls = _call_targets(PACKAGE / "agents" / "graph_wiring.py")
+        deterministic_calls = _call_targets(PACKAGE / "adapters" / "orchestration" / "deterministic.py")
+        agent_runs = (PACKAGE / "application" / "agent_runs.py").read_text(encoding="utf-8")
+
+        # The runner reaches the gateway through the injected ``RunDeps``
+        # bundle (ADR 0013), so the call targets are ``deps.tool_gateway.*``
+        # (or the ``gateway`` local that narrows it for the approval probe).
+        # After the graph-wiring extraction, the gateway calls live in
+        # ``graph_wiring.py``; the runner delegates to ``build_run_graph``.
+        combined_calls = runner_calls | wiring_calls
+        self.assertIn("deps.tool_gateway.execute", combined_calls)
+        self.assertIn("deps.tool_gateway.execute_approved", combined_calls)
+        self.assertIn("gateway.approval_covers", combined_calls)
+        # Separation of duties (review 15): the decision loop can execute and
+        # probe grants but can never mint one — grant minting is confined to
+        # the approval services and the durable-loop adapter.
+        self.assertNotIn("deps.tool_gateway.issue_approval_grant", runner_calls)
+        self.assertNotIn("issue_approval_grant", runner_calls)
+        # The service is constructed exactly once, by the composition root; the
+        # engines only ever touch the gateway it hands them. (This used to
+        # assert nothing beyond "the class is defined in its own module".)
+        constructors = {
+            path.relative_to(PACKAGE).as_posix()
+            for path in _iter_python()
+            if any(
+                isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "ToolExecutionService"
+                for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            )
+        }
+        self.assertEqual(constructors, {"bootstrap/container.py"})
+        # The only in-code decision loop lives in an adapter; application holds none.
+        self.assertIn("self._tools.execute", deterministic_calls)
+        self.assertIn("self._tools.issue_approval_grant", deterministic_calls)
+        self.assertNotIn("_run_deterministic", agent_runs)
+        # ToolRegistry.execute is a bypass: the registry defines no execute method.
+        self.assertNotIn("execute", _defined_names(PACKAGE / "tools" / "registry.py"))
+
+    def test_agents_do_not_import_the_composition_root(self):
+        """The tool gateway is injected; agent code never reaches bootstrap (ADR 0003)."""
+        violations: list[str] = []
+        for path in _iter_python("agents"):
+            for module in _imports(path):
+                if module == "ai_assistant.bootstrap" or module.startswith("ai_assistant.bootstrap."):
+                    violations.append(str(path.relative_to(PACKAGE)))
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_langgraph_is_confined_to_its_adapter(self):
+        """LangGraph is imported only by ``adapters/orchestration/langgraph_engine.py``
+        and ``adapters/persistence/checkpointing.py``.
+
+        The framework dependency is confined to the adapter layer (ADR 0003/0012);
+        every other module — including ``orchestration/graph.py`` — reaches
+        the engine through :class:`LangGraphEngine`. This test enforces that
+        boundary: a direct ``from langgraph`` or ``import langgraph`` outside
+        the allowed adapters is a CI failure.
+        """
+        allowed = {
+            "internal/langgraph_engine.py",
+            "adapters/persistence/checkpointing.py",
+        }
+        violations: list[str] = []
+        for path in _iter_python():
+            rel = path.relative_to(PACKAGE).as_posix()
+            if rel in allowed:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name == "langgraph" or alias.name.startswith("langgraph."):
+                            violations.append(f"{rel}: import {alias.name}")
+                elif isinstance(node, ast.ImportFrom):
+                    # Skip relative imports (local modules like `.langgraph`)
+                    if node.level:
+                        continue
+                    if node.module and (node.module == "langgraph" or node.module.startswith("langgraph.")):
+                        violations.append(f"{rel}: from {node.module}")
+        self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_no_global_tool_service_locator_remains(self):
+        """The mutable ``_tool_service`` locator was replaced by injected gateways."""
+        offenders = [
+            str(path.relative_to(PACKAGE))
+            for path in _iter_python()
+            if "configure_tool_service" in _identifiers(path)
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_no_module_level_gateway_locator_in_adapters(self):
+        """Adapters inject the gateway per instance instead of a module global.
+
+        The MCP adapter previously exposed a mutable ``_tool_gateway`` global
+        mutated by ``configure_tool_gateway(...)`` from the composition root.
+        The gateway must now be bound at construction time only.
+        """
+        offenders = []
+        for path in _iter_python():
+            identifiers = _identifiers(path)
+            if "configure_tool_gateway" in identifiers or "_tool_gateway" in identifiers:
+                offenders.append(str(path.relative_to(PACKAGE)))
+        self.assertEqual(offenders, [])
+
+    def test_a2a_reuses_the_canonical_langgraph_engine_through_a_port(self):
+        """ADR 0003: the A2A lifecycle delegates to the shared engine via a port."""
+        agent_runs_path = PACKAGE / "application" / "agent_runs.py"
+        self.assertIn("AgentOrchestrator", _identifiers(agent_runs_path))
+        self.assertIn("self._orchestrator.run", _call_targets(agent_runs_path))
+
+        root_path = PACKAGE / "bootstrap" / "server.py"
+        root_kwargs = _keyword_values(root_path)
+        self.assertIn("LangGraphAgentOrchestrator", root_kwargs.get("orchestrator", set()))
+        self.assertNotIn("LegacyConstrainedCompletion", root_path.read_text(encoding="utf-8"))
+
+    def test_the_orchestration_package_init_stays_framework_free(self):
+        """Importing ``ai_assistant.orchestration`` must not pull the graph.
+
+        The package used to re-export ``LocalAgentGraph`` eagerly, so the
+        agent layer (which imports ``orchestration.specialists``) hard-failed
+        without langgraph and the runner's documented ``None`` engine never
+        got the chance to raise ``ServiceUnavailableError`` (finding 5).
+        ``graph``/``compat`` may now be imported only from inside a function.
+        """
+        init_path = PACKAGE / "orchestration" / "__init__.py"
+        tree = ast.parse(init_path.read_text(encoding="utf-8"))
+        offenders = [
+            node for node in tree.body
+            if isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[-1] in {"graph", "compat"}
+        ]
+        self.assertEqual(offenders, [])
+        self.assertNotIn("LocalAgentGraph", _identifiers(init_path))
+
+
+if __name__ == "__main__":
+    unittest.main()

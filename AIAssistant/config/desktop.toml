@@ -1,0 +1,4 @@
+[runtime]
+enable_mcp = true
+enable_a2a = true
+allow_remote_a2a = false

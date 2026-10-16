@@ -1,0 +1,171 @@
+# This file is used to ignore files which are generated
+# ----------------------------------------------------------------------------
+*.rag_cache.pkl
+*.onnx
+*.csv
+*.pt
+*~
+*.png
+*.jpg
+*.autosave
+*.a
+*.core
+*.moc
+*.o
+*.obj
+*.orig
+*.rej
+*.so
+*.so.*
+*_pch.h.cpp
+*_resource.rc
+*.qm
+.#*
+*.*#
+core
+!core/
+tags
+.DS_Store
+.directory
+*.debug
+Makefile*
+*.prl
+*.app
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+Thumbs.db
+*.res
+*.rc
+*.cache
+/.qmake.cache
+/.qmake.stash
+
+# qtcreator generated files
+*.pro.user*
+*.qbs.user*
+CMakeLists.txt.user*
+
+# xemacs temporary files
+*.flc
+
+# Vim temporary files
+.*.swp
+
+# Visual Studio generated files
+*.ib_pdb_index
+*.idb
+*.ilk
+*.pdb
+*.sln
+*.suo
+*.vcproj
+*vcproj.*.*.user
+*.ncb
+*.sdf
+*.opensdf
+*.vcxproj
+*vcxproj.*
+
+# MinGW generated files
+*.Debug
+*.Release
+
+# Python byte code
+*.pyc
+
+# Binaries
+# --------
+*.dll
+*.exe
+
+# Directories with generated files
+.moc/
+.obj/
+.pch/
+.rcc/
+.uic/
+/build*/
+/AITraining/runs/
+/.ruff_cache/
+/.vs/
+/AIAssistant/Cache/
+# Runtime RAG caches + agent audit log (regenerated while the server runs).
+/Cache/
+/AIAssistant/Docs/*
+!/AIAssistant/Docs/adr/
+!/AIAssistant/Docs/archive/
+/AIAssistant/logs/
+# Legacy location the composition root used before it resolved the package root.
+/AIAssistant/src/logs/
+# Local LLM weights (large; intentionally not tracked, not stored via Git LFS).
+/AIAssistant/Models/
+/AIAssistant/agent_audit.jsonl
+/AIAssistant/tasks.sqlite
+# Runtime pending-approval / UI-ACK state, rewritten on every agent run.
+/AIAssistant/pending_agent_actions.json
+# Eval run output — rewritten by `evals/run_*.py` and uploaded as a CI artifact
+# by the agent-evals workflow; never a source file.
+/AIAssistant/evals/latest_tool_call_report.json
+/AIAssistant/evals/agentic_eval_report.json
+/AIAssistant/evals/model_in_loop_report.json
+# Coverage artifacts (Python)
+/AIAssistant/.coverage
+/AIAssistant/htmlcov/
+/AIAssistant/AIAssistant/
+/AIAssistant/.env
+/AIAssistant/.import_linter_cache/
+/AIAssistant/.mypy_cache/
+/AIAssistant/.ruff_cache/
+# mutation_check's in-flight lock — its absence is what "safe to mutate" means.
+/AIAssistant/scripts/.mutation_check.lock
+/AIAssistant/Models/.cache/
+**/__pycache__/
+/AIComputerVision/runs/
+# Coverage artifacts (AIComputerVision) — produced by `coverage run`.
+/AIComputerVision/.coverage
+/AIComputerVision/.coverage.*
+/AIComputerVision/htmlcov/
+# One-generation rollback copy beside a replaced export (cvtrain.fsio). Never a
+# model the app loads, and never an LFS artifact.
+/AIComputerVision/Models/*.onnx.bak
+# Advisory lock a training run holds over Models/ (cvtrain.fsio), and copies of
+# a manifest that could not be parsed (cvtrain.manifest). Never tracked.
+/AIComputerVision/Models/.cvtrain.lock
+/AIComputerVision/Models/manifest.json.corrupt-*
+
+# Custom App Ignores
+/Predict/
+/Models/
+/Dataset/
+/Dicom/
+/3DModels/
+/Thumbnails/
+/VideoTracking/
+/Doxygen/html/
+/Doxygen/latex/
+/AITraining/Cache/
+/AITraining/logs/
+/AITraining/pending_agent_actions.json
+/AITraining/Docs/
+/AITraining/Models/*.onnx
+/Config/chat_sessions*.json
+/Config/config*.ini
+/Config/Config*.ini
+/Config/Config_User.ini
+/Logs/
+/Upload/
+# Generated reconstruction mesh caches (all variants; e.g. recon_mesh_cache_v3.ply).
+/3DRecontruction/**/recon_*cache*.ply
+
+# Transient junk artifacts (Windows `nul` redirection, checkpoint dumps, local DBs)
+nul
+/nul
+/AIAssistant/nul
+chkpt_run.log
+/AIAssistant/chkpt_run.log
+opencode.db
+/opencode.db
+
+# Local OpenAI Codex CLI agent config (kept out of the repository).
+/.codex/

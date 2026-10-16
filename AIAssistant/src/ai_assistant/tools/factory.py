@@ -1,0 +1,134 @@
+"""Tool factory for constructing the registry from configuration."""
+from __future__ import annotations
+
+import json
+from typing import Any, Callable
+
+from ai_assistant.config.paths import get_paths
+from ai_assistant.ports import RagContextPort
+
+from .builtin import (
+    TRANSFER_TOOL_HANDLERS,
+    rag_search_tool,
+    tool_analyze_code,
+    tool_application_action,
+    tool_create_directory,
+    tool_find_files,
+    tool_get_project_status,
+    tool_git_diff,
+    tool_list_directory,
+    tool_multi_replace_file_content,
+    tool_patch_file,
+    tool_read_file,
+    tool_replace_file_content,
+    tool_run_command,
+    tool_search_text,
+    tool_validate_file,
+    tool_write_file,
+)
+from .definition import ToolDefinition
+from .lsp_client import tool_find_references, tool_go_to_definition
+from .registry import ToolRegistry
+from .tool_contract import tool_contract_for
+
+
+def builtin_handlers(rag_context: RagContextPort | None = None) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+    """Map tool names to their builtin handler functions.
+
+    ``rag_context`` is the retrieval port the ``rag_search`` handler closes
+    over: the composition root passes the index it owns, and anyone else
+    leaves it unset so the tool reports the index as unavailable.
+    """
+    return {
+        "read_file": tool_read_file,
+        "list_directory": tool_list_directory,
+        "search_text": tool_search_text,
+        "analyze_code": tool_analyze_code,
+        "find_files": tool_find_files,
+        "git_diff": tool_git_diff,
+        "write_file": tool_write_file,
+        "run_command": tool_run_command,
+        "get_project_status": tool_get_project_status,
+        "validate_file": tool_validate_file,
+        "patch_file": tool_patch_file,
+        "replace_file_content": tool_replace_file_content,
+        "multi_replace_file_content": tool_multi_replace_file_content,
+        "create_directory": tool_create_directory,
+        "application_action": tool_application_action,
+        "app_action_viewer": tool_application_action,
+        "app_action_reconstruction": tool_application_action,
+        "app_action_ai": tool_application_action,
+        "app_action_general": tool_application_action,
+        "rag_search": rag_search_tool(rag_context),
+        "go_to_definition": tool_go_to_definition,
+        "find_references": tool_find_references,
+        # Handoff markers: one entry per domain ``TRANSFER_TARGETS`` name.
+        **TRANSFER_TOOL_HANDLERS,
+    }
+
+
+def platform_executors(registry: ToolRegistry) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
+    """Map each registered tool name to its in-process handler.
+
+    The composition root passes this mapping to the tool gateway so the single
+    execution core can dispatch catalogued tools without re-importing the
+    registry. Tools without a handler are omitted.
+    """
+    return {spec.name: spec.handler for spec in registry.get_all() if spec.handler}
+
+
+def create_tool_registry(rag_context: RagContextPort | None = None) -> ToolRegistry:
+    """Create and populate a ToolRegistry from ``Config/agent_tools.json``.
+
+    Returns a fresh registry per call; the composition root owns the single
+    long-lived instance, so this is not a module-level singleton.
+    ``rag_context`` is handed to the ``rag_search`` handler (ADR 0001): the
+    composition root injects its live index, embedders and tests may omit it.
+    """
+    registry = ToolRegistry()
+    paths = get_paths()
+    config_file = paths.project_root / "Config" / "agent_tools.json"
+    
+    if not config_file.exists():
+        # Fallback or initialization error
+        return registry
+
+    with config_file.open(encoding="utf-8") as f:
+        tools_def = json.load(f)
+
+    handlers = builtin_handlers(rag_context)
+
+    for item in tools_def:
+        name = item["name"]
+        contract = tool_contract_for(name)
+        
+        spec = ToolDefinition(
+            name=name,
+            description=item.get("description", ""),
+            parameters=item.get("parameters", {}),
+            timeout_seconds=contract["timeout_seconds"],
+            policy=contract["policy"],
+            requires_approval=contract["requires_approval"],
+            handler=handlers.get(name),
+        )
+        registry.register(spec)
+
+    # Note: `application_action` might not be in the file depending on the generation logic,
+    # as it was appended dynamically. Let's make sure it's there.
+    if registry.get("application_action") is None:
+        contract = tool_contract_for("application_action")
+        registry.register(ToolDefinition(
+            name="application_action",
+            description="Execute exactly ONE canonical desktop action. Choose the id whose meaning matches the CURRENT plan step.",
+            parameters={
+                "action": {"type": "string", "description": "Canonical desktop action id", "required": True},
+                "language": {"type": "string", "description": "Required only for language.change: vi or en", "required": False},
+                "username": {"type": "string", "description": "Optional login username", "required": False},
+                "password": {"type": "string", "description": "Optional login password", "required": False},
+            },
+            timeout_seconds=contract["timeout_seconds"],
+            policy=contract["policy"],
+            handler=handlers.get("application_action")
+        ))
+        
+    return registry
