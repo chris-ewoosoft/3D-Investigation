@@ -1,5 +1,5 @@
 #include "AvatarCropperDialog.h"
-#include "AppConfig.h"
+#include "IAppPaths.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
@@ -16,12 +16,12 @@
 #include <QLabel>
 #include <QMenu>
 #include <QEvent>
-#include "UserManager.h"
-#include "LanguageManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
 
-AvatarCropperDialog::AvatarCropperDialog(const QString& username, QWidget *parent)
-    : ModernDialog(UserAuthPlugin::translate("avatar.cropper_title"), parent), m_username(username)
+AvatarCropperDialog::AvatarCropperDialog(const QString& username, IAppPaths* paths, QWidget *parent)
+    : ModernDialog(UserAuthPlugin::translate("avatar.cropper_title"), parent),
+      m_username(username), m_paths(paths)
 {
     setFixedSize(700, 500);
 
@@ -94,13 +94,13 @@ AvatarCropperDialog::AvatarCropperDialog(const QString& username, QWidget *paren
 }
 
 void AvatarCropperDialog::accept() {
-    if (m_sourceImage.isNull()) {
+    if (m_sourceImage.isNull() || !m_paths) {
         QDialog::reject();
         return;
     }
 
     // 1. Save original to history if not already there
-    QString uploadDir = AppConfig::instance().uploadDir() + "/Avatars/" + m_username;
+    QString uploadDir = m_paths->uploadDir() + "/Avatars/" + m_username;
     QDir().mkpath(uploadDir);
     
     QFileInfo fi(m_currentImagePath);
@@ -124,7 +124,7 @@ void AvatarCropperDialog::accept() {
     // 2. Save Cropped Thumbnail
     QPixmap cropped = getCroppedAvatar();
     
-    QString thumbDir = AppConfig::instance().thumbnailsDir() + "/Avatars";
+    QString thumbDir = m_paths->thumbnailsDir() + "/Avatars";
     QDir().mkpath(thumbDir);
     QString thumbFile = thumbDir + "/" + m_username + ".png";
 
@@ -133,7 +133,7 @@ void AvatarCropperDialog::accept() {
     }
 
     if (cropped.save(thumbFile)) {
-        UserManager::instance()->updateAvatar(m_username, thumbFile);
+        UserAuthPlugin::users()->updateAvatar(m_username, thumbFile);
     }
 
     QDialog::accept();
@@ -141,7 +141,8 @@ void AvatarCropperDialog::accept() {
 
 void AvatarCropperDialog::loadHistory() {
     m_historyList->clear();
-    QString uploadDir = AppConfig::instance().uploadDir() + "/Avatars/" + m_username;
+    if (!m_paths) return;
+    QString uploadDir = m_paths->uploadDir() + "/Avatars/" + m_username;
     QDir dir(uploadDir);
     
     if (dir.exists()) {
@@ -158,7 +159,7 @@ void AvatarCropperDialog::loadHistory() {
         }
     }
 
-    QString currentAvatar = UserManager::instance()->userInfo(m_username).avatarPath;
+    QString currentAvatar = UserAuthPlugin::users()->userInfo(m_username).avatarPath;
     
     QString metaFile = uploadDir + "/_current_avatar.txt";
     QString originalAvatarPath;

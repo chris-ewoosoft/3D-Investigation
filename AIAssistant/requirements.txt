@@ -2,6 +2,12 @@
 # Cài 1 lần duy nhất:
 #   pip install -r AIAssistant/requirements.txt
 #
+# Bản hash-pinned cho production: AIAssistant/requirements.lock
+# (sinh bởi `uv pip compile requirements.txt --python-version 3.11 --universal
+# --generate-hashes`, ADR 0023; cài bằng `pip install --require-hashes
+# -r AIAssistant/requirements.lock`). File này giữ range cho phát triển;
+# lock mới là bản triển khai.
+#
 # Với GPU CUDA 12.2 (khuyến nghị):
 #   pip install llama-cpp-python[server] \
 #       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu122

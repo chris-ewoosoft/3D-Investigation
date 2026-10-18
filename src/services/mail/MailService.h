@@ -7,9 +7,11 @@
 #include <QString>
 #include <shared_mutex>
 
+class IUserManager;
+
 class APP_EXPORT MailService : public IMailService {
 public:
-    MailService();
+    explicit MailService(IUserManager* users);
 
     bool sendMail(const MailMessage& message, QString& errorMsg) override;
     QList<MailMessage> fetchInbox(int limit, QString& errorMsg) override;
@@ -27,17 +29,21 @@ public:
     void setSignature(const QString &signature);
 
 private:
-    void loadFromCurrentUser();
+    IUserManager* m_users;  ///< injected by AppShell (composition root)
+    /// Refreshes the cached account state from IUserManager. Declared const
+    /// because the cache is a pure derived value of user state — const
+    /// getters call it without const_cast (members below are mutable).
+    void loadFromCurrentUser() const;
     QString currentUsername() const;
     QString imapHost() const;
     bool openImap(QString &errorMsg, class QSslSocket &sock) const;
     bool sendImap(class QSslSocket &sock, const QString &tag, const QString &command, QString &response) const;
 
     mutable std::shared_mutex m_mutex;
-    QString m_email;
-    QString m_password;
-    QString m_displayName;
-    QString m_signature;
+    mutable QString m_email;
+    mutable QString m_password;
+    mutable QString m_displayName;
+    mutable QString m_signature;
 };
 
 #endif // MAIL_SERVICE_H

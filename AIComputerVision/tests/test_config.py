@@ -9,9 +9,13 @@ from cvtrain.config import (
     ALL_MODEL_KEYS,
     DEFAULT_MODELS,
     MANIFEST_NAME,
+    MODEL_REGISTRY,
     MODEL_SPECS,
     PACKAGE_DIR,
+    ModelRegistry,
+    ModelSpec,
     TrainConfig,
+    register_model_spec,
     resolve_models,
 )
 
@@ -91,6 +95,73 @@ class PathResolutionTests(unittest.TestCase):
     def test_manifest_path_sits_beside_the_models(self) -> None:
         cfg = TrainConfig(models_dir=Path("C:/elsewhere/Models"))
         self.assertEqual(cfg.manifest_path, Path("C:/elsewhere/Models") / MANIFEST_NAME)
+
+
+class ModelRegistryTests(unittest.TestCase):
+    def test_empty_registry(self) -> None:
+        reg = ModelRegistry()
+        self.assertEqual(len(reg), 0)
+        self.assertEqual(reg.keys(), ())
+        self.assertEqual(reg.values(), ())
+        self.assertEqual(reg.items(), ())
+        self.assertEqual(reg.as_dict(), {})
+        self.assertNotIn("det", reg)
+
+    def test_register_and_lookup(self) -> None:
+        reg = ModelRegistry()
+        spec = ModelSpec("custom", "c.pt", "c.onnx", "c", "custom_role", "Custom")
+        reg.register(spec)
+        self.assertEqual(len(reg), 1)
+        self.assertIn("custom", reg)
+        self.assertEqual(reg.get("custom"), spec)
+        self.assertEqual(reg["custom"], spec)
+        self.assertEqual(reg.keys(), ("custom",))
+        self.assertEqual(reg.values(), (spec,))
+        self.assertEqual(reg.items(), (("custom", spec),))
+        self.assertEqual(reg.as_dict(), {"custom": spec})
+
+    def test_register_type_error(self) -> None:
+        reg = ModelRegistry()
+        with self.assertRaises(TypeError):
+            reg.register("not_a_spec")  # type: ignore[arg-type]
+
+    def test_register_duplicate_key_rejected(self) -> None:
+        reg = ModelRegistry()
+        spec1 = ModelSpec("det", "d1.pt", "d1.onnx", "d1", "role", "label")
+        spec2 = ModelSpec("det", "d2.pt", "d2.onnx", "d2", "role", "label")
+        reg.register(spec1)
+        with self.assertRaises(ValueError):
+            reg.register(spec2)
+
+    def test_register_duplicate_output_rejected(self) -> None:
+        reg = ModelRegistry()
+        spec1 = ModelSpec("det1", "d1.pt", "same.onnx", "d1", "role", "label")
+        spec2 = ModelSpec("det2", "d2.pt", "same.onnx", "d2", "role", "label")
+        reg.register(spec1)
+        with self.assertRaises(ValueError):
+            reg.register(spec2)
+
+    def test_get_unknown_key_raises_key_error(self) -> None:
+        reg = ModelRegistry()
+        with self.assertRaises(KeyError):
+            reg.get("nonexistent")
+
+    def test_register_model_spec_updates_globals(self) -> None:
+        spec = ModelSpec("pose_test", "pose.pt", "pose.onnx", "pose", "pose", "Pose")
+        try:
+            register_model_spec(spec)
+            self.assertIn("pose_test", MODEL_REGISTRY)
+            self.assertIn("pose_test", MODEL_SPECS)
+            self.assertEqual(MODEL_SPECS["pose_test"], spec)
+        finally:
+            MODEL_REGISTRY._specs.pop("pose_test", None)
+            MODEL_SPECS.pop("pose_test", None)
+
+    def test_resolve_models_with_custom_registry(self) -> None:
+        spec = ModelSpec("custom", "c.pt", "c.onnx", "c", "role", "label")
+        reg = ModelRegistry([spec])
+        self.assertEqual(resolve_models(["custom"], registry=reg), ("custom",))
+        self.assertEqual(resolve_models([], registry=reg), DEFAULT_MODELS)
 
 
 if __name__ == "__main__":

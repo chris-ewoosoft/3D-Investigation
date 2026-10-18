@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -236,7 +237,7 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_a_graded_run_writes_the_report_and_gates_on_coverage(self) -> None:
-        backend = _StubBackend('{"step_kinds": ["direct"]}')  # 1/4 correct, 4/4 graded
+        backend = _StubBackend('{"step_kinds": ["direct"]}')  # only en_001 matches
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "report.json"
             with (
@@ -247,10 +248,13 @@ class MainFlowTests(unittest.TestCase):
                     code = self.eval.main(["--model-path", "ignored-by-stub",
                                            "--min-model-coverage", "0.9"])
                 self.assertEqual(code, 0)
-                payload = report.read_text(encoding="utf-8")
-        self.assertIn('"model_coverage": 1.0', payload)
-        self.assertIn('"accuracy": 0.25', payload)
-        self.assertIn("ignored-by-stub", payload)
+                raw = report.read_text(encoding="utf-8")
+                payload = json.loads(raw)
+        self.assertEqual(payload["model_coverage"], 1.0)
+        direct_cases = sum(1 for case in self.eval.GOLDEN
+                           if case["expected_kind"] == "direct")
+        self.assertEqual(payload["accuracy"], direct_cases / len(self.eval.GOLDEN))
+        self.assertIn('"model": "ignored-by-stub"', raw)
 
     def test_model_path_loads_through_the_backend_class(self) -> None:
         # Load the real module first so the package __init__ has already
@@ -276,6 +280,109 @@ class MainFlowTests(unittest.TestCase):
         args = self.eval._parse_args([])
         with patch("ai_assistant.llm.model_loader.get_backend", return_value=None):
             self.assertIsNone(self.eval._load_backend(args))
+
+
+class BaselineRegressionTests(unittest.TestCase):
+    """``--baseline`` turns an earlier report into a model-version regression gate."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.eval = _load_eval()
+
+    def _result(self, coverage: float = 1.0, accuracy: float = 1.0) -> dict:
+        return {
+            "model_coverage": coverage, "accuracy": accuracy,
+            "passed": 7, "total": 7,
+        }
+
+    def test_no_regression_produces_no_failures(self) -> None:
+        self.assertEqual(
+            self.eval._baseline_failures(
+                self._result(), {"accuracy": 1.0, "model_coverage": 1.0}, 0.05),
+            [],
+        )
+
+    def test_a_drop_within_the_tolerance_still_passes(self) -> None:
+        failures = self.eval._baseline_failures(
+            self._result(accuracy=0.95), {"accuracy": 1.0}, 0.05)
+        # Exactly at the tolerance is not "more than" it.
+        self.assertEqual(failures, [])
+
+    def test_a_drop_beyond_the_tolerance_fails_every_metric(self) -> None:
+        failures = self.eval._baseline_failures(
+            self._result(0.8, 0.75),
+            {"accuracy": 1.0, "model_coverage": 1.0}, 0.05)
+        self.assertEqual(len(failures), 2)
+        text = " ".join(failures)
+        self.assertIn("accuracy=75%", text)
+        self.assertIn("model_coverage=80%", text)
+        self.assertIn("baseline 100%", text)
+
+    def test_metrics_missing_from_the_baseline_are_ignored(self) -> None:
+        self.assertEqual(
+            self.eval._baseline_failures(self._result(0.1, 0.1), {"accuracy": 0.0}, 0.05),
+            [],
+        )
+
+    def test_baseline_failures_fail_the_exit_code_even_when_all_cases_pass(self) -> None:
+        args = self.eval._parse_args([])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = self.eval._gate_exit(
+                self._result(), args, ["accuracy=50% is 40% below the baseline"])
+        self.assertEqual(code, 1)
+        self.assertIn("GATE FAIL: accuracy=50%", out.getvalue())
+
+    def _run_main(self, baseline: Path, *extra: str):
+        backend = _StubBackend('{"step_kinds": ["direct"]}')
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            with (
+                patch.object(self.eval, "_load_backend", return_value=backend),
+                patch.object(self.eval, "REPORT_PATH", report),
+            ):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    code = self.eval.main(
+                        ["--model-path", "ignored-by-stub", "--baseline", str(baseline), *extra])
+        return code, out.getvalue()
+
+    def test_main_fails_when_accuracy_drops_below_a_stored_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.json"
+            baseline.write_text(json.dumps({"accuracy": 0.9, "model_coverage": 0.9}),
+                                encoding="utf-8")
+            code, output = self._run_main(baseline)
+        self.assertEqual(code, 1)
+        self.assertIn("below the baseline", output)
+
+    def test_a_missing_baseline_file_exits_2_before_loading_a_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "absent.json"
+            with patch.object(self.eval, "_load_backend") as load:
+                with redirect_stdout(io.StringIO()):
+                    code = self.eval.main(["--baseline", str(missing)])
+        self.assertEqual(code, 2)
+        load.assert_not_called()
+
+    def test_a_non_object_baseline_file_exits_2(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.json"
+            baseline.write_text("[]", encoding="utf-8")
+            with patch.object(self.eval, "_load_backend") as load:
+                with redirect_stdout(io.StringIO()):
+                    code = self.eval.main(["--baseline", str(baseline)])
+        self.assertEqual(code, 2)
+        load.assert_not_called()
+
+    def test_a_baseline_counts_as_a_gate_without_a_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.json"
+            baseline.write_text("{}", encoding="utf-8")
+            with patch.object(self.eval, "_load_backend", return_value=None):
+                with redirect_stdout(io.StringIO()):
+                    code = self.eval.main(["--baseline", str(baseline)])
+        self.assertEqual(code, 1)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from collections.abc import Callable, Collection
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,7 @@ __all__ = [
     "load_manifest",
     "migrate",
     "now_utc_iso",
+    "resolve_git_commit",
     "save_manifest",
     "upsert_entry",
     "verify_manifest",
@@ -105,6 +107,9 @@ class ManifestEntry(TypedDict, total=False):
     different experiment. Absent when the file was not on disk while recording,
     which makes ``--skip-unchanged`` retrain rather than assume it matches."""
 
+    dataset_content_sha256: str
+    """Digest of the dataset inventory (files and sizes) when recorded."""
+
     source_weights_sha256: str
     """Digest of the base checkpoint the model was actually trained from.
 
@@ -145,6 +150,9 @@ class LastRun(TypedDict, total=False):
     version it gates on already captures export-relevant drift.
     """
 
+    git_commit: str
+    """Commit SHA of the repository when the run started ('unversioned' if unavailable)."""
+
     min_metrics: list[list[str | float]]
     """Quality thresholds of the invocation, as ``[[name, minimum], ...]``.
 
@@ -163,6 +171,31 @@ class Manifest(TypedDict, total=False):
     ultralytics: str
     """Version of the backend that produced the last run (key is historical)."""
     updated_at: str
+
+
+def resolve_git_commit(cwd: Path) -> str:
+    """Best-effort resolution of the git commit SHA for audit provenance.
+
+    Returns the 40-character hex SHA if cwd is inside a git repository,
+    or 'unversioned' otherwise. Never raises.
+    """
+
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],  # noqa: S607
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+        if res.returncode == 0:
+            commit = res.stdout.strip()
+            if len(commit) == 40 and all(c in "0123456789abcdefABCDEF" for c in commit):
+                return commit.lower()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unversioned"
 
 
 def now_utc_iso() -> str:

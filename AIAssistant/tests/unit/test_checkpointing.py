@@ -121,6 +121,66 @@ class BuildCheckpointerTests(unittest.TestCase):
         self.assertIsInstance(saver, MemorySaver)
 
 
+class RequiredCheckpointTests(unittest.TestCase):
+    """ADR 0023: with ``AGENT_CHECKPOINT_REQUIRED=1`` durability is a gate,
+    not a best effort — memory or a broken backend fails startup instead."""
+
+    def _patch_settings(self, settings):
+        return mock.patch.object(
+            cp_module, "load_agent_runtime_settings", return_value=settings,
+        )
+
+    def test_memory_backend_is_refused(self):
+        # The message is the ops contract (RUNBOOK §4.3): it must name the
+        # refusal *before* any backend is built, not the generic "not usable"
+        # fallback — otherwise ops cannot tell the two failures apart.
+        with self._patch_settings(_settings(checkpoint_required=True)):
+            with self.assertRaisesRegex(RuntimeError, "refuses the in-memory checkpointer"):
+                cp_module.build_checkpointer()
+
+    def test_unusable_backend_is_refused_instead_of_falling_back(self):
+        with self._patch_settings(
+            _settings(checkpoint_backend="postgres", checkpoint_required=True)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "is not usable"):
+                cp_module.build_checkpointer()
+
+    def test_a_broken_backend_raises_instead_of_falling_back(self):
+        class _BrokenSaver:
+            @classmethod
+            def from_conn_string(cls, url):
+                msg = "connection refused"
+                raise RuntimeError(msg)
+
+        settings = _settings(
+            checkpoint_backend="postgres", checkpoint_url="postgres://x",
+            checkpoint_required=True,
+        )
+        with self._patch_settings(settings):
+            with mock.patch.dict(
+                sys.modules,
+                {"langgraph.checkpoint.postgres": SimpleNamespace(PostgresSaver=_BrokenSaver)},
+            ):
+                with self.assertRaisesRegex(RuntimeError, "failed to initialize") as raised:
+                    cp_module.build_checkpointer()
+        # The cause is chained so the log still names the real failure.
+        self.assertIn("connection refused", str(raised.exception.__cause__))
+
+    def test_sqlite_satisfies_the_durability_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "checkpoints.sqlite"
+            settings = _settings(
+                checkpoint_backend="sqlite", checkpoint_path=str(db),
+                checkpoint_required=True,
+            )
+            with self._patch_settings(settings):
+                saver = cp_module.build_checkpointer()
+            self.assertTrue(db.exists())
+            conn = getattr(saver, "conn", None)
+            if conn is not None:
+                conn.close()
+
+
 class CleanupOldCheckpointsTests(unittest.TestCase):
     def _patch_settings(self, settings):
         return mock.patch.object(

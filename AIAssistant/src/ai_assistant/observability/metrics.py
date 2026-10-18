@@ -42,6 +42,11 @@ def get_metrics() -> dict[str, Any]:
                         "agent_recovery_seconds",
                         "Time from the cancel request to the runner actually stopping",
                     ),
+                    "throttle": Counter(
+                        "agent_http_throttled_total",
+                        "Requests refused by the admission governor",
+                        ["surface"],
+                    ),
                 }
             except ImportError:
                 _metrics = {}
@@ -144,3 +149,10 @@ def record_step_guard(outcome: str) -> None:
     metrics = get_metrics()
     if metrics:
         metrics["guard"].labels(outcome).inc()
+
+
+def record_throttle(surface: str) -> None:
+    """Count one refusal by the admission governor (ADR 0024)."""
+    metrics = get_metrics()
+    if metrics:
+        metrics["throttle"].labels(surface).inc()

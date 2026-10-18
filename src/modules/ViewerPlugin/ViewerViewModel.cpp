@@ -1,15 +1,12 @@
 #include "ViewerViewModel.h"
-#include "Model3DLoader.h"
 #include "ISceneService.h"
 #include "IViewerService.h"
 #include "ISettingsService.h"
-#include "Image2DLoader.h"
-#include "DicomLoader.h"
+#include "IShellService.h"
+#include "../../utils/ModernMessageBox.h"
 #include <QFileInfo>
 #include <QDir>
-#include <QVTKOpenGLNativeWidget.h>
 #include <vtkRenderer.h>
-#include <vtkRenderWindow.h>
 
 ViewerViewModel::ViewerViewModel(IAppContext* ctx, QObject* parent)
     : QObject(parent), m_ctx(ctx) {}
@@ -30,12 +27,12 @@ void ViewerViewModel::load2DImage(const QString& filePath) {
 
     emit progressUpdated(30);
 
-    auto actor = Image2DLoader::load(filePath);
+    auto actor = m_ctx->scene()->loadImageActor(filePath);
     if (actor) {
         emit progressUpdated(70);
         m_ctx->scene()->setTextureActor(actor);
         m_ctx->scene()->renderer()->ResetCamera();
-        m_ctx->scene()->vtkWidget()->renderWindow()->Render();
+        m_ctx->scene()->render();
 
         QFileInfo fi(filePath);
         QDir dir = fi.dir();
@@ -46,7 +43,7 @@ void ViewerViewModel::load2DImage(const QString& filePath) {
 
     emit showNavigationUI(true);
     emit loadingFinished();
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
 }
 
 void ViewerViewModel::load3DModel(const QString& filePath) {
@@ -73,7 +70,7 @@ void ViewerViewModel::load3DModel(const QString& filePath) {
     m_ctx->scene()->loadOBJwithMTL(filePath, mtlPath);
 
     emit loadingFinished();
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
 }
 
 void ViewerViewModel::loadDicom(const QString& directoryPath) {
@@ -95,8 +92,16 @@ void ViewerViewModel::loadDicom(const QString& directoryPath) {
 
     emit progressUpdated(60);
     // Delegate to ISceneService which owns the DICOM pipeline
-    m_ctx->scene()->onLoadDicom(directoryPath);
+    const bool dicomOk = m_ctx->scene()->onLoadDicom(directoryPath);
+    if (!dicomOk) {
+        ModernMessageBox::warning(m_ctx->shell()->dialogParent(),
+                                 m_ctx->translate("dicom.load_err_title"),
+                                 m_ctx->translate("dicom.load_err_msg"));
+        emit loadingFinished();
+        m_ctx->shell()->updateMenuStates();
+        return;
+    }
 
     emit loadingFinished();
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
 }

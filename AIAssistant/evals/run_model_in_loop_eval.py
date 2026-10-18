@@ -18,8 +18,12 @@ Honest by construction (ADR 0015):
 
 Gates (``--min-model-coverage``, ``--min-accuracy``) decide the exit code of a
 graded run; without them the historical contract stands (every case must pass).
-Either way the measured numbers are printed *and* written to
-``evals/model_in_loop_report.json`` — a green run can never hide a low figure.
+``--baseline`` additionally compares the measured numbers with a stored report
+and fails on a drop larger than ``--baseline-tolerance`` — that is the
+model-version regression gate, and it is an input: an unreadable baseline file
+fails the run rather than skipping the comparison. Either way the measured
+numbers are printed *and* written to ``evals/model_in_loop_report.json`` — a
+green run can never hide a low figure.
 
 Tool selection is graded separately by ``run_tool_eval.py``; this file grades
 only the planner's step kind and its p95 latency.
@@ -43,12 +47,18 @@ REPORT_PATH = Path(__file__).resolve().parent / "model_in_loop_report.json"
 GOLDEN = [
     {"id": "vn_001", "lang": "vi", "query": "Dự án này có chức năng gì?",
      "expected_kind": "rag_search"},
-    {"id": "vn_002", "lang": "vi", "query": "Tìm lỗi trong file src/app/AppConstants.h",
+    {"id": "vn_002", "lang": "vi", "query": "Tìm lỗi trong file src/core/AppConstants.h",
      "expected_kind": "rag_search"},
+    {"id": "vn_003", "lang": "vi", "query": "Mở trình xem mô hình 3D",
+     "expected_kind": "application_action"},
+    {"id": "vn_004", "lang": "vi", "query": "Cảm ơn bạn",
+     "expected_kind": "direct"},
     {"id": "en_001", "lang": "en", "query": "What is the benefit of AI Agent?",
      "expected_kind": "direct"},
     {"id": "en_002", "lang": "en", "query": "Build the 3D reconstruction pipeline",
      "expected_kind": "application_action"},
+    {"id": "en_003", "lang": "en", "query": "Where is the RAG index stored?",
+     "expected_kind": "rag_search"},
 ]
 
 # ``run_fn(query) -> (kind, latency_seconds)``: injected so the grading logic
@@ -162,6 +172,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--min-accuracy", type=float, metavar="FRACTION",
         help="Gate: fail unless kind accuracy reaches this fraction (default: report only).",
     )
+    parser.add_argument(
+        "--baseline", metavar="PATH",
+        help=("Report from an earlier graded run. The accuracy and model_coverage "
+              "of this run may not fall more than --baseline-tolerance below it "
+              "(model-version regression gate)."),
+    )
+    parser.add_argument(
+        "--baseline-tolerance", type=float, default=0.05, metavar="FRACTION",
+        help="Allowed drop below the baseline before it counts as a regression (default 0.05).",
+    )
     return parser.parse_args(argv)
 
 
@@ -174,7 +194,32 @@ def _load_backend(args: argparse.Namespace) -> Any | None:
     return get_backend()
 
 
-def _gate_exit(result: dict, args: argparse.Namespace) -> int:
+def _baseline_failures(result: dict, baseline: dict, tolerance: float) -> list[str]:
+    """Compare this graded run with a stored report (model-version regression).
+
+    A different model build can keep the absolute floors green while the
+    measured accuracy drops several points; this gate reads the *previous*
+    report and fails on that drop. Only metrics present in the baseline are
+    compared, so older reports stay usable.
+    """
+    failures: list[str] = []
+    for metric in ("accuracy", "model_coverage"):
+        if metric not in baseline:
+            continue
+        previous = float(baseline[metric])
+        drop = previous - float(result[metric])
+        # Float subtraction must not turn "exactly at the tolerance" into a
+        # regression (1.0 - 0.95 is 0.050000000000000044 in binary floats).
+        if drop - tolerance > 1e-9:
+            failures.append(
+                f"{metric}={result[metric]:.0%} is {drop:.0%} below the "
+                f"baseline {previous:.0%} (tolerance {tolerance:.0%})"
+            )
+    return failures
+
+
+def _gate_exit(result: dict, args: argparse.Namespace,
+               baseline_failures: list[str] | None = None) -> int:
     """Exit code for a graded run.
 
     With no gate flag the historical contract stands (every case must pass);
@@ -182,9 +227,9 @@ def _gate_exit(result: dict, args: argparse.Namespace) -> int:
     measured number next to the requirement, so the log always states what was
     actually observed (ADR 0015: report, never fabricate).
     """
-    if args.min_model_coverage is None and args.min_accuracy is None:
+    failures = list(baseline_failures or [])
+    if args.min_model_coverage is None and args.min_accuracy is None and not failures:
         return 0 if result["passed"] == result["total"] else 1
-    failures = []
     if args.min_model_coverage is not None and result["model_coverage"] < args.min_model_coverage:
         failures.append(
             f"model_coverage={result['model_coverage']:.0%} < required {args.min_model_coverage:.0%}"
@@ -198,6 +243,18 @@ def _gate_exit(result: dict, args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    baseline: dict | None = None
+    if args.baseline:
+        # A regression baseline is an input, not a suggestion: an unreadable
+        # file fails the run instead of silently skipping the comparison.
+        try:
+            baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            print(f"BASELINE FAIL: cannot read {args.baseline}: {error}", file=sys.stderr)
+            return 2
+        if not isinstance(baseline, dict):
+            print("BASELINE FAIL: baseline report must be a JSON object", file=sys.stderr)
+            return 2
     backend = _load_backend(args)
     if backend is None:
         # No model: report the skip, never a synthetic 0% or 100%. SCORECARD #1
@@ -207,12 +264,16 @@ def main(argv: list[str] | None = None) -> int:
         # to prevent.
         print("SKIP: no backend loaded — pass --model-path (or load a model) first.")
         print("model_coverage=0.00 (no backend; 0 of the golden set was model-graded)")
-        gated = args.min_model_coverage is not None or args.min_accuracy is not None
+        gated = (args.min_model_coverage is not None or args.min_accuracy is not None
+                 or baseline is not None)
         return 1 if gated else 0
 
     result = run_golden(lambda query: planner_run(query, backend))
     result["model"] = str(
         args.model_path or getattr(backend, "model_description", "loaded backend")
+    )
+    baseline_failures = (
+        _baseline_failures(result, baseline, args.baseline_tolerance) if baseline else []
     )
     REPORT_PATH.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"model={result['model']}")
@@ -223,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         f"p95_latency={result['p95_latency']:.3f}s"
     )
     print(json.dumps(result["results"], ensure_ascii=False, indent=2))
-    return _gate_exit(result, args)
+    return _gate_exit(result, args, baseline_failures)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PCH_H
+#define PCH_H
 
 // ─── Qt Core ─────────────────────────────────────────────────────────────────
 #include <QAction>
@@ -74,3 +75,5 @@
 // ─── VTK ─────────────────────────────────────────────────────────────────────
 #include <vtkSmartPointer.h>
 #include <vtkPolyData.h>
+
+#endif // PCH_H

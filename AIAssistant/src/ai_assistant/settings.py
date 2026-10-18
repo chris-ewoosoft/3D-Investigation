@@ -109,6 +109,15 @@ class AgentRuntimeSettings:
     checkpoint_url: str
     checkpoint_path: str
     native_tool_calls: bool
+    #: Production gates (ADR 0023): refuse non-isolated command execution and
+    #: refuse to run on a non-durable checkpoint backend instead of silently
+    #: degrading. Both default to off so the Qt desktop distribution keeps
+    #: working without Docker or a database.
+    sandbox_require_isolation: bool = False
+    checkpoint_required: bool = False
+    #: Global agent-run budget (0 = unlimited). One run per session is
+    #: already enforced by the service; this caps total concurrent runs.
+    max_concurrent_runs: int = 0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentRuntimeSettings":
@@ -122,6 +131,9 @@ class AgentRuntimeSettings:
             checkpoint_url=values.get("AGENT_CHECKPOINT_URL", ""),
             checkpoint_path=values.get("AGENT_CHECKPOINT_PATH", "AIAssistant/Cache/checkpoints.sqlite"),
             native_tool_calls=values.get("AGENT_NATIVE_TOOL_CALLS", "0") == "1",
+            sandbox_require_isolation=values.get("AGENT_SANDBOX_REQUIRE_ISOLATION", "0") == "1",
+            checkpoint_required=values.get("AGENT_CHECKPOINT_REQUIRED", "0") == "1",
+            max_concurrent_runs=int(values.get("AGENT_MAX_CONCURRENT_RUNS", "0")),
         )
 
 
@@ -152,6 +164,16 @@ def max_request_bytes(env: Mapping[str, str] | None = None) -> int:
     """Return the request-body cap for every HTTP surface (2 MiB default)."""
     values = os.environ if env is None else env
     return int(values.get("AGENT_MAX_REQUEST_BYTES", "2097152"))
+
+
+def rate_limit_per_minute(env: Mapping[str, str] | None = None) -> int:
+    """Return the per-peer HTTP request budget (``0`` = no limit).
+
+    Fixed window so the number is explainable in an ops runbook; the middleware
+    answers ``429`` with ``Retry-After`` when the budget is spent.
+    """
+    values = os.environ if env is None else env
+    return int(values.get("AGENT_RATE_LIMIT_PER_MINUTE", "0"))
 
 
 def apply_utf8_environment_default() -> None:

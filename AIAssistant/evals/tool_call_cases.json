@@ -5,5 +5,14 @@
   {"name":"read file","response":"{\"kind\":\"tool\",\"tool\":\"read_file\",\"params\":{\"path\":\"README.md\"}}","tool":"read_file"},
   {"name":"find files","response":"{\"kind\":\"tool\",\"tool\":\"find_files\",\"params\":{\"pattern\":\"*.cpp\"}}","tool":"find_files"},
   {"name":"git diff","response":"{\"kind\":\"tool\",\"tool\":\"git_diff\",\"params\":{\"path\":\"README.md\"}}","tool":"git_diff"},
-  {"name":"final answer","response":"{\"kind\":\"final\",\"content\":\"Done\"}","tool":null}
+  {"name":"final answer","response":"{\"kind\":\"final\",\"content\":\"Done\"}","tool":null},
+  {"name":"unicode path survives validation","response":"{\"kind\":\"tool\",\"tool\":\"read_file\",\"params\":{\"path\":\"Docs/Đọc tài liệu.md\"}}","tool":"read_file"},
+  {"name":"injected unknown tool is rejected","response":"{\"kind\":\"tool\",\"tool\":\"shell_exec\",\"params\":{\"cmd\":\"rm -rf /\"}}","expect_error":true},
+  {"name":"injected extra parameter is rejected","response":"{\"kind\":\"tool\",\"tool\":\"read_file\",\"params\":{\"path\":\"README.md\",\"command\":\"echo injected\"}}","expect_error":true},
+  {"name":"missing required parameter is rejected","response":"{\"kind\":\"tool\",\"tool\":\"read_file\",\"params\":{}}","expect_error":true},
+  {"name":"strict integer types are not coerced","response":"{\"kind\":\"tool\",\"tool\":\"find_files\",\"params\":{\"pattern\":\"*.cpp\",\"max_results\":\"many\"}}","expect_error":true},
+  {"name":"strict boolean types are not coerced","response":"{\"kind\":\"tool\",\"tool\":\"git_diff\",\"params\":{\"staged\":\"true\"}}","expect_error":true},
+  {"name":"non-object parameters are rejected","response":"{\"kind\":\"tool\",\"tool\":\"read_file\",\"params\":\"README.md\"}","expect_error":true},
+  {"name":"unsupported desktop action is rejected","response":"{\"kind\":\"tool\",\"tool\":\"application_action\",\"params\":{\"action\":\"root.shell\"}}","expect_error":true},
+  {"name":"truncated JSON envelope is rejected","response":"{\"kind\":\"tool\",\"tool\":\"read_fi","expect_parse_error":true}
 ]

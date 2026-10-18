@@ -1,13 +1,12 @@
 #include "ViewerPlugin.h"
-#include "MainWindow.h"
+#include <QMainWindow>
 #include "IAppContext.h"
+#include "IAppPaths.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
 #include "IViewerService.h"
 #include "ISceneService.h"
 #include "SignalBus.h"
-#include "Image2DLoader.h"
-#include "Model3DLoader.h"
-#include "DicomLoader.h"
 #include "AppConstants.h"
 #include <QFileDialog>
 #include <QFileInfo>
@@ -21,13 +20,8 @@
 #include <QStyle>
 #include <QPainter>
 #include <QLinearGradient>
-#include "LanguageManager.h"
-#include "AppConfig.h"
 #include "../../utils/CustomProgressDialog.h"
 #include <QApplication>
-#include <vtkRenderWindow.h>
-#include <vtkRenderer.h>
-#include <vtkActor.h>
 #include <QListWidget>
 
 #include "ViewerRibbonUI.h"
@@ -35,9 +29,9 @@
 #include "ViewerListUI.h"
 #include "ViewerViewModel.h"
 
-void ViewerPlugin::initialize(IAppContext* context) {
+bool ViewerPlugin::initialize(IAppContext* context) {
     m_ctx = context;
-    m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
+    m_progressDialog = m_ctx->shell()->getProgressDialog();
     m_viewModel = new ViewerViewModel(m_ctx, this);
     
     connect(m_viewModel, &ViewerViewModel::loadingStarted, this, [this](const QString& msg){
@@ -47,13 +41,15 @@ void ViewerPlugin::initialize(IAppContext* context) {
             m_progressDialog->setValue(0);
             m_progressDialog->show();
             m_progressDialog->centerOnWidget();
-            QApplication::processEvents();
+            // Keep the dialog painted without re-entering user input — a nested
+            // event loop during a synchronous load is a re-entrancy hazard.
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         }
     });
     connect(m_viewModel, &ViewerViewModel::progressUpdated, this, [this](int percent){
         if (m_progressDialog) {
             m_progressDialog->setValue(percent);
-            QApplication::processEvents();
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         }
     });
     connect(m_viewModel, &ViewerViewModel::loadingFinished, this, [this](){
@@ -66,7 +62,7 @@ void ViewerPlugin::initialize(IAppContext* context) {
         }
     });
     
-    QMenu* viewerMenu = m_ctx->getMenu("viewer_menu");
+    QMenu* viewerMenu = m_ctx->shell()->getMenu(AppConstants::MenuIds::Viewer);
     viewerMenu->clear();
     
     m_load2DAct = viewerMenu->addAction(m_ctx->translate("viewer.load_2d"), this, &ViewerPlugin::onLoad2DImages);
@@ -83,7 +79,7 @@ void ViewerPlugin::initialize(IAppContext* context) {
     connect(m_navUI->btnAutoNext(), &QPushButton::clicked, this, &ViewerPlugin::onAutoNext);
 
     // Inject Load/Data tools into tab.view panel
-    if (QWidget* panel = m_ctx->getTabPanel("tab.view")) {
+    if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.view")) {
         m_ribbonUI = new ViewerRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnLoad2D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad2DImages);
         connect(m_ribbonUI->btnLoad3D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad3DImages);
@@ -96,19 +92,17 @@ void ViewerPlugin::initialize(IAppContext* context) {
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ViewerPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
             [this](const QString &action, const QVariantMap &parameters) {
-        const QDir root(AppConfig::instance().projectRootDir());
+        // Inputs are resolved by AgentActionManifest::applySampleDefaults()
+        // (Config/agent_action_manifest.json) before the action is dispatched;
+        // plugins only consume explicit parameters.
+        const QString path = parameters.value("path").toString();
         bool handled = false;
         if (action == "viewer.load_2d") {
-            const QDir images(root.filePath("3DRecontruction/templeRing"));
-            const QStringList files = images.entryList({"*.png", "*.jpg", "*.jpeg", "*.bmp"},
-                                                       QDir::Files, QDir::Name);
-            if (!files.isEmpty()) { load2DImageFromPath(images.absoluteFilePath(files.first())); handled = true; }
+            if (!path.isEmpty()) { load2DImageFromPath(path); handled = true; }
         } else if (action == "viewer.load_3d") {
-            load3DModelFromPath(root.filePath("3DModels/FinalBaseMesh.obj"));
-            handled = true;
+            if (!path.isEmpty()) { load3DModelFromPath(path); handled = true; }
         } else if (action == "viewer.load_dicom") {
-            loadDicomFromDirectory(root.filePath("Dicom/HippocampalMRISlices/01"));
-            handled = true;
+            if (!path.isEmpty()) { loadDicomFromDirectory(path); handled = true; }
         }
         const QString requestId = parameters.value("request_id").toString();
         if (!requestId.isEmpty() && action.startsWith("viewer."))
@@ -117,6 +111,7 @@ void ViewerPlugin::initialize(IAppContext* context) {
     });
     
     updateActions();
+    return true;
 }
 
 void ViewerPlugin::cleanup() {
@@ -124,20 +119,20 @@ void ViewerPlugin::cleanup() {
 
 void ViewerPlugin::onLoad2DImages() {
   QString lastUsedPath = m_ctx->settings()->getLastUsedPath("viewer_2d");
-  QString fileName = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("file.select_2d"), lastUsedPath, "Images (*.png *.jpg *.jpeg *.bmp)"); 
+  QString fileName = QFileDialog::getOpenFileName(m_ctx->shell()->dialogParent(), m_ctx->translate("file.select_2d"), lastUsedPath, "Images (*.png *.jpg *.jpeg *.bmp)"); 
   if (!fileName.isEmpty()) load2DImageFromPath(fileName);
 }
 
 void ViewerPlugin::onLoad3DImages() {
   QString lastUsedPath = m_ctx->settings()->getLastUsedPath("viewer_3d");
-  QString obj = QFileDialog::getOpenFileName(m_ctx->mainWindow(), m_ctx->translate("file.select_3d"), lastUsedPath,
+  QString obj = QFileDialog::getOpenFileName(m_ctx->shell()->dialogParent(), m_ctx->translate("file.select_3d"), lastUsedPath,
                                               AppConstants::FileFilter::objFiles());
   if (!obj.isEmpty()) load3DModelFromPath(obj);
 }
 
 void ViewerPlugin::onLoadDicom() {
   QString lastUsedPath = m_ctx->settings()->getLastUsedPath("viewer_dicom");
-  QString dir = QFileDialog::getExistingDirectory(m_ctx->mainWindow(), m_ctx->translate("file.select_dicom"), lastUsedPath, QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+  QString dir = QFileDialog::getExistingDirectory(m_ctx->shell()->dialogParent(), m_ctx->translate("file.select_dicom"), lastUsedPath, QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
   if (!dir.isEmpty()) loadDicomFromDirectory(dir);
 }
 
@@ -195,7 +190,7 @@ void ViewerPlugin::onAutoNavigationChanged(bool active, bool isNext) {
 }
 
 void ViewerPlugin::updateActions() {
-    QMenu* viewerMenu = m_ctx->getMenu("viewer_menu");
+    QMenu* viewerMenu = m_ctx->shell()->getMenu(AppConstants::MenuIds::Viewer);
     if (viewerMenu) {
         viewerMenu->setTitle(m_ctx->translate("viewer.menu"));
     }

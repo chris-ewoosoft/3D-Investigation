@@ -22,6 +22,10 @@ bool AIService::isSegmentationReady() const {
     return m_processor->isSegmentationModelLoaded();
 }
 
+std::vector<AIDetectionResult> AIService::detectObjects(const cv::Mat& inputImage) {
+    return m_processor->detectObjects(inputImage);
+}
+
 cv::Mat AIService::runDetection(const cv::Mat& inputImage) {
     return m_processor->runObjectDetection(inputImage);
 }

@@ -5,9 +5,10 @@
 #include "MailMessageFormatter.h"
 #include "MailSettingsDialog.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "CustomProgressDialog.h"
 #include "ModernMessageBox.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 
 #include <QAction>
 #include <QApplication>
@@ -43,7 +44,7 @@ MailDockWidget::MailDockWidget(IAppContext *ctx, QObject *parent)
 
 void MailDockWidget::setupUi()
 {
-    m_dock = new QDockWidget(m_ctx->translate("mail.dock_title"), m_ctx->mainWindow());
+    m_dock = new QDockWidget(m_ctx->translate("mail.dock_title"), m_ctx->shell()->dialogParent());
     m_dock->setObjectName("mailDockWidget");
     m_dock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea | Qt::BottomDockWidgetArea);
     QWidget* emptyTitle = new QWidget();
@@ -63,7 +64,7 @@ void MailDockWidget::setupUi()
     rootLayout->addWidget(tabs);
 
     m_dock->setWidget(m_root);
-    m_ctx->mainWindow()->addDockWidget(Qt::RightDockWidgetArea, m_dock);
+    m_ctx->shell()->addDockWidget(Qt::RightDockWidgetArea, m_dock);
     m_dock->hide();
 
     connect(m_refreshBtn, &QPushButton::clicked, this, &MailDockWidget::refreshInbox);
@@ -298,18 +299,18 @@ void MailDockWidget::refreshInbox()
     if (!m_mail) return;
     setBusy(true);
 
-    auto *progress = new CustomProgressDialog(m_ctx->mainWindow());
+    auto *progress = m_ctx->shell()->getProgressDialog();
     progress->setLabelText(m_ctx->translate("mail.loading_inbox"));
     progress->setRange(0, 0);
-    connect(progress, &CustomProgressDialog::stopRequested, progress, &CustomProgressDialog::hide);
+    connect(progress, &CustomProgressDialog::stopRequested, progress, &CustomProgressDialog::hide, Qt::UniqueConnection);
     progress->show();
     progress->centerOnWidget(m_dock);
-    QApplication::processEvents();
+    // Repaint without re-entering user input (see ViewerPlugin).
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     auto *watcher = new QFutureWatcher<QPair<QList<MailMessage>, QString>>(this);
     connect(watcher, &QFutureWatcher<QPair<QList<MailMessage>, QString>>::finished, this, [this, watcher, progress]() {
         progress->hide();
-        progress->deleteLater();
         const auto result = watcher->result();
         setBusy(false);
         watcher->deleteLater();
@@ -355,9 +356,10 @@ void MailDockWidget::refreshInbox()
                 m_ctx->translate("mail.no_subject"));
         }
     });
-    watcher->setFuture(QtConcurrent::run([this]() {
+    IMailService *mail = m_mail;
+    watcher->setFuture(QtConcurrent::run([mail]() {
         QString error;
-        const QList<MailMessage> list = m_mail->fetchInbox(30, error);
+        const QList<MailMessage> list = mail ? mail->fetchInbox(30, error) : QList<MailMessage>{};
         return qMakePair(list, error);
     }));
 }
@@ -467,7 +469,7 @@ void MailDockWidget::loadFilterSettings()
 {
     m_filterKeywords.clear();
 
-    auto *um = UserManager::instance();
+    auto *um = m_ctx->services()->get<IUserManager>();
     if (um) {
         QString username = um->currentUsername();
         QString customFilters = um->getUserPref(username, "mail_filter_keywords", "");
@@ -484,7 +486,7 @@ void MailDockWidget::loadFilterSettings()
 
 void MailDockWidget::saveFilterSettings()
 {
-    auto *um = UserManager::instance();
+    auto *um = m_ctx->services()->get<IUserManager>();
     if (!um) return;
 
     QStringList customKeywords;

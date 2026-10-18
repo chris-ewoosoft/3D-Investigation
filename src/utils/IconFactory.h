@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ICONFACTORY_H
+#define ICONFACTORY_H
 #include "Global.h"
 #include <QColor>
 #include <QIcon>
@@ -22,3 +23,5 @@ public:
                               const QColor  &startColor,
                               const QColor  &endColor);
 };
+
+#endif // ICONFACTORY_H

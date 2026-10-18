@@ -6,25 +6,41 @@
 #include <QFileInfo>
 #include <shared_mutex>
 #include "Global.h" // For APP_EXPORT
+#include "IAppPaths.h"
 
-class APP_EXPORT AppConfig {
+/**
+ * @brief Process-wide path provider. Implements IAppPaths so plugins and
+ * services can resolve it from the ServiceRegistry; the singleton accessor
+ * remains for bootstrap code (Main.cpp / Logger) that runs before the
+ * registry exists.
+ */
+class AppShell;
+
+class APP_EXPORT AppConfig : public IAppPaths {
 public:
+    /** @deprecated Resolve IAppPaths from ServiceRegistry; direct access only for bootstrap. */
+    [[deprecated("Use ctx->services()->get<IAppPaths>() instead")]]
     static AppConfig& instance();
 
+private:
+    friend class AppShell;
+
+public:
     void initialize(const QString& appDir);
 
-    QString appDir() const;
-    QString projectRootDir() const;
-    QString dataRootDir() const;
-    QString configPath() const;
-    QString logsDir() const;
-    QString modelsDir() const;
-    QString predictDir(const QString& type) const;
-    QString aiAssistantDir() const;
-    QString aiComputerVisionDir() const;
-    QString uploadDir() const;
-    QString thumbnailsDir() const;
-    QString pluginsDir() const;
+public:
+    QString appDir() const override;
+    QString projectRootDir() const override;
+    QString dataRootDir() const override;
+    QString configPath() const override;
+    QString logsDir() const override;
+    QString modelsDir() const override;
+    QString predictDir(const QString& type) const override;
+    QString aiAssistantDir() const override;
+    QString aiComputerVisionDir() const override;
+    QString uploadDir() const override;
+    QString thumbnailsDir() const override;
+    QString pluginsDir() const override;
 
 private:
     AppConfig() = default;

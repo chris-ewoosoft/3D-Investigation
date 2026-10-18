@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cvtrain.dataset import check_data_yaml, dataset_base, missing_dataset_paths, ref_exists
+from cvtrain.dataset import (
+    check_data_yaml,
+    dataset_base,
+    dataset_content_fingerprint,
+    missing_dataset_paths,
+    ref_exists,
+)
 
 
 def _write(path: Path, text: str) -> Path:
@@ -277,6 +283,139 @@ class DatasetPathTests(unittest.TestCase):
                 missing_dataset_paths({"train": "x"}, root),
                 ["train='x' (resolved under " + str(root) + ")"],
             )
+
+
+class DatasetContentFingerprintTests(unittest.TestCase):
+    def test_missing_or_empty_path_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(dataset_content_fingerprint(root / "nonexistent.yaml"))
+            empty = _write(root / "empty.yaml", "   \n")
+            self.assertIsNone(dataset_content_fingerprint(empty))
+            self.assertIsNone(dataset_content_fingerprint(root))
+
+    def test_pyyaml_missing_falls_back_to_file_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "train: a\nval: b\nnames:\n  0: x\n")
+            with mock.patch("cvtrain.dataset.module_available", return_value=False):
+                fp = dataset_content_fingerprint(path)
+                self.assertIsNotNone(fp)
+                self.assertEqual(len(fp or ""), 64)
+
+    def test_yaml_error_or_non_mapping_falls_back_to_file_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad_syntax = _write(root / "bad.yaml", ": invalid: yaml: [")
+            fp1 = dataset_content_fingerprint(bad_syntax)
+            self.assertIsNotNone(fp1)
+
+            non_mapping = _write(root / "scalar.yaml", "- item1\n- item2\n")
+            fp2 = dataset_content_fingerprint(non_mapping)
+            self.assertIsNotNone(fp2)
+
+    def test_directory_content_changes_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "img1.jpg", "content1")
+            _write(val_dir / "img2.jpg", "content2")
+
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/val\nnames:\n  0: part\n")
+            fp1 = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(fp1)
+
+            # Adding a file changes fingerprint
+            _write(train_dir / "img3.jpg", "content3")
+            fp2 = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(fp1, fp2)
+
+            # Modifying file size changes fingerprint
+            _write(train_dir / "img3.jpg", "content3-longer-data")
+            fp3 = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(fp2, fp3)
+
+    def test_single_file_splits_and_remote_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_file = _write(root / "train.txt", "line1\nline2")
+            _write(root / "val.txt", "line3")
+
+            yaml_path = _write(
+                root / "data.yaml",
+                f"train: {train_file.name}\nval: https://example.com/data.zip\nnames:\n  0: part\n",
+            )
+            fp = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(fp)
+
+    def test_subdirectories_inside_split_are_ignored(self) -> None:
+        """rglob('*') yields subdirectories too; only files should be hashed."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            nested = train_dir / "subdir"
+            nested.mkdir(parents=True)
+            _write(train_dir / "img.jpg", "data")
+            _write(nested / "deep.jpg", "deep-data")
+
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/train\nnames:\n  0: part\n")
+            fp = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(fp)
+
+    def test_os_error_during_stat_is_swallowed_in_dir_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            train_dir.mkdir(parents=True)
+            _write(train_dir / "img.jpg", "data")
+
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/train\nnames:\n  0: part\n")
+            orig_stat = Path.stat
+
+            def _flaky_stat(self: Path, *a: object, **kw: object) -> object:
+                import sys
+                frame = sys._getframe(1)
+                if frame.f_code.co_name == "dataset_content_fingerprint":
+                    raise OSError("disk error")
+                return orig_stat(self, *a, **kw)  # type: ignore[arg-type]
+
+            with mock.patch.object(Path, "stat", _flaky_stat):
+                fp = dataset_content_fingerprint(yaml_path)
+                self.assertIsNotNone(fp)
+
+    def test_os_error_during_single_file_stat_is_swallowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_file = _write(root / "train.txt", "line1\nline2")
+
+            yaml_path = _write(
+                root / "data.yaml",
+                f"train: {train_file.name}\nval: {train_file.name}\nnames:\n  0: part\n",
+            )
+            orig_stat = Path.stat
+
+            def _flaky_stat(self: Path, *a: object, **kw: object) -> object:
+                import sys
+                frame = sys._getframe(1)
+                if frame.f_code.co_name == "dataset_content_fingerprint":
+                    raise OSError("disk error")
+                return orig_stat(self, *a, **kw)  # type: ignore[arg-type]
+
+            with mock.patch.object(Path, "stat", _flaky_stat):
+                fp = dataset_content_fingerprint(yaml_path)
+                self.assertIsNotNone(fp)
+
+    def test_nonexistent_split_path_does_not_crash(self) -> None:
+        """A split pointing to a path that is neither a dir nor a file."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            yaml_path = _write(root / "data.yaml", "train: nonexistent_dir\nval: also_missing\nnames:\n  0: part\n")
+            fp = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(fp)
 
 
 if __name__ == "__main__":

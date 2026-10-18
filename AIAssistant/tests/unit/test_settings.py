@@ -37,6 +37,7 @@ from ai_assistant.settings import (
     observability_enabled,
     otlp_exporter_endpoint,
     rag_enabled,
+    rate_limit_per_minute,
     transport_tokens,
     vision_llm_enabled,
 )
@@ -158,6 +159,11 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.checkpoint_backend, "memory")
         self.assertEqual(settings.checkpoint_url, "")
         self.assertFalse(settings.native_tool_calls)
+        # Production gates stay off by default so the desktop distribution
+        # keeps working without Docker or a database (ADR 0023).
+        self.assertFalse(settings.sandbox_require_isolation)
+        self.assertFalse(settings.checkpoint_required)
+        self.assertEqual(settings.max_concurrent_runs, 0)
 
     def test_overrides_and_casefold(self):
         env = {
@@ -166,6 +172,9 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
             "AGENT_MAX_WRITE_BYTES": "2048",
             "AGENT_CHECKPOINT_BACKEND": "SQLITE",
             "AGENT_NATIVE_TOOL_CALLS": "1",
+            "AGENT_SANDBOX_REQUIRE_ISOLATION": "1",
+            "AGENT_CHECKPOINT_REQUIRED": "1",
+            "AGENT_MAX_CONCURRENT_RUNS": "4",
         }
         settings = load_agent_runtime_settings(env)
         self.assertFalse(settings.sandbox_enabled)
@@ -173,10 +182,19 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_write_bytes, 2048)
         self.assertEqual(settings.checkpoint_backend, "sqlite")
         self.assertTrue(settings.native_tool_calls)
+        self.assertTrue(settings.sandbox_require_isolation)
+        self.assertTrue(settings.checkpoint_required)
+        self.assertEqual(settings.max_concurrent_runs, 4)
 
     def test_from_env_uses_process_environment(self):
         with mock.patch.dict("os.environ", {"AGENT_MAX_WRITE_BYTES": "99"}):
             self.assertEqual(load_agent_runtime_settings().max_write_bytes, 99)
+
+    def test_rate_limit_defaults_to_disabled(self):
+        self.assertEqual(rate_limit_per_minute({}), 0)
+
+    def test_rate_limit_reads_the_environment(self):
+        self.assertEqual(rate_limit_per_minute({"AGENT_RATE_LIMIT_PER_MINUTE": "120"}), 120)
 
 
 class ObservabilityToggleTests(unittest.TestCase):

@@ -1,9 +1,10 @@
 #include "CustomProgressDialog.h"
-#include "LanguageManager.h"
+#include "ILanguageService.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 
-CustomProgressDialog::CustomProgressDialog(QWidget *parent) : QDialog(parent) {
+CustomProgressDialog::CustomProgressDialog(ILanguageService *lang, QWidget *parent)
+    : QDialog(parent), m_lang(lang) {
     // Tắt viền cửa sổ chuẩn
     this->setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint);
     this->setAttribute(Qt::WA_TranslucentBackground);
@@ -24,18 +25,18 @@ CustomProgressDialog::CustomProgressDialog(QWidget *parent) : QDialog(parent) {
     // Dòng 1: Title và Nút Stop
     QHBoxLayout *topLayout = new QHBoxLayout();
     
-    lblTitle = new QLabel(LM_TR("common.loading"), this);
+    lblTitle = new QLabel(m_lang->translate("common.loading"), this);
     lblTitle->setStyleSheet("color: #ffffff; font-size: 14px; font-weight: bold;");
     
-    btnStop = new QPushButton(LM_TR("progress.stop"), this);
+    btnStop = new QPushButton(m_lang->translate("progress.stop"), this);
     btnStop->setCursor(Qt::PointingHandCursor);
     btnStop->setStyleSheet(
         "QPushButton { background:#d32f2f; color:#fff; border:none; border-radius:4px; padding:6px 16px; font-weight:bold; font-size: 13px; }"
         "QPushButton:hover { background:#b71c1c; }"
     );
     connect(btnStop, &QPushButton::clicked, this, &CustomProgressDialog::onStopClicked);
-    connect(&LanguageManager::instance(), &LanguageManager::languageChanged, this, [this]() {
-        btnStop->setText(LM_TR("progress.stop"));
+    connect(m_lang, &ILanguageService::languageChanged, this, [this]() {
+        btnStop->setText(m_lang->translate("progress.stop"));
     });
 
     topLayout->addWidget(lblTitle);

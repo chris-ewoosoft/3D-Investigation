@@ -18,14 +18,15 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
-class IPlugin;
+class PluginHost;
+class QCloseEvent;
 
 /**
  * @brief MainWindow — Pure UI Shell.
  *
  * Sau refactor, MainWindow chỉ chịu trách nhiệm:
  *  1. Xây dựng layout/widgets (title bar, tab bar, VTK frame)
- *  2. Load và init plugins
+ *  2. Chọn thư mục plugin và gọi PluginHost (AppCore) theo từng pha
  *  3. Delegate IAppContext sang AppShell
  *
  * Không còn implement IAppContext trực tiếp.
@@ -42,6 +43,7 @@ public:
     IAppContext* context() { return m_shell.get(); }
 
 protected:
+    void closeEvent(QCloseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -58,14 +60,18 @@ private:
     void activateTab(const QString &tabName);
 
     // ── Plugin system ─────────────────────────────────────────────────────────
+    /// Chọn thư mục plugins (exe/plugins hoặc build/plugins/<Config>); trả về
+    /// QString rỗng khi không tìm thấy.
+    QString resolvePluginsDirectory() const;
+    /// discover → resolveOrder → initializeDeferredServices → initializeAll.
+    /// Thứ tự pha nằm ở đây; toàn bộ lifecycle nằm trong PluginHost (AppCore).
     void loadPlugins();
-    void discoverPlugins();
-    void sortPlugins();
-    void initPlugins();
+    void shutdownPlugins();
 
     // ── Core ──────────────────────────────────────────────────────────────────
     Ui::MainWindow*           ui;
     std::unique_ptr<AppShell> m_shell;          ///< IAppContext owner
+    std::unique_ptr<PluginHost> m_pluginHost;   ///< plugin lifecycle (AppCore)
     QVTKOpenGLNativeWidget*   m_vtkWidget = nullptr;
 
     // ── Title / Tab bar ───────────────────────────────────────────────────────
@@ -80,9 +86,6 @@ private:
     // ── Frameless drag ────────────────────────────────────────────────────────
     bool   m_dragging = false;
     QPoint m_dragPos;
-
-    // ── Plugins ───────────────────────────────────────────────────────────────
-    QList<IPlugin*> m_plugins;
 };
 
 #endif // MAINWINDOW_H

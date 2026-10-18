@@ -1,6 +1,4 @@
-#include "CrosshairGeometry.h"
-
-#include "CrosshairManager.h"
+#include "CrosshairGeometry.h" // ORI_* constants (pure-math header, no VTK)
 
 #include <algorithm>
 

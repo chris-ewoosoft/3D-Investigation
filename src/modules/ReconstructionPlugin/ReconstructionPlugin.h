@@ -9,7 +9,6 @@
 #include <QToolButton>
 #include <QListWidget>
 
-class ReconstructThread;
 class CustomProgressDialog;
 class ReconstructionRibbonUI;
 
@@ -20,7 +19,7 @@ class ReconstructionPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "Reconstruction Plugin"; }
-    void initialize(IAppContext* context) override;
+    bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 20; }
 
@@ -40,7 +39,7 @@ private:
     CustomProgressDialog* m_progressDialog = nullptr;
 
     QMenu* m_reconstructMenu = nullptr;
-    ReconstructThread* m_currentReconstructThread = nullptr;
+    bool m_cancelRequested = false;  ///< true while a stop-requested run is finishing
     
     QAction *m_toggleCloudAct = nullptr;
     ReconstructionRibbonUI* m_ribbonUI = nullptr;

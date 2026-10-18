@@ -1,4 +1,11 @@
-"""Deterministic regression eval for constrained agent tool envelopes."""
+"""Deterministic regression eval for constrained agent tool envelopes.
+
+Besides the golden tool selections, the file carries adversarial cases: an
+injected tool name, hallucinated/extra parameters, non-object parameters, strict
+types that must not be coerced, unknown desktop actions and truncated JSON. An
+``expect_error`` case passes only when the *real* validator rejects it; an
+``expect_parse_error`` case passes only when the envelope is not valid JSON.
+"""
 from __future__ import annotations
 
 import json
@@ -31,8 +38,23 @@ def main() -> int:
     passed = 0
     details = []
     for case in cases:
+        if case.get("expect_parse_error"):
+            try:
+                json.loads(case["response"])
+            except json.JSONDecodeError:
+                ok = True
+            else:
+                ok = False
+            details.append({"name": case["name"], "passed": ok})
+            passed += int(ok)
+            continue
         envelope = json.loads(case["response"])
-        if envelope["kind"] == "final":
+        if case.get("expect_error"):
+            # The validator must reject the injected/malformed call; if it
+            # accepted it, an LLM could smuggle parameters past the boundary.
+            _, error = validate_tool_call(envelope["tool"], envelope["params"], models)
+            ok = error is not None
+        elif envelope["kind"] == "final":
             ok = case["tool"] is None
         else:
             params, error = validate_tool_call(envelope["tool"], envelope["params"], models)

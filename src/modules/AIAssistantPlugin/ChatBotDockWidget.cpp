@@ -1,6 +1,6 @@
 #include "ChatBotDockWidget.h"
 #include "AppConstants.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "IconFactory.h"
 #include <QVBoxLayout>
 #include <QMenu>
@@ -8,7 +8,7 @@
 ChatBotDockWidget::ChatBotDockWidget(IAppContext* ctx, QObject* parent)
     : QObject(parent), m_ctx(ctx)
 {
-    m_dockWidget = new QDockWidget(m_ctx->translate("ai.dock_title"), m_ctx->mainWindow());
+    m_dockWidget = new QDockWidget(m_ctx->translate("ai.dock_title"), m_ctx->shell()->dialogParent());
     m_dockWidget->setMinimumWidth(AppConstants::AIAssistant::DEFAULT_DOCK_WIDTH);
     QWidget* emptyTitle = new QWidget();
     emptyTitle->setFixedHeight(0);
@@ -39,7 +39,7 @@ ChatBotDockWidget::ChatBotDockWidget(IAppContext* ctx, QObject* parent)
     dl->addWidget(m_chatSplitter, 1);
 
     m_dockWidget->setWidget(dw);
-    m_ctx->mainWindow()->addDockWidget(Qt::RightDockWidgetArea, m_dockWidget);
+    m_ctx->shell()->addDockWidget(Qt::RightDockWidgetArea, m_dockWidget);
     m_dockWidget->hide();
 }
 
@@ -61,7 +61,7 @@ QWidget* ChatBotDockWidget::createTopBar(QWidget* parent) {
     
     // Load per-user model index
     int savedIdx = 0;
-    if (auto *um = UserManager::instance()) {
+    if (auto *um = m_ctx->services()->get<IUserManager>()) {
         QString username = um->currentUsername();
         savedIdx = um->getUserPref(username, "ai_model_index", "0").toInt();
     }

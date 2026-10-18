@@ -1,6 +1,6 @@
 #include "AIPredictionLogger.h"
 
-#include "AppConfig.h"
+#include "IAppPaths.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -10,10 +10,12 @@
 
 namespace AIPredictionLogger {
 
-void logAsync(const QString &mode, const QString &sourceImagePath, const cv::Mat &resultImage)
+void logAsync(IAppPaths* paths, const QString &mode, const QString &sourceImagePath, const cv::Mat &resultImage)
 {
+    if (!paths) return;
+
     const QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
-    const QString predictDir = AppConfig::instance().predictDir(mode) + "/" + currentDate;
+    const QString predictDir = paths->predictDir(mode) + "/" + currentDate;
     QDir().mkpath(predictDir);
 
     const QString logPath = predictDir + "/" + QFileInfo(sourceImagePath).baseName() + "_" +

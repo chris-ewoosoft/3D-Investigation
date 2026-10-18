@@ -7,10 +7,12 @@
 #include <QPushButton>
 #include "Global.h"
 
+class ILanguageService;
+
 class APP_EXPORT CustomProgressDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit CustomProgressDialog(QWidget *parent = nullptr);
+    explicit CustomProgressDialog(ILanguageService *lang, QWidget *parent = nullptr);
 
     void setRange(int minimum, int maximum);
     void setValue(int value);
@@ -28,6 +30,7 @@ private:
     QLabel *lblTitle;
     QProgressBar *progressBar;
     QPushButton *btnStop;
+    ILanguageService *m_lang;
 };
 
 #endif // CUSTOMPROGRESSDIALOG_H

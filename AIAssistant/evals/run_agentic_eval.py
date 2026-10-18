@@ -2,6 +2,10 @@
 
 Test cases are derived from the canonical tool sets in ``multi_agent`` so the
 eval stays in sync when tools are added or removed — no hard-coded lists.
+
+The ``gateway-*`` scenarios drive the real ``ToolExecutionService`` instead of
+the supervisor: scope, classification, single-use approvals and cancellation
+revocation are checked against the code that enforces them.
 """
 from __future__ import annotations
 
@@ -10,13 +14,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 # The package lives under ``src/`` (ADR 0010 layout); pointing at the project
 # root alone leaves ``ai_assistant`` unimportable.
 sys.path.insert(0, str(ROOT / "src"))
 
-from ai_assistant.domain.tools import EVIDENCE_FIELDS
+from ai_assistant.application.approvals import InMemoryApprovalGrantStore
+from ai_assistant.application.tools import ToolExecutionService
+from ai_assistant.domain.security import DataClassification, Principal
+from ai_assistant.domain.tools import EVIDENCE_FIELDS, SideEffect, ToolSpec
 from ai_assistant.orchestration.supervisor import (
     CODE_TOOLS,
     RESEARCH_TOOLS,
@@ -245,6 +253,146 @@ def _eval_none_tool() -> list[EvalResult]:
     )]
 
 
+# ── Tool gateway: the injection-proof execution boundary (ADR 0009) ─────────
+
+
+def _gateway_registry(executed: list[dict[str, Any]]) -> Any:
+    """A scoped read tool plus an approval-gated write tool, via the registry."""
+    from ai_assistant.plugins.registry import PluginRegistry
+
+    def read_executor(params: dict[str, Any]) -> dict[str, Any]:
+        executed.append({"tool": "eval_read", **params})
+        return {"success": True, "content": "evidence"}
+
+    def write_executor(params: dict[str, Any]) -> dict[str, Any]:
+        executed.append({"tool": "eval_write", **params})
+        return {"success": True, "content": "written"}
+
+    registry = PluginRegistry(allowed_plugins=frozenset({"eval"}))
+    registry.register_tool(
+        ToolSpec(
+            name="eval_read", description="eval read fixture", plugin_id="eval",
+            input_schema={
+                "type": "object", "additionalProperties": False,
+                "properties": {"path": {"type": "string"}}, "required": ["path"],
+            },
+            timeout_seconds=5, side_effect=SideEffect.READ, required_scope="read",
+            maximum_classification=DataClassification.INTERNAL,
+        ),
+        read_executor,
+    )
+    registry.register_tool(
+        ToolSpec(
+            name="eval_write", description="eval write fixture", plugin_id="eval",
+            input_schema={
+                "type": "object", "additionalProperties": False,
+                "properties": {"path": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["path", "text"],
+            },
+            timeout_seconds=5, side_effect=SideEffect.WRITE,
+            requires_approval=True, required_scope="write",
+        ),
+        write_executor,
+    )
+    return registry
+
+
+def _eval_tool_gateway_policy() -> list[EvalResult]:
+    """The real gateway refuses every unsanctioned call over the dashboard.
+
+    An LLM — or text injected into its context — can name any tool and any
+    parameters. These cases drive the *actual* ``ToolExecutionService`` and
+    assert the policy outcomes a reviewer can check in the report:
+
+    * an unknown (injected) tool name never reaches an executor;
+    * a principal without the scope, or above the tool's classification, is
+      refused before execution;
+    * an approval-gated write without a grant is refused;
+    * a grant unlocks *exactly* the approved invocation, once — replayed or
+      re-pointed at different parameters it is refused;
+    * ``revoke_all`` (what a cancellation does) invalidates outstanding grants.
+    """
+    results: list[EvalResult] = []
+    executed: list[dict[str, Any]] = []
+    grants = InMemoryApprovalGrantStore()
+    service = ToolExecutionService(_gateway_registry(executed), grants=grants)
+    scoped = Principal(subject="eval-user", scopes=frozenset({"read", "write"}))
+
+    def case(tool: str, scenario: str, passed: bool, detail: str = "") -> None:
+        results.append(EvalResult(
+            tool=tool, scenario=scenario, passed=passed, specialist="gateway",
+            detail=detail,
+        ))
+
+    # Scope: no scopes → refused; the required scope → executes.
+    denied = service.execute("eval_read", {"path": "a.md"}, Principal(subject="anon", scopes=frozenset()))
+    ok = not denied.success and denied.error_code == "forbidden"
+    case("eval_read", "gateway-scope-denied", ok,
+         "" if ok else f"error_code={denied.error_code}")
+
+    allowed = service.execute("eval_read", {"path": "a.md"}, scoped)
+    ok = allowed.success and allowed.payload.get("content") == "evidence"
+    case("eval_read", "gateway-scope-allowed", ok,
+         "" if ok else f"payload={allowed.payload}")
+
+    # Classification: regulated data against an INTERNAL-ceiling tool is refused.
+    regulated = Principal(
+        subject="eval-user", scopes=frozenset({"read", "write"}),
+        classification=DataClassification.REGULATED,
+    )
+    classified = service.execute("eval_read", {"path": "a.md"}, regulated)
+    ok = not classified.success and classified.error_code == "data_policy_denied"
+    case("eval_read", "gateway-classification", ok,
+         "" if ok else f"error_code={classified.error_code}")
+
+    # An injected tool name is not in the registry: nothing to execute.
+    executed_before = len(executed)
+    unknown = service.execute("eval_shell", {"cmd": "rm -rf /"}, scoped)
+    ok = unknown.error_code == "tool_not_found" and len(executed) == executed_before
+    case("eval_shell", "gateway-unknown-tool", ok,
+         "" if ok else f"error_code={unknown.error_code}")
+
+    # Approval gate: no grant → refused, executor untouched.
+    approved = {"path": "out.txt", "text": "hello"}
+    different = {"path": "out.txt", "text": "injected"}
+    executed_before = len(executed)
+    gated = service.execute("eval_write", approved, scoped)
+    ok = (not gated.success and gated.error_code == "approval_required"
+          and gated.payload.get("approval_required") is True
+          and len(executed) == executed_before)
+    case("eval_write", "gateway-approval-required", ok,
+         "" if ok else f"error_code={gated.error_code}")
+
+    # A grant is bound to the approved invocation: other parameters stay closed.
+    token_one = uuid4().hex
+    service.issue_approval_grant("eval_write", approved, token_one)
+    executed_before = len(executed)
+    mismatched = service.execute("eval_write", different, scoped, approval_token=token_one)
+    ok = (not mismatched.success and mismatched.error_code == "approval_required"
+          and len(executed) == executed_before)
+    case("eval_write", "gateway-approval-binding", ok,
+         "" if ok else f"error_code={mismatched.error_code}")
+
+    # …and it unlocks exactly one execution: the replay is refused.
+    unlocked = service.execute("eval_write", approved, scoped, approval_token=token_one)
+    replayed = service.execute("eval_write", approved, scoped, approval_token=token_one)
+    ok = (unlocked.success and not replayed.success
+          and replayed.error_code == "approval_required")
+    case("eval_write", "gateway-approval-single-use", ok,
+         "" if ok else f"unlocked={unlocked.success} replay={replayed.error_code}")
+
+    # Cancellation revokes outstanding grants (``revoke_all`` on the store).
+    token_two = uuid4().hex
+    service.issue_approval_grant("eval_write", approved, token_two)
+    grants.revoke_all()
+    cancelled = service.execute("eval_write", approved, scoped, approval_token=token_two)
+    ok = not cancelled.success and cancelled.error_code == "approval_required"
+    case("eval_write", "gateway-cancel-revokes", ok,
+         "" if ok else f"error_code={cancelled.error_code}")
+
+    return results
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 def _eval_a2a_agent_cards() -> list[EvalResult]:
@@ -380,6 +528,7 @@ _ALL_SCENARIOS = [
     _eval_verification_failure,
     _eval_prefer_code_override,
     _eval_none_tool,
+    _eval_tool_gateway_policy,
     _eval_a2a_agent_cards,
     _eval_a2a_unavailable,
     _eval_langsmith_fallback,

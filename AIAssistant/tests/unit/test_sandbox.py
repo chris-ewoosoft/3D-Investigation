@@ -17,6 +17,7 @@ def _settings(**overrides) -> SimpleNamespace:
         "sandbox_runtime": "local",
         "sandbox_image": "agent:latest",
         "max_write_bytes": 1024 * 1024,
+        "sandbox_require_isolation": False,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -99,6 +100,31 @@ class SandboxRunTests(unittest.TestCase):
             result = run("ctest --help", "C:/workspace", 30)
         self.assertIn("timed out", result["error"])
 
+    def test_isolation_required_refuses_the_local_runtime(self) -> None:
+        """ADR 0023: an allow-list is not an OS boundary, so a deployment
+        that declares untrusted tool execution refuses the local runtime."""
+        with mock.patch(
+            "ai_assistant.tools.sandbox.load_agent_runtime_settings",
+            return_value=_settings(sandbox_require_isolation=True),
+        ):
+            with mock.patch("ai_assistant.tools.sandbox.subprocess.run") as sub:
+                result = run("python --version", "C:/workspace", 30)
+        self.assertIn("isolation is required", result["error"])
+        sub.assert_not_called()
+
+    def test_isolation_required_still_runs_inside_docker(self) -> None:
+        with mock.patch(
+            "ai_assistant.tools.sandbox.load_agent_runtime_settings",
+            return_value=_settings(sandbox_runtime="docker", sandbox_require_isolation=True),
+        ):
+            with mock.patch(
+                "ai_assistant.tools.sandbox.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as sub:
+                result = run("python --version", "C:/workspace", 30)
+        self.assertEqual(result["return_code"], 0)
+        sub.assert_called_once()
+
     def test_docker_runtime_builds_docker_argv(self) -> None:
         with mock.patch(
             "ai_assistant.tools.sandbox.load_agent_runtime_settings",
@@ -113,6 +139,9 @@ class SandboxRunTests(unittest.TestCase):
         self.assertEqual(argv[0], "docker")
         self.assertIn("--network", argv)
         self.assertIn("none", argv)
+        # Egress deny by policy + no capability path back out of the sandbox.
+        self.assertEqual(argv[argv.index("--cap-drop") + 1], "ALL")
+        self.assertEqual(argv[argv.index("--security-opt") + 1], "no-new-privileges")
         self.assertIn("agent:latest", argv)
         self.assertEqual(result["sandbox"], "docker")
         self.assertEqual(result["return_code"], 0)

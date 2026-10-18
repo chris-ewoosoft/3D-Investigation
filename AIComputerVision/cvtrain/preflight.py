@@ -43,6 +43,7 @@ __all__ = [
     "MIN_IMGSZ",
     "MIN_OPSET",
     "MIN_PYTHON",
+    "Check",
     "check_dependencies",
     "check_device",
     "check_hyperparameters",

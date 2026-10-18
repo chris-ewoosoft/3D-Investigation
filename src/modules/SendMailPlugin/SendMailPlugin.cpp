@@ -1,6 +1,7 @@
 #include "SendMailPlugin.h"
 
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "MailDockWidget.h"
 #include "SendMailRibbonUI.h"
 #include "SignalBus.h"
@@ -12,12 +13,12 @@
 #include <QApplication>
 #include <QMainWindow>
 
-void SendMailPlugin::initialize(IAppContext *context)
+bool SendMailPlugin::initialize(IAppContext *context)
 {
     m_ctx = context;
     m_dockUI = new MailDockWidget(m_ctx, this);
 
-    if (QWidget *panel = m_ctx->getTabPanel("tab.mail")) {
+    if (QWidget *panel = m_ctx->shell()->getTabPanel("tab.mail")) {
         m_ribbonUI = new SendMailRibbonUI(m_ctx, panel, this);
         
         // Initialize button text
@@ -71,6 +72,7 @@ void SendMailPlugin::initialize(IAppContext *context)
             emit m_ctx->signalBus()->agentUiActionCompleted(requestId, handled,
                 QVariantMap{{"action", action}, {"error", handled ? "" : "Mail UI is unavailable"}});
     });
+    return true;
 }
 
 void SendMailPlugin::cleanup()

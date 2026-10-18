@@ -1,8 +1,8 @@
 #include "MainWindow.h"
 #include "AppShell.h"
 #include "CustomProgressDialog.h"
-#include "IPlugin.h"
-#include "LanguageManager.h"
+#include "ILanguageService.h"
+#include "PluginHost.h"
 #include "StyleManager.h"
 #include "ui_MainWindow.h"
 
@@ -15,12 +15,10 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QPixmap>
-#include <QPluginLoader>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QScreen>
 #include <QGuiApplication>
-#include <algorithm>
 
 // ─────────────────────────────────────────────────────────────────────────────
 MainWindow::MainWindow(QWidget *parent)
@@ -54,6 +52,9 @@ MainWindow::MainWindow(QWidget *parent)
   // 4. Tạo AppShell (IAppContext implementation)
   m_shell = std::make_unique<AppShell>(this, m_vtkWidget, this);
 
+  // 4b. Plugin lifecycle host (AppCore) — loaded after the event loop starts.
+  m_pluginHost = std::make_unique<PluginHost>();
+
   // 5. Build UI (title bar, tabs, vtk frame)
   setupTitleBar(central, rootLayout);
   setupTabContent(central, rootLayout);
@@ -63,16 +64,18 @@ MainWindow::MainWindow(QWidget *parent)
   m_shell->initializeServices();
 
   // 7. Progress dialog (owned by MainWindow, referenced by AppShell)
-  auto *dlg = new CustomProgressDialog(this);
+  auto *dlg = new CustomProgressDialog(
+      context()->services()->get<ILanguageService>(), this);
   m_shell->setProgressDialog(dlg);
 
   // 8. Apply theme
   StyleManager::applyTheme(qApp);
 
-  // 9. Connect language manager
-  connect(&LM, &LanguageManager::languageChanged, this,
+  // 9. Connect language service (interface from the registry)
+  auto *langSvc = context()->services()->get<ILanguageService>();
+  connect(langSvc, &ILanguageService::languageChanged, this,
           &MainWindow::onLanguageChanged);
-  connect(&LM, &LanguageManager::languageChanged, m_shell->signalBus(),
+  connect(langSvc, &ILanguageService::languageChanged, m_shell->signalBus(),
           &SignalBus::languageChanged);
 
   // 10. Load plugins DEFERRED — window shows first, plugins load after event loop starts
@@ -80,7 +83,12 @@ MainWindow::MainWindow(QWidget *parent)
   QTimer::singleShot(0, this, &MainWindow::loadPlugins);
 }
 
-MainWindow::~MainWindow() { delete ui; }
+MainWindow::~MainWindow() {
+  // Fallback khi cửa sổ bị destroy mà không qua closeEvent (ví dụ qApp->quit()
+  // giữa chừng): plugins vẫn phải được cho cơ hội dọn dẹp.
+  shutdownPlugins();
+  delete ui;
+}
 
 // ─── UI Construction
 // ──────────────────────────────────────────────────────────
@@ -109,7 +117,7 @@ void MainWindow::setupTitleBar(QWidget * /*root*/,
   m_tabBarLayout->setSpacing(2);
 
   for (const QString &key : tabKeys) {
-    auto *btn = new QPushButton(LM_TR(key), m_tabBarWidget);
+    auto *btn = new QPushButton(context()->translate(key), m_tabBarWidget);
     btn->setObjectName("tabHeaderBtn");
     btn->setCheckable(true);
     btn->setAutoExclusive(true);
@@ -128,7 +136,7 @@ void MainWindow::setupTitleBar(QWidget * /*root*/,
     m_tabPanels[key] = panel;
 
     // Register panel in shell so plugins can find it
-    m_shell->registerTabPanel(key, panel);
+    m_shell->shell()->registerTabPanel(key, panel);
 
     connect(btn, &QPushButton::clicked, this,
             [this, key]() { activateTab(key); });
@@ -238,9 +246,9 @@ void MainWindow::activateTab(const QString &tabName) {
 // ─────────────────────────────────────────────────────────────────
 void MainWindow::onLanguageChanged(const QString & /*lang*/) {
   for (auto *child : m_titleBar->findChildren<QLabel *>("modernTitleLabel"))
-    child->setText(LM_TR("app.title"));
+    child->setText(context()->translate("app.title"));
   for (auto it = m_tabButtons.begin(); it != m_tabButtons.end(); ++it)
-    it.value()->setText(LM_TR(it.key()));
+    it.value()->setText(context()->translate(it.key()));
 }
 
 // ─── Mouse drag (frameless)
@@ -269,13 +277,7 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
 
 // ─── Plugin loading
 // ───────────────────────────────────────────────────────────
-void MainWindow::loadPlugins() {
-  discoverPlugins();
-  sortPlugins();
-  initPlugins();
-}
-
-void MainWindow::discoverPlugins() {
+QString MainWindow::resolvePluginsDirectory() const {
   QDir pluginsDir(qApp->applicationDirPath());
 
   if (pluginsDir.exists("plugins")) {
@@ -295,54 +297,56 @@ void MainWindow::discoverPlugins() {
         pluginsDir.cdUp();
         if (!pluginsDir.cd("plugins")) {
           qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
-          return;
+          return QString();
         }
       }
     } else {
       qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
-      return;
+      return QString();
     }
 #else
     qWarning() << "Could not find plugins directory:" << pluginsDir.absolutePath();
-    return;
+    return QString();
 #endif
   }
+  return pluginsDir.absolutePath();
+}
 
-  for (const QString &fileName : pluginsDir.entryList(QDir::Files)) {
-    if (!QLibrary::isLibrary(fileName))
-      continue;
+void MainWindow::loadPlugins() {
+  const QString directory = resolvePluginsDirectory();
+  if (directory.isEmpty()) return;
 
-    // Only load our own plugins to avoid warnings from Qt/vcpkg dependencies
-    if (!fileName.contains("Plugin", Qt::CaseInsensitive))
-      continue;
+  m_pluginHost->discover(directory);
+  for (const QString &error : m_pluginHost->takeErrors()) qWarning().noquote() << error;
 
-    QPluginLoader loader(pluginsDir.absoluteFilePath(fileName));
-    QObject *obj = loader.instance();
-    if (obj) {
-      if (auto *ipl = qobject_cast<IPlugin *>(obj)) {
-        qDebug() << "Loaded plugin:" << ipl->pluginName();
-        m_plugins.append(ipl);
-      } else {
-        qWarning() << "Plugin" << fileName << "does not implement IPlugin.";
-      }
-    } else {
-      qWarning() << "Failed to load plugin" << fileName << ":"
-                 << loader.errorString();
-    }
+  if (!m_pluginHost->resolveOrder()) {
+    for (const QString &error : m_pluginHost->takeErrors()) qWarning().noquote() << error;
+    qWarning() << "Plugin dependency resolution failed — aborting plugin loading.";
+    return;
+  }
+
+  // Phase-2 services (reconstruction/AI/mail) must be fully registered before
+  // any plugin's initialize() runs — explicit call, no event-queue ordering
+  // assumption.
+  m_shell->initializeDeferredServices();
+
+  if (!m_pluginHost->initializeAll(context())) {
+    for (const QString &error : m_pluginHost->takeErrors()) qWarning().noquote() << error;
+    close();
   }
 }
 
-void MainWindow::sortPlugins() {
-  std::sort(m_plugins.begin(), m_plugins.end(), [](IPlugin *a, IPlugin *b) {
-    return a->loadOrder() < b->loadOrder();
-  });
+void MainWindow::shutdownPlugins() {
+  if (!m_pluginHost || m_pluginHost->isEmpty()) return;
+
+  // LIFO cleanup (PluginHost) rồi mới ngừng expose services: sau khi mọi
+  // plugin ngừng dùng services thì registry ngừng expose them, bất kỳ get()
+  // nào trễ hơn sẽ trả nullptr thay vì con trỏ đã chết.
+  m_pluginHost->shutdown();
+  context()->services()->clear();
 }
 
-void MainWindow::initPlugins() {
-  // context() returns the AppShell which implements IAppContext
-  IAppContext *ctx = context();
-  for (IPlugin *plugin : m_plugins)
-    plugin->initialize(ctx);
-  for (IPlugin *plugin : m_plugins)
-    plugin->onAppReady();
+void MainWindow::closeEvent(QCloseEvent *event) {
+  shutdownPlugins();
+  event->accept();
 }

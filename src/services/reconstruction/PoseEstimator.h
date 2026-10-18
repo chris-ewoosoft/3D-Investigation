@@ -1,4 +1,5 @@
-#pragma once
+#ifndef POSEESTIMATOR_H
+#define POSEESTIMATOR_H
 #include <opencv2/core.hpp>
 #include <vector>
 
@@ -20,3 +21,5 @@ public:
     // Estimate intrinsics K from image dimensions
     static cv::Mat estimateIntrinsics(const cv::Mat &img);
 };
+
+#endif // POSEESTIMATOR_H

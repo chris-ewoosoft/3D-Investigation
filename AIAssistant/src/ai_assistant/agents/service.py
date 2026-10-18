@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..application.coordination import TaskCoordinator
-from ..domain.errors import NotFoundError
+from ..domain.errors import NotFoundError, ServiceUnavailableError
 from ..orchestration.specialists.code import (
     CodingTaskContext,
     is_coding_task,
@@ -60,7 +60,8 @@ class AgentService:
                  pending_lock: Any = None, tool_registry: ToolRegistry | None = None,
                  tool_gateway: ToolGateway | None = None,
                  checkpointer: Any = None, a2a_router: Any = None,
-                 task_coordinator: TaskCoordinator | None = None) -> None:
+                 task_coordinator: TaskCoordinator | None = None,
+                 max_concurrent_runs: int = 0) -> None:
         self.llm_runtime = llm_runtime
         # Durability is injected (ADR 0003): the composition root wires the
         # file-backed store; a bare facade (tests, embeds) keeps approvals in
@@ -75,6 +76,14 @@ class AgentService:
         # is exactly the overlap this lock exists to prevent.  Cost is one tiny
         # lock per distinct session the client has opened.
         self._session_locks: dict[str, threading.RLock] = {}
+        # Global run budget (ADR 0024): one run per session is already
+        # enforced below, but a deployment can also cap total concurrency so
+        # a burst of sessions cannot exhaust the single local model. Zero
+        # keeps the facade unlimited (desktop default).
+        self._run_slots = (
+            threading.BoundedSemaphore(max_concurrent_runs)
+            if max_concurrent_runs > 0 else None
+        )
         # The composition root owns one catalog and one coordinator; a bare
         # instance (tests, embeds) builds its own so the facade stays usable.
         self.tool_registry = tool_registry if tool_registry is not None else create_tool_registry()
@@ -133,20 +142,30 @@ class AgentService:
                 client_host: str = "unknown") -> dict[str, Any]:
         self._cleanup_pending()
         self._require_llm()
-
-        req_start = time.monotonic()
-        task = request.task
-        session_id = request.session_id or "agent_default"
-        # One run at a time per session (review finding 3): concurrent executes
-        # for the same session share one checkpointer thread_id and would
-        # clobber the coordinator's running record, so they queue here while
-        # other sessions keep running in parallel.  ``cancel``/``approve`` stay
-        # outside this lock on purpose — they must work while a run holds it.
-        with self._session_lock(session_id):
-            return self._execute_locked(
-                request, session_id=session_id, task=task, req_start=req_start,
-                event_sink=event_sink, client_host=client_host,
-            )
+        slots = self._run_slots
+        if slots is not None and not slots.acquire(blocking=False):
+            # Backpressure (ADR 0024): refuse immediately (503) instead of
+            # queueing behind the single local model; the caller retries.
+            msg = ("The agent run budget is exhausted; retry after a running "
+                   "run finishes (AGENT_MAX_CONCURRENT_RUNS).")
+            raise ServiceUnavailableError(msg)
+        try:
+            req_start = time.monotonic()
+            task = request.task
+            session_id = request.session_id or "agent_default"
+            # One run at a time per session (review finding 3): concurrent executes
+            # for the same session share one checkpointer thread_id and would
+            # clobber the coordinator's running record, so they queue here while
+            # other sessions keep running in parallel.  ``cancel``/``approve`` stay
+            # outside this lock on purpose — they must work while a run holds it.
+            with self._session_lock(session_id):
+                return self._execute_locked(
+                    request, session_id=session_id, task=task, req_start=req_start,
+                    event_sink=event_sink, client_host=client_host,
+                )
+        finally:
+            if slots is not None:
+                slots.release()
 
     def _execute_locked(
         self, request: AgentExecuteRequest, *, session_id: str, task: str,

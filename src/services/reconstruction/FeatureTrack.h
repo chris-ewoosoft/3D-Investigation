@@ -1,4 +1,5 @@
-#pragma once
+#ifndef FEATURETRACK_H
+#define FEATURETRACK_H
 #include <vector>
 #include <unordered_map>
 #include <opencv2/core.hpp>
@@ -73,3 +74,5 @@ public:
         m_keyToObs[k] = {img, kp};
     }
 };
+
+#endif // FEATURETRACK_H

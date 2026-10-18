@@ -9,15 +9,13 @@
 #include <QLabel>
 #include <QCheckBox>
 
-class QMainWindow;
-
 class ThemeSelectionDialog : public QWidget {
     Q_OBJECT
 public:
     /** username — để save/load accent color per-user */
     explicit ThemeSelectionDialog(const QString &username, QWidget *parent = nullptr);
 
-    static void applyGlobalBackground(QMainWindow *mw, const QString &bgPath, int bgOpacity, bool useBg);
+    static void applyGlobalBackground(QWidget *mw, const QString &bgPath, int bgOpacity, bool useBg);
 
 private:
     void addColorOption(QGridLayout *layout, int row, int col, const QString &name, const QString &color);

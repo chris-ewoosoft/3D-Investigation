@@ -16,7 +16,7 @@ because ``exist_ok``/``deterministic`` are Ultralytics' names — a second
 backend would spell its own, and a leaf must not know them.
 
 The exported file names are a contract with the Qt application. Keep them in
-sync with ``src/app/AppConstants.h``; ``tests/test_contract.py`` enforces the
+sync with ``src/core/AppConstants.h``; ``tests/test_contract.py`` enforces the
 match so the two sides cannot silently drift apart.
 """
 
@@ -82,9 +82,57 @@ class ModelSpec:
 # directories, and a test can point the whole pipeline at a sandbox.
 
 
+class ModelRegistry:
+    """Registry for model specifications, allowing dynamic registration of model tasks."""
+
+    def __init__(self, specs: Iterable[ModelSpec] | None = None) -> None:
+        self._specs: dict[str, ModelSpec] = {}
+        if specs is not None:
+            for spec in specs:
+                self.register(spec)
+
+    def register(self, spec: ModelSpec) -> None:
+        """Register a new model specification. Fails if key or output is already taken."""
+        if not isinstance(spec, ModelSpec):
+            raise TypeError(f"expected ModelSpec instance, got {type(spec).__name__}")
+        if spec.key in self._specs:
+            raise ValueError(f"model key {spec.key!r} already registered")
+        for existing in self._specs.values():
+            if existing.output == spec.output:
+                raise ValueError(f"output {spec.output!r} already registered by model {existing.key!r}")
+        self._specs[spec.key] = spec
+
+    def get(self, key: str) -> ModelSpec:
+        """Retrieve a ModelSpec by key."""
+        if key not in self._specs:
+            raise KeyError(f"unknown model key {key!r}; available: {', '.join(self._specs)}")
+        return self._specs[key]
+
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self._specs)
+
+    def values(self) -> tuple[ModelSpec, ...]:
+        return tuple(self._specs.values())
+
+    def items(self) -> tuple[tuple[str, ModelSpec], ...]:
+        return tuple(self._specs.items())
+
+    def __getitem__(self, key: str) -> ModelSpec:
+        return self.get(key)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._specs
+
+    def __len__(self) -> int:
+        return len(self._specs)
+
+    def as_dict(self) -> dict[str, ModelSpec]:
+        return dict(self._specs)
+
+
 # Order is significant: it defines the training order and the UI listing order.
-MODEL_SPECS: dict[str, ModelSpec] = {
-    "det": ModelSpec(
+DEFAULT_SPECS: tuple[ModelSpec, ...] = (
+    ModelSpec(
         key="det",
         ckpt="yolo11n.pt",
         output="yolo11n.onnx",
@@ -92,7 +140,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         role="detection",
         label="Detection (yolo11n)",
     ),
-    "seg": ModelSpec(
+    ModelSpec(
         key="seg",
         ckpt="yolo11n-seg.pt",
         output="yolo11n-seg.onnx",
@@ -100,7 +148,7 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         role="segmentation",
         label="Segmentation (yolo11n-seg)",
     ),
-    "track": ModelSpec(
+    ModelSpec(
         key="track",
         ckpt="yolo11x.pt",
         output="yolo11x-tracking.onnx",
@@ -108,15 +156,26 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         role="tracking",
         label="Tracking (yolo11x-tracking)",
     ),
-}
+)
 
-ALL_MODEL_KEYS: tuple[str, ...] = tuple(MODEL_SPECS)
+MODEL_REGISTRY = ModelRegistry(DEFAULT_SPECS)
+MODEL_SPECS: dict[str, ModelSpec] = MODEL_REGISTRY.as_dict()
+ALL_MODEL_KEYS: tuple[str, ...] = MODEL_REGISTRY.keys()
 
 # Backwards compatible default: the legacy script always trained det + seg.
 DEFAULT_MODELS: tuple[str, ...] = ("det", "seg")
 
 
-def resolve_models(selected: Iterable[object] | None) -> tuple[str, ...]:
+def register_model_spec(spec: ModelSpec) -> None:
+    """Register a new ModelSpec into the default registry and update global views."""
+    MODEL_REGISTRY.register(spec)
+    MODEL_SPECS[spec.key] = spec
+
+
+def resolve_models(
+    selected: Iterable[object] | None,
+    registry: ModelRegistry | None = None,
+) -> tuple[str, ...]:
     """Normalise a user selection into a canonical, ordered tuple of keys.
 
     An empty selection falls back to :data:`DEFAULT_MODELS` so ``python
@@ -125,8 +184,9 @@ def resolve_models(selected: Iterable[object] | None) -> tuple[str, ...]:
     exactly what the user ticked.
     """
 
+    reg = registry or MODEL_REGISTRY
     chosen = {str(item) for item in selected} if selected else set()
-    ordered = tuple(key for key in ALL_MODEL_KEYS if key in chosen)
+    ordered = tuple(key for key in reg.keys() if key in chosen)
     return ordered or DEFAULT_MODELS
 
 

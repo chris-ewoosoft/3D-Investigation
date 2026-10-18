@@ -1,8 +1,5 @@
 #include "ChatSessionStore.h"
 
-#include "AppConfig.h"
-#include "UserManager.h"
-
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -12,7 +9,8 @@
 
 namespace ChatSessionStore {
 
-void save(const QList<ChatSession> &sessions)
+void save(const QList<ChatSession> &sessions, const QString &username,
+          const QString &configFilePath)
 {
     QJsonArray sessionArray;
     for (const auto &session : sessions) {
@@ -29,17 +27,17 @@ void save(const QList<ChatSession> &sessions)
         sessionArray.append(sessionObject);
     }
 
-    QFile file(sessionsPath());
+    QFile file(sessionsPath(username, configFilePath));
     if (file.open(QIODevice::WriteOnly)) {
         file.write(QJsonDocument(sessionArray).toJson());
         file.close();
     }
 }
 
-QList<ChatSession> load()
+QList<ChatSession> load(const QString &username, const QString &configFilePath)
 {
     QList<ChatSession> sessions;
-    QFile file(sessionsPath());
+    QFile file(sessionsPath(username, configFilePath));
     if (!file.open(QIODevice::ReadOnly)) return sessions;
 
     const QJsonArray sessionArray = QJsonDocument::fromJson(file.readAll()).array();
@@ -65,12 +63,12 @@ QString generateSessionId()
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
-QString sessionsPath()
+QString sessionsPath(const QString &username, const QString &configFilePath)
 {
-    QString currentUser = UserManager::instance()->currentUsername();
+    QString currentUser = username;
     if (currentUser.isEmpty()) currentUser = "default";
 
-    const QString dir = QFileInfo(AppConfig::instance().configPath()).absolutePath() + "/";
+    const QString dir = QFileInfo(configFilePath).absolutePath() + "/";
     QDir().mkpath(dir);
     return dir + "chat_sessions_" + currentUser + ".json";
 }

@@ -80,5 +80,7 @@ int main(int argc, char* argv[])
     // will initialize on the next event loop iteration (via QTimer::singleShot).
     QApplication::processEvents();
 
-    return app.exec();
+    const int result = app.exec();
+    Logger::shutdown();
+    return result;
 }

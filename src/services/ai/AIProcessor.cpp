@@ -80,6 +80,7 @@ cv::Size AIProcessor::inputSizeOf(const Ort::Session& session) {
 }
 
 bool AIProcessor::loadDetectionModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     detSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -97,6 +98,7 @@ bool AIProcessor::loadDetectionModel(const QString &modelPath) {
 }
 
 bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     segSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -115,6 +117,7 @@ bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
 }
 
 bool AIProcessor::loadTrackingModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     trackingSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -131,17 +134,16 @@ bool AIProcessor::loadTrackingModel(const QString &modelPath) {
   }
 }
 
-cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
+std::vector<AIDetectionResult> AIProcessor::detectObjects(const cv::Mat &inputImage) {
+  std::shared_lock lock(m_sessionMutex);
   if (!isDetModelLoaded || inputImage.empty()) {
-    qWarning() << "Detection model not loaded or input image is empty.";
-    return inputImage;
+    return {};
   }
 
   const float SCORE_THRESHOLD = m_confidenceThreshold;
   const float NMS_THRESHOLD = 0.45f;
   const int INPUT_WIDTH = m_detInputSize.width;
   const int INPUT_HEIGHT = m_detInputSize.height;
-  const int CHANNELS = 3;
 
   std::vector<float> inputTensorValues;
   Ort::Value inputTensor = prepareInputTensor(inputImage, INPUT_WIDTH, INPUT_HEIGHT, inputTensorValues);
@@ -167,14 +169,31 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
   const std::vector<int> indices =
       AIYoloPostProcessor::applyNms(detections.boxes, detections.confidences, NMS_THRESHOLD);
 
-  cv::Mat resultImage = inputImage.clone();
+  std::vector<AIDetectionResult> results;
+  results.reserve(indices.size());
   for (int idx : indices) {
-    cv::Rect box = detections.boxes[idx];
+    AIDetectionResult r;
+    r.classId = detections.classIds[idx];
+    r.confidence = detections.confidences[idx];
+    const cv::Rect& box = detections.boxes[idx];
+    r.x = box.x; r.y = box.y; r.width = box.width; r.height = box.height;
+    results.push_back(r);
+  }
+  return results;
+}
+
+cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
+  if (inputImage.empty()) return inputImage;
+  const auto detections = detectObjects(inputImage);
+
+  cv::Mat resultImage = inputImage.clone();
+  for (const auto &det : detections) {
+    cv::Rect box(det.x, det.y, det.width, det.height);
     cv::rectangle(resultImage, box, cv::Scalar(0, 255, 0), 2);
 
     QString label = QString("ID %1: %2%")
-                        .arg(detections.classIds[idx])
-                        .arg(int(detections.confidences[idx] * 100));
+                        .arg(det.classId)
+                        .arg(int(det.confidence * 100));
     int baseLine;
     cv::Size labelSize = cv::getTextSize(
         label.toStdString(), cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
@@ -191,6 +210,7 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
 }
 
 cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
+  std::shared_lock lock(m_sessionMutex);
   if (!isSegModelLoaded || inputImage.empty()) {
     qWarning() << "Segmentation model not loaded or input image is empty.";
     return inputImage;
@@ -296,6 +316,7 @@ void AIProcessor::resetTrackingState() {
 }
 
 cv::Mat AIProcessor::runTracking(const cv::Mat &inputImage) {
+  std::shared_lock sessionLock(m_sessionMutex);
   if (!isTrackingLoaded || inputImage.empty()) {
     qWarning() << "Tracking model not loaded or input image is empty.";
     return inputImage;

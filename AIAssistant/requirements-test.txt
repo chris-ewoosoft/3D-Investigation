@@ -18,8 +18,12 @@
 #     run only when mcp is present; without it they skip and adapters/mcp.py
 #     plus the mcp branches in agents/completion.py go uncovered.
 #
-#   pip install -r AIAssistant/requirements-test.txt
+#   pip install --require-hashes -r AIAssistant/requirements-test.lock
 #   cd AIAssistant && python -m unittest discover -s tests -p "test_*.py"
+#
+# requirements-test.lock là bản hash-pinned của file này (sinh bởi
+# `uv pip compile requirements-test.txt --python-version 3.11 --universal
+# --generate-hashes`); CI cài đúng lock đó với --require-hashes (ADR 0023).
 
 fastapi>=0.111.0
 pydantic>=2.7.0

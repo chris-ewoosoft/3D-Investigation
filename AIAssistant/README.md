@@ -202,26 +202,31 @@ AIAssistant/
 │  ├─ base.toml                       # runtime (enable_mcp/a2a), CORS allowed_origins
 │  ├─ desktop.toml · server.toml      # Hồ sơ theo AI_ASSISTANT_PROFILE (mặc định: desktop)
 │  ├─ agents.toml                     # Khả năng & scope least-privilege của từng specialist
-│  ├─ models.toml                     # Registry GGUF (repo_id/filename/vision/mmproj)
+│  ├─ models.toml                     # Registry GGUF (repo_id/filename/vision/mmproj + commit/SHA-256)
 │  └─ plugins.toml                    # Allowlist plugin được phép nạp
 ├─ evals/                             # Eval tất định, offline (không gọi LLM thật)
-│  ├─ run_tool_eval.py                # Envelope tool-call: schema, _validation_error, resume
-│  ├─ run_agentic_eval.py             # Chính sách supervisor: routing, uỷ quyền, verification
+│  ├─ run_tool_eval.py                # Envelope tool-call: golden + adversarial (expect_error)
+│  ├─ run_agentic_eval.py             # Chính sách supervisor + gateway (grant/injection/rollback)
 │  ├─ run_model_in_loop_eval.py       # Chấm planner thật (cần backend; không có thì SKIP)
-│  ├─ tool_call_cases.json            # Bộ case của eval tool-call
+│  ├─ tool_call_cases.json            # Bộ case của eval tool-call (16 case)
 │  └─ *_report.json                   # Report sinh ra (git-ignored)
 ├─ scripts/
-│  └─ mutation_check.py               # Đảo từng quyết định trọng yếu; test sở hữu phải fail
+│  ├─ mutation_check.py               # Đảo từng quyết định trọng yếu; test sở hữu phải fail
+│  ├─ generate_sbom.py                # CycloneDX: distribution từ lock + artifact GGUF (ADR 0023)
+│  └─ verify_models.py                # Pre-flight OK/MISSING/MISMATCH cho GGUF đã tải (ADR 0023)
 ├─ tests/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 22 Architecture Decision Record (0001–0022)
+├─ Docs/adr/                          # 25 Architecture Decision Record (0001–0025)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
+├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
-├─ .env.example                       # Mẫu biến môi trường (sandbox, checkpoint, observability, token)
+├─ .env.example                       # Mẫu biến môi trường (sandbox, checkpoint, governor, observability)
 ├─ pyproject.toml                     # ruff · mypy strict · coverage fail_under=100 · import-linter
 ├─ requirements.txt                   # Dependency runtime (llama-cpp-python cài tay)
+├─ requirements.lock                  # Pin phiên bản + SHA-256 (`uv --generate-hashes`, ADR 0023)
+├─ requirements-test.lock             # Pin hash cho bộ test — CI cài bằng `--require-hashes`
 └─ requirements-test.txt              # Dependency cho bộ test/eval offline
 ```
 
@@ -368,6 +373,15 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
   cảnh báo khi lỗi công cụ hoặc latency tăng.
 * `AGENT_CHECKPOINT_BACKEND=memory` là mặc định an toàn cho desktop. Chỉ cấu
   hình Postgres/Redis khi cần khôi phục session bền vững đa tiến trình.
+* **Cổng production là opt-in, fail closed (ADR 0023/0024).**
+  `AGENT_CHECKPOINT_REQUIRED=1` từ chối backend memory (raise thay vì rơi về
+  `MemorySaver` im lặng); `AGENT_SANDBOX_REQUIRE_ISOLATION=1` từ chối runtime
+  local (chỉ chạy tool trong docker `--cap-drop ALL` + `no-new-privileges`);
+  `AGENT_MAX_CONCURRENT_RUNS` và `AGENT_RATE_LIMIT_PER_MINUTE` bật governor
+  admission (hết slot → 503, vượt quota → 429 + `Retry-After`; `/livez`,
+  `/readyz` được miễn). Desktop không đặt gì thì hành vi không đổi; deployment
+  nhiều người dùng xem [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) (SLO, cảnh báo,
+  quy trình chỉnh quota/backup/rollback).
 * Người phản biện là tất định **bằng thiết kế**: không tốn một lời gọi mô hình
   thêm nào, và ngăn một kết quả công cụ thất bại bị âm thầm coi là sự thật.
 
@@ -443,8 +457,12 @@ không bao giờ có cơ hội chạy code lúc bootstrap.
 # Runtime (llama-cpp-python cài riêng — xem dưới)
 pip install -r AIAssistant/requirements.txt
 
-# Bộ test/eval offline
-pip install -r AIAssistant/requirements-test.txt
+# Bản hash-pinned đã resolve (ADR 0023, khuyến nghị cho production):
+# --require-hashes bắt pip xác minh SHA-256 của từng artifact tải về
+pip install --require-hashes -r AIAssistant/requirements.lock
+
+# Bộ test/eval offline (cùng cơ chế hash; CI cài đúng lock này)
+pip install --require-hashes -r AIAssistant/requirements-test.lock
 
 # Chế độ phát triển: cài package ở chế độ editable
 pip install -e AIAssistant
@@ -452,9 +470,16 @@ pip install -e AIAssistant
 
 `llama-cpp-python` cố ý không pin trong `requirements.txt`: hãy cài bản khớp
 với cấu hình của bạn (wheel CUDA hoặc CPU thuần) theo phần đầu file đó. Trọng số
-mô hình **không** nằm trong repo — chúng nằm ở `AIAssistant/Models/` (git-ignored)
-và được tải về ở lần dùng đầu từ registry trong
-[`config/models.toml`](config/models.toml).
+mô hình **không** nằm trong repo — chúng nằm trong thư mục `Models/` mà
+`ai_assistant.config.paths` resolve (mặc định `<repo>/Models`, git-ignored) và
+được tải về ở lần dùng đầu từ registry trong
+[`config/models.toml`](config/models.toml). Mọi GGUF đều được pin theo commit
+Hugging Face + SHA-256; kiểm tra trước khi chạy server:
+
+```powershell
+python AIAssistant/scripts/verify_models.py          # OK/MISSING/MISMATCH, exit 1 nếu lệch pin
+python AIAssistant/scripts/generate_sbom.py --output sbom.json   # CycloneDX: lock (version + SHA-256) + model artifacts
+```
 
 Biến runtime đặt trong `AIAssistant/.env` (git-ignored); bắt đầu từ
 [`.env.example`](.env.example), file mô tả chính sách sandbox, backend checkpoint,
@@ -533,12 +558,16 @@ branch toàn package, và **39/39** kill trong mutation check.
   buộc** test sở hữu phải fail; CI chạy lại con số này mỗi lần push (mutant recompose
   được ghim bằng timeout 180s — ADR 0022). Con số là một đo lường, không phải mục
   tiêu: nó tái lập được khi cài `faiss-cpu`, `rank-bm25` và `mcp`
-  (`requirements-test.txt`).
+  (`requirements-test.lock`).
 * `evals/` — hai eval tất định, offline chạy trong CI trên mọi push/PR chạm
-  `AIAssistant/**` (`run_tool_eval.py` cho envelope tool-call,
-  `run_agentic_eval.py` cho chính sách supervisor). `run_model_in_loop_eval.py`
-  chạy tay và cần backend thật. Cả ba script đều tự đặt `src/` lên `sys.path`,
-  và một case **không chạy được** sẽ được báo là *not run* và exit khác 0.
+  `AIAssistant/**` (`run_tool_eval.py` cho envelope tool-call — 16 case gồm
+  adversarial: tool bịa, tham số lạ, type không coerce, JSON cụt;
+  `run_agentic_eval.py` cho chính sách supervisor + gateway thật — 25
+  scenario/114 case gồm grant dùng-một-lần, rollback/cancel, scope và
+  classification; ADR 0025). `run_model_in_loop_eval.py` chạy tay và cần
+  backend thật, có `--baseline` để gate tụt điểm so với report cũ. Cả ba
+  script đều tự đặt `src/` lên `sys.path`, và một case **không chạy được** sẽ
+  được báo là *not run* và exit khác 0.
 * Coverage không thể phát hiện một test asserted sai chiều, nên các guard trọng
   yếu (allowlist sandbox, phê duyệt HITL, chính sách remota, `/health`, niêm
   phong cache, các cuộc đua cancel, cổng ranh giới bước ADR 0019) còn được
@@ -553,12 +582,14 @@ branch toàn package, và **39/39** kill trong mutation check.
 |----------|---------|
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — bản local, không theo git |
-| [`Docs/adr/`](Docs/adr/) | 22 Architecture Decision Record (0001–0022) |
+| [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
+| [`Docs/adr/`](Docs/adr/) | 25 Architecture Decision Record (0001–0025) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
-> `Docs/` chỉ chứa `adr/` và `archive/`. Các bản tài liệu vận hành/MCP/roadmap
-> cũ đã bị xoá thay vì để thành link chết (ADR 0015 — một claim không được test
-> nào ghim thì bị xoá, không phải được nhắc lại).
+> `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
+> tài liệu vận hành/MCP/roadmap cũ đã bị xoá thay vì để thành link chết
+> (ADR 0015 — một claim không được test nào ghim thì bị xoá, không phải được
+> nhắc lại).
 
 Các quyết định trọng yếu, theo thứ tự:
 [0001](Docs/adr/0001-platform-boundaries.md) ranh giới nền tảng,
@@ -582,7 +613,10 @@ Các quyết định trọng yếu, theo thứ tự:
 [0019](Docs/adr/0019-step-vocabulary-domain-boundary.md) từ vựng bước, ranh giới domain,
 [0020](Docs/adr/0020-lazy-composition-root.md) composition root lười,
 [0021](Docs/adr/0021-hardening-batch-10-10.md) lô cứng hoá 10/10,
-[0022](Docs/adr/0022-true-lazy-strict-10-10.md) root lười đúng nghĩa, strict 10/10.
+[0022](Docs/adr/0022-true-lazy-strict-10-10.md) root lười đúng nghĩa, strict 10/10,
+[0023](Docs/adr/0023-artifact-pinning-production-gates.md) pin artifact & cổng production fail-closed,
+[0024](Docs/adr/0024-admission-governor.md) governor admission (rate limit, run budget, SLO),
+[0025](Docs/adr/0025-eval-expansion.md) eval mở rộng (adversarial, gateway, multilingual, baseline).
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

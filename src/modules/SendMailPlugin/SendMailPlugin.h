@@ -16,7 +16,7 @@ class SendMailPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "Send Mail Plugin"; }
-    void initialize(IAppContext *context) override;
+    bool initialize(IAppContext *context) override;
     void cleanup() override;
     int loadOrder() const override { return 45; }
 

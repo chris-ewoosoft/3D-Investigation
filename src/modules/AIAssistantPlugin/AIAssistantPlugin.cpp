@@ -1,11 +1,11 @@
 #include "AIAssistantPlugin.h"
-#include "MainWindow.h"
+#include <QMainWindow>
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
 #include "SignalBus.h"
 #include "IAIAssistantService.h"
-#include "LanguageManager.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "AIAttachmentPreviewFactory.h"
 #include "../../utils/FileUtilities.h"
 #include <QDockWidget>
@@ -30,14 +30,14 @@
 
 #include "AIAssistantRibbonUI.h"
 #include "ChatBotDockWidget.h"
-#include "AppConfig.h"
 #include "AppConstants.h"
 #include "ChatMessageRenderer.h"
+#include "IAppPaths.h"
 #include "../../utils/CustomProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
 
 
-void AIAssistantPlugin::initialize(IAppContext* context) {
+bool AIAssistantPlugin::initialize(IAppContext* context) {
     m_ctx = context;
     m_aiAssistant = m_ctx->services()->get<IAIAssistantService>();
     
@@ -75,7 +75,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
     }
     
     // Inject AI Assistant button into tab.ai_assistant panel
-    if (QWidget* panel = m_ctx->getTabPanel("tab.ai_assistant")) {
+    if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.ai_assistant")) {
         m_ribbonUI = new AIAssistantRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnToggleAssistant(), &QToolButton::clicked, this, &AIAssistantPlugin::onToggleChatbot);
         connect(m_ribbonUI->btnRestartModel(), &QToolButton::clicked, this, [this]() {
@@ -87,7 +87,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_model"));
                 m_progressDialog->setRange(0, 0);
                 m_progressDialog->show();
-                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : m_ctx->shell()->dialogParent());
             }
             m_isStartingServer = true;
             m_aiAssistant->restartModel();
@@ -105,7 +105,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_rag"));
                 m_progressDialog->setRange(0, 0);
                 m_progressDialog->show();
-                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : m_ctx->shell()->dialogParent());
             }
             m_isStartingServer = true;
             m_aiAssistant->restartRAG();
@@ -120,7 +120,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_agent"));
                 m_progressDialog->setRange(0, 0);
                 m_progressDialog->show();
-                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : m_ctx->shell()->dialogParent());
             }
             m_isStartingServer = true;
             m_aiAssistant->restartAgent();
@@ -134,7 +134,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 m_progressDialog->setLabelText(m_ctx->translate("ai.restarting_server"));
                 m_progressDialog->setRange(0, 0);
                 m_progressDialog->show();
-                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : static_cast<QWidget*>(m_ctx->mainWindow()));
+                m_progressDialog->centerOnWidget(m_dockUI && !m_dockUI->dockWidget()->isHidden() ? static_cast<QWidget*>(m_dockUI->dockWidget()) : m_ctx->shell()->dialogParent());
             }
             m_isStartingServer = true;
             m_aiAssistant->restartServer();
@@ -212,7 +212,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
                 QVariantMap{{"action", action}, {"error", handled ? "" : "Action was not handled"}});
     });
     
-    m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
+    m_progressDialog = m_ctx->shell()->getProgressDialog();
     connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, &AIAssistantPlugin::onProgressStopped);
 
     connect(m_ctx->signalBus(), &SignalBus::userChanged, this, [this](const QString &username) {
@@ -224,7 +224,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
         }
         if (m_dockUI && m_dockUI->modelSelector()) {
             int savedIdx = 0;
-            if (auto *um = UserManager::instance()) {
+            if (auto *um = m_ctx->services()->get<IUserManager>()) {
                 savedIdx = um->getUserPref(username, "ai_model_index", "0").toInt();
             }
             m_dockUI->modelSelector()->blockSignals(true);
@@ -232,6 +232,7 @@ void AIAssistantPlugin::initialize(IAppContext* context) {
             m_dockUI->modelSelector()->blockSignals(false);
         }
     });
+    return true;
 }
 
 void AIAssistantPlugin::cleanup() {
@@ -366,7 +367,7 @@ void AIAssistantPlugin::onModelSelected(int index) {
     m_aiAssistant->switchModel(index);
 
     // Save per-user AI model index
-    if (auto *um = UserManager::instance()) {
+    if (auto *um = m_ctx->services()->get<IUserManager>()) {
         um->setUserPref(um->currentUsername(), "ai_model_index", QString::number(index));
     }
 }
@@ -383,7 +384,7 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
             if (msgIndex >= 0 && msgIndex < history.size()) {
                 QString currentText = history[msgIndex]["content"].toString();
                 bool ok;
-                QString newText = QInputDialog::getMultiLineText(m_ctx->mainWindow(), 
+                QString newText = QInputDialog::getMultiLineText(m_ctx->shell()->dialogParent(), 
                                       "Edit Message", 
                                       "Update your question:", 
                                       currentText, &ok);
@@ -400,14 +401,14 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         if (path.startsWith("approve:")) {
             QString actionId = path.mid(8);
             if (m_submittedAgentActions.contains(actionId)) return;
-            if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("ai.agent_approve_title"),
+            if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("ai.agent_approve_title"),
                                             m_ctx->translate("ai.agent_approve_confirm"))) return;
             m_submittedAgentActions.insert(actionId);
             m_aiAssistant->approveAgentAction(m_aiAssistant->currentSessionId(), actionId);
         } else if (path.startsWith("reject:")) {
             QString actionId = path.mid(7);
             if (m_submittedAgentActions.contains(actionId)) return;
-            if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("ai.agent_reject_title"),
+            if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("ai.agent_reject_title"),
                                             m_ctx->translate("ai.agent_reject_confirm"))) return;
             m_submittedAgentActions.insert(actionId);
             m_aiAssistant->rejectAgentAction(m_aiAssistant->currentSessionId(), actionId);
@@ -420,7 +421,7 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
 #ifdef Q_OS_WIN
         if (path.startsWith("/")) path.remove(0, 1);
 #endif
-        ChatImageViewer viewer(path, m_ctx->mainWindow());
+        ChatImageViewer viewer(path, m_ctx->shell()->dialogParent());
         viewer.exec();
     } else if (url.scheme() == "file") {
         QString path = url.path();
@@ -428,7 +429,8 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         if (path.startsWith("/")) path.remove(0, 1);
         
         // Resolve relative path against the configured project root.
-        QString absPath = QDir(AppConfig::instance().projectRootDir()).absoluteFilePath(path);
+        auto* paths = m_ctx->services()->get<IAppPaths>();
+        QString absPath = QDir(paths ? paths->projectRootDir() : QString()).absoluteFilePath(path);
         
         if (QFileInfo::exists(absPath)) {
             QDesktopServices::openUrl(QUrl::fromLocalFile(absPath));
@@ -534,14 +536,14 @@ void AIAssistantPlugin::onAssistantError(const QString &error) {
 
 void AIAssistantPlugin::onAttachImage() {
     QString lastUsedPath = m_ctx->settings()->getLastUsedPath("ai_attach");
-    QStringList fileNames = QFileDialog::getOpenFileNames(m_ctx->mainWindow(), m_ctx->translate("file.select_image"), lastUsedPath, "Images (*.png *.jpg *.jpeg *.bmp)");
+    QStringList fileNames = QFileDialog::getOpenFileNames(m_ctx->shell()->dialogParent(), m_ctx->translate("file.select_image"), lastUsedPath, "Images (*.png *.jpg *.jpeg *.bmp)");
     if (fileNames.isEmpty()) return;
     
     m_ctx->settings()->setLastUsedPath("ai_attach", QFileInfo(fileNames.first()).absolutePath());
     
     for (const QString &fileName : fileNames) {
         if (QFileInfo(fileName).size() > AppConstants::AIAssistant::MAX_ATTACHMENT_SIZE_MB * 1024 * 1024) {
-            ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("ai.over_size"), 
+            ModernMessageBox::warning(m_ctx->shell()->dialogParent(), m_ctx->translate("ai.over_size"), 
                 m_ctx->translate("ai.over_size_msg")
                 .arg(QFileInfo(fileName).fileName())
                 .arg(AppConstants::AIAssistant::MAX_ATTACHMENT_SIZE_MB));
@@ -553,14 +555,14 @@ void AIAssistantPlugin::onAttachImage() {
 
 void AIAssistantPlugin::onAttachFile() {
     QString lastUsedPath = m_ctx->settings()->getLastUsedPath("ai_attach");
-    QStringList fileNames = QFileDialog::getOpenFileNames(m_ctx->mainWindow(), m_ctx->translate("file.select_file"), lastUsedPath, "All Files (*.*)");
+    QStringList fileNames = QFileDialog::getOpenFileNames(m_ctx->shell()->dialogParent(), m_ctx->translate("file.select_file"), lastUsedPath, "All Files (*.*)");
     if (fileNames.isEmpty()) return;
     
     m_ctx->settings()->setLastUsedPath("ai_attach", QFileInfo(fileNames.first()).absolutePath());
     
     for (const QString &fileName : fileNames) {
         if (QFileInfo(fileName).size() > AppConstants::AIAssistant::MAX_ATTACHMENT_SIZE_MB * 1024 * 1024) { 
-            ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("ai.over_size"), 
+            ModernMessageBox::warning(m_ctx->shell()->dialogParent(), m_ctx->translate("ai.over_size"), 
                 m_ctx->translate("ai.over_size_msg")
                 .arg(QFileInfo(fileName).fileName())
                 .arg(AppConstants::AIAssistant::MAX_ATTACHMENT_SIZE_MB));
@@ -572,11 +574,13 @@ void AIAssistantPlugin::onAttachFile() {
 
 void AIAssistantPlugin::addAttachmentPreview(const QString &filePath, bool isImage) {
     if (!m_dockUI) return;
+    auto* paths = m_ctx->services()->get<IAppPaths>();
+    if (!paths) return;
     FileUtilities::AttachmentResult result = FileUtilities::processAttachment(
         filePath,
         isImage,
-        AppConfig::instance().uploadDir(),
-        AppConfig::instance().thumbnailsDir());
+        paths->uploadDir(),
+        paths->thumbnailsDir());
 
     if (!result.success) return;
 

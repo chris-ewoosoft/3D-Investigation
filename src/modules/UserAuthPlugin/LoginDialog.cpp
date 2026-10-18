@@ -1,7 +1,6 @@
 #include "LoginDialog.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
-#include "LanguageManager.h"
 #include "ForgotPasswordDialog.h"
 #include "ChangePasswordDialog.h"
 #include <QVBoxLayout>
@@ -21,7 +20,7 @@ LoginDialog::LoginDialog(QWidget *parent)
     applyStyle();
 
     // Restore remember me state
-    auto *um = UserManager::instance();
+    auto *um = UserAuthPlugin::users();
     if (um->isRememberMeEnabled()) {
         m_userEdit->setText(um->savedUsername());
         m_rememberCheck->setChecked(true);
@@ -126,21 +125,20 @@ void LoginDialog::onLogin() {
     }
 
     QString error;
-    if (UserManager::instance()->login(user, pass, error)) {
-        m_loggedInUser = UserManager::instance()->currentUser().username;
+    AuthError code = AuthError::Unknown;
+    if (UserAuthPlugin::users()->login(user, pass, error, &code)) {
+        m_loggedInUser = UserAuthPlugin::users()->currentUser().username;
         
         // Handle remember me
-        UserManager::instance()->setRememberMe(m_rememberCheck->isChecked(), user);
+        UserAuthPlugin::users()->setRememberMe(m_rememberCheck->isChecked(), user);
         
         accept();
     } else {
-        QString transMsg = error;
-        if (error == "Tên đăng nhập hoặc Email không tồn tại.") {
-            transMsg = UserAuthPlugin::translate("auth.no_user");
-        } else if (error == "Mật khẩu không đúng.") {
-            transMsg = UserAuthPlugin::translate("auth.wrong_pass");
-        }
-        setError(transMsg.isEmpty() ? UserAuthPlugin::translate("login.err_wrong") : transMsg);
+        // Branch on the structured code — never on the Vietnamese message text.
+        const QString key = IUserManager::authErrorKey(code);
+        setError(key.isEmpty()
+                     ? (error.isEmpty() ? UserAuthPlugin::translate("login.err_wrong") : error)
+                     : UserAuthPlugin::translate(key));
     }
 }
 

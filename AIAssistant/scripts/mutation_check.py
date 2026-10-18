@@ -350,6 +350,42 @@ MUTANTS: tuple[Mutant, ...] = (
         timeout_seconds=180,
         kill_on_timeout=True,
     ),
+    # ── Production gates & admission governor (ADR 0023/0024) ────────────────
+    Mutant(
+        "src/ai_assistant/tools/sandbox.py",
+        'if runtime_settings.sandbox_require_isolation and runtime_settings.sandbox_runtime != "docker":',
+        "if False:",
+        ("tests.unit.test_sandbox",),
+        "isolation gate removed (local runtime runs with server privileges)",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/checkpointing.py",
+        'if required and backend == "memory":',
+        "if False:",
+        ("tests.unit.test_checkpointing",),
+        "required-checkpoint gate removed (silent MemorySaver fallback)",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/checkpointing.py",
+        "if saver is not None:\n            return saver\n    except Exception as error:",
+        "if saver is not None:\n            return saver\n    except KeyboardInterrupt as error:",
+        ("tests.unit.test_checkpointing",),
+        "unexpected backend failure escapes before the gate decides",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/http/rate_limit.py",
+        "if used >= self._limit:",
+        "if False:",
+        ("tests.unit.test_rate_limit",),
+        "per-peer budget never refuses (rate limit is decorative)",
+    ),
+    Mutant(
+        "src/ai_assistant/agents/service.py",
+        "if slots is not None and not slots.acquire(blocking=False):",
+        "if False:",
+        ("tests.unit.test_session_serialization",),
+        "run budget removed (unbounded concurrent runs)",
+    ),
 )
 
 

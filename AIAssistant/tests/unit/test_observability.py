@@ -70,6 +70,7 @@ class MetricsTests(unittest.TestCase):
             metrics_module.record_token_usage(1, 2)
             metrics_module.record_step_guard("ok")
             metrics_module.record_recovery(0.5)
+            metrics_module.record_throttle("http")
             self.assertIsNone(metrics_module.prometheus_payload())
 
     def test_missing_sdk_falls_back_to_empty(self):
@@ -99,6 +100,7 @@ class MetricsTests(unittest.TestCase):
                 metrics_module.record_step_guard("blocked")
                 metrics_module.record_recovery(0.25)
                 metrics_module.record_recovery(-1)
+                metrics_module.record_throttle("http")
                 payload = metrics_module.prometheus_payload()
         self.assertEqual(payload, b"prometheus-payload")
         self.assertIn(("labels", ("read", "success")), metrics["tool"].observations)
@@ -111,6 +113,9 @@ class MetricsTests(unittest.TestCase):
         self.assertIn(("observe", 0.25), metrics["recovery"].observations)
         # Clock skew cannot produce a negative recovery window.
         self.assertIn(("observe", 0.0), metrics["recovery"].observations)
+        # The admission governor's refusal counter (ADR 0024).
+        self.assertIn(("labels", ("http",)), metrics["throttle"].observations)
+        self.assertIn(("inc", 1), metrics["throttle"].observations)
 
 
 class LatencyQuantileTests(unittest.TestCase):

@@ -1,8 +1,8 @@
 #include "ViewerListUI.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "SignalBus.h"
 #include "IViewerService.h"
-#include <QMainWindow>
 #include <QVBoxLayout>
 #include <QListWidget>
 #include <QFileInfo>
@@ -14,7 +14,7 @@ ViewerListUI::ViewerListUI(IAppContext* ctx, QObject* parent)
 }
 
 void ViewerListUI::setupUI() {
-    if (QWidget* central = m_ctx->mainWindow()->centralWidget()) {
+    if (QWidget* central = m_ctx->shell()->centralWidget()) {
         if (QVBoxLayout* cLayout = qobject_cast<QVBoxLayout*>(central->layout())) {
             m_imageList = new QListWidget(central);
             m_imageList->setObjectName("viewerImageList");

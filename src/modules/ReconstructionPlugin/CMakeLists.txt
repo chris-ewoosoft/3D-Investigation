@@ -9,30 +9,21 @@ add_library(ReconstructionPlugin SHARED
 
 target_include_directories(ReconstructionPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/app
     ${PROJECT_SOURCE_DIR}/src/core
     ${PROJECT_SOURCE_DIR}/src/utils
-    ${PROJECT_SOURCE_DIR}/src/services/scene
-    ${PROJECT_SOURCE_DIR}/src/services/viewer
-    ${PROJECT_SOURCE_DIR}/src/services/settings
-    ${PROJECT_SOURCE_DIR}/src/services/reconstruction
-    ${PROJECT_SOURCE_DIR}/src/services/ai
-    ${VTK_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS}
-    ${PCL_INCLUDE_DIRS}
 )
 
-target_precompile_headers(ReconstructionPlugin REUSE_FROM SharedPCH)
-target_link_libraries(ReconstructionPlugin PRIVATE SharedPCH)
+# Light PCH + light ABI: ReconstructionPlugin orchestrate qua
+# IReconstructionService (PointCloudData ABI-neutral) — không parse hay link
+# VTK/OpenCV/PCL trực tiếp (enforced by tests/CheckArchitectureBoundaries.cmake).
+target_precompile_headers(ReconstructionPlugin REUSE_FROM SharedPCHLight)
+target_link_libraries(ReconstructionPlugin PRIVATE SharedPCHLight)
 
 target_link_libraries(ReconstructionPlugin
     PRIVATE
         Qt6::Core
         Qt6::Widgets
-        ${VTK_LIBRARIES}
-        ${OpenCV_LIBS}
-        ${PCL_LIBRARIES}
-        3D-Reconstruction
+        AppCore
 )
 
 set_target_properties(ReconstructionPlugin PROPERTIES

@@ -1,18 +1,15 @@
 #ifndef AIPROCESSORRIBBONUI_H
 #define AIPROCESSORRIBBONUI_H
 
-#include <QObject>
+#include "AbstractRibbonPanel.h"
 
-class QWidget;
 class QToolButton;
-class IAppContext;
-class QGroupBox;
 
-class AIProcessorRibbonUI : public QObject {
+class AIProcessorRibbonUI : public AbstractRibbonPanel {
     Q_OBJECT
 public:
     explicit AIProcessorRibbonUI(IAppContext* ctx, QWidget* panel, QObject* parent = nullptr);
-    
+
     QToolButton* btnDet() const { return m_btnDet; }
     QToolButton* btnSeg() const { return m_btnSeg; }
     QToolButton* btnHide() const { return m_btnHide; }
@@ -25,17 +22,16 @@ public:
     QGroupBox* groupTrain() const { return m_groupTrain; }
 
 private:
-    IAppContext* m_ctx;
-    QToolButton* m_btnDet;
-    QToolButton* m_btnSeg;
-    QToolButton* m_btnHide;
-    QToolButton* m_btnTrack;
-    QToolButton* m_btnPauseTrack;
-    QToolButton* m_btnStopTrack;
-    QToolButton* m_btnTrain;
-    QToolButton* m_btnChart;
-    QGroupBox* m_groupAI;
-    QGroupBox* m_groupTrain;
+    QToolButton* m_btnDet = nullptr;
+    QToolButton* m_btnSeg = nullptr;
+    QToolButton* m_btnHide = nullptr;
+    QToolButton* m_btnTrack = nullptr;
+    QToolButton* m_btnPauseTrack = nullptr;
+    QToolButton* m_btnStopTrack = nullptr;
+    QToolButton* m_btnTrain = nullptr;
+    QToolButton* m_btnChart = nullptr;
+    QGroupBox* m_groupAI = nullptr;
+    QGroupBox* m_groupTrain = nullptr;
 };
 
 #endif // AIPROCESSORRIBBONUI_H

@@ -12,6 +12,8 @@
 
 #include "IAppContext.h"
 #include "IAIService.h"
+
+class CustomProgressDialog;
 #include <QTextBrowser>
 #include <QProgressBar>
 #include <QPushButton>
@@ -20,6 +22,7 @@ class AITrainDockWidget;
 class AIProcessorRibbonUI;
 class VideoTrackerThread;
 class QTimer;
+class QMenu;
 
 class AIProcessorPlugin : public QObject, public IPlugin {
     Q_OBJECT
@@ -28,7 +31,7 @@ class AIProcessorPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "AI Processor Plugin"; }
-    void initialize(IAppContext* context) override;
+    bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 30; }
 
@@ -67,6 +70,11 @@ private:
     QAction *m_runTrackingAct = nullptr;
     QAction *m_pauseTrackingAct = nullptr;
     QAction *m_stopTrackingAct = nullptr;
+
+    // Sub-menus kept so titles can be re-applied on language change
+    QMenu *m_detMenu = nullptr;
+    QMenu *m_segMenu = nullptr;
+    QMenu *m_trackMenu = nullptr;
 
     // Train AI UI
     AITrainDockWidget* m_trainDock = nullptr;

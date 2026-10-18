@@ -1,7 +1,7 @@
 """Cross-language contract test.
 
 The ONNX file names produced here are hard-coded expectations of the Qt app
-(``src/app/AppConstants.h``). This test fails if the two sides ever drift.
+(``src/core/AIConstants.h``). This test fails if the two sides ever drift.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from pathlib import Path
 from cvtrain.config import MODEL_SPECS
 from cvtrain.preflight import MAX_OPSET
 
-HEADER = Path(__file__).resolve().parents[2] / "src" / "app" / "AppConstants.h"
+HEADER = Path(__file__).resolve().parents[2] / "src" / "core" / "AIConstants.h"
+MANIFEST = Path(__file__).resolve().parents[2] / "src" / "core" / "AppManifest.json"
 CMAKE = Path(__file__).resolve().parents[2] / "CMakeLists.txt"
 
 EXPECTED = {
@@ -23,10 +24,10 @@ EXPECTED = {
 }
 
 
-@unittest.skipUnless(HEADER.exists(), f"AppConstants.h not found at {HEADER}")
+@unittest.skipUnless(HEADER.exists(), f"AIConstants.h not found at {HEADER}")
 class ContractTests(unittest.TestCase):
     text: str
-    """Contents of ``AppConstants.h``, loaded once in :meth:`setUpClass`."""
+    """Contents of ``AIConstants.h``, loaded once in :meth:`setUpClass`."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -34,7 +35,7 @@ class ContractTests(unittest.TestCase):
 
     def _returned_literal(self, function: str) -> str:
         match = re.search(rf'{function}\(\)\s*\{{[^"]*"([^"]+)"', self.text)
-        self.assertIsNotNone(match, f"{function}() not found in AppConstants.h")
+        self.assertIsNotNone(match, f"{function}() not found in AIConstants.h")
         assert match is not None  # narrowing for the type checker after assertIsNotNone
         return match.group(1)
 
@@ -42,6 +43,14 @@ class ContractTests(unittest.TestCase):
         for function, expected in EXPECTED.items():
             with self.subTest(function=function):
                 self.assertEqual(self._returned_literal(function), expected)
+
+    def test_manifest_exists_and_matches_specs(self) -> None:
+        import json
+        self.assertTrue(MANIFEST.exists(), f"AppManifest.json not found at {MANIFEST}")
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        self.assertEqual(manifest.get("contract", {}).get("detection_model"), EXPECTED["detectionModelFile"])
+        self.assertEqual(manifest.get("contract", {}).get("segmentation_model"), EXPECTED["segmentationModelFile"])
+        self.assertEqual(manifest.get("contract", {}).get("tracking_model"), EXPECTED["trackingModelFile"])
 
 
 class ContractSourcePresenceTests(unittest.TestCase):

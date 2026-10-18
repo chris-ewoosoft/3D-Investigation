@@ -320,6 +320,27 @@ class AppFactoryTests(unittest.TestCase):
             any(m.cls is TraceContextMiddleware for m in app.user_middleware)
         )
 
+    def test_create_app_installs_the_rate_limiter_only_when_configured(self) -> None:
+        """ADR 0024: the admission governor is opt-in via env, installed
+        outside the routes (so it sees every handler) but inside tracing."""
+        from ai_assistant.adapters.http.rate_limit import RateLimitMiddleware
+        from ai_assistant.bootstrap import app_factory
+
+        async def _lifespan(app):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.object(app_factory, "rate_limit_per_minute", return_value=0):
+                app = create_app(self._settings(tmpdir), _lifespan)
+            self.assertFalse(
+                any(m.cls is RateLimitMiddleware for m in app.user_middleware)
+            )
+            with patch.object(app_factory, "rate_limit_per_minute", return_value=60):
+                app = create_app(self._settings(tmpdir), _lifespan)
+            self.assertTrue(
+                any(m.cls is RateLimitMiddleware for m in app.user_middleware)
+            )
+
 
 # ── Domain error hierarchy (moved from test_coverage_boost2) ──
 

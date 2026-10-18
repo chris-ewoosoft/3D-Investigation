@@ -16,12 +16,32 @@
 namespace Logger {
 
 static std::mutex s_logMutex;
+static QFile s_logFile;
+static QTextStream s_logStream;
+static QString s_logsDir;
+static QString s_cachedDate;
 
-QString getLogFilePath() {
-  QString logsDir = AppConfig::instance().logsDir();
+static void ensureFileOpenUnderLock() {
+  const QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
+  if (s_logFile.isOpen() && s_cachedDate == currentDate) {
+    return;
+  }
+
+  if (s_logFile.isOpen()) {
+    s_logStream.flush();
+    s_logFile.close();
+  }
+
+  if (s_logsDir.isEmpty()) s_logsDir = AppConfig::instance().logsDir();
+  const QString logsDir = s_logsDir;
   QDir().mkpath(logsDir);
-  QString currentDate = QDateTime::currentDateTime().toString("yyyy-MM-dd");
-  return logsDir + "/" + currentDate + ".txt";
+  const QString filePath = logsDir + "/" + currentDate + ".txt";
+
+  s_logFile.setFileName(filePath);
+  if (s_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+    s_logStream.setDevice(&s_logFile);
+    s_cachedDate = currentDate;
+  }
 }
 
 void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
@@ -31,24 +51,24 @@ void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
   }
 
   QString txt;
-  QString timestamp =
+  const QString timestamp =
       QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
 
   switch (type) {
   case QtDebugMsg:
-    txt = QString("[%1] [DEBUG] %2").arg(timestamp).arg(msg);
+    txt = QString("[%1] [DEBUG] %2").arg(timestamp, msg);
     break;
   case QtInfoMsg:
-    txt = QString("[%1] [INFO] %2").arg(timestamp).arg(msg);
+    txt = QString("[%1] [INFO] %2").arg(timestamp, msg);
     break;
   case QtWarningMsg:
-    txt = QString("[%1] [WARNING] %2").arg(timestamp).arg(msg);
+    txt = QString("[%1] [WARNING] %2").arg(timestamp, msg);
     break;
   case QtCriticalMsg:
-    txt = QString("[%1] [CRITICAL] %2").arg(timestamp).arg(msg);
+    txt = QString("[%1] [CRITICAL] %2").arg(timestamp, msg);
     break;
   case QtFatalMsg:
-    txt = QString("[%1] [FATAL] %2").arg(timestamp).arg(msg);
+    txt = QString("[%1] [FATAL] %2").arg(timestamp, msg);
     break;
   }
 
@@ -57,18 +77,24 @@ void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
   // Print to terminal (UTF-8 để hiển thị đúng tiếng Việt trong Qt Creator)
   std::cout << txt.toUtf8().constData() << std::endl;
 
-  // Write to log file
-  QFile outFile(getLogFilePath());
-  if (outFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
-    QTextStream ts(&outFile);
-    // ts.setCodec("UTF-8"); // Optional in Qt5, defaults to UTF-8 in Qt6
-    ts << txt << "\n";
-    outFile.close();
+  // Write to cached log file
+  ensureFileOpenUnderLock();
+  if (s_logFile.isOpen()) {
+    s_logStream << txt << '\n';
+    s_logStream.flush();
   }
 
   if (type == QtFatalMsg) {
+    if (s_logFile.isOpen()) {
+      s_logStream.flush();
+      s_logFile.close();
+    }
     abort();
   }
+}
+
+void setLogsDir(const QString& dir) {
+    s_logsDir = dir;
 }
 
 void initialize() {
@@ -79,4 +105,16 @@ void initialize() {
 #endif
   qInstallMessageHandler(customMessageHandler);
 }
+
+void shutdown() {
+  std::lock_guard<std::mutex> lock(s_logMutex);
+  qInstallMessageHandler(nullptr);
+  if (s_logFile.isOpen()) {
+    s_logStream.flush();
+    s_logFile.close();
+  }
+  s_cachedDate.clear();
+}
+
 } // namespace Logger
+

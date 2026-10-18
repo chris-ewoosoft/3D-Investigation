@@ -26,6 +26,7 @@ from ai_assistant.agents.models import (
     AgentUiActionResultRequest,
 )
 from ai_assistant.agents.service import AgentService
+from ai_assistant.domain.errors import ServiceUnavailableError
 
 # Generous on purpose: a gate timeout means the lock itself broke, not that
 # the machine is slow.
@@ -241,6 +242,82 @@ class SessionSerializationTests(unittest.TestCase):
             run_thread.join(timeout=_GATE_TIMEOUT)
         self.assertTrue(ack_done.is_set())
         self.assertFalse(ack_thread.is_alive())
+
+
+class GlobalRunBudgetTests(unittest.TestCase):
+    """ADR 0024: ``AGENT_MAX_CONCURRENT_RUNS`` bounds total concurrency.
+
+    The per-session lock keeps one run per session, but a burst of sessions can
+    still stack runs on the single local model. The global budget refuses extra
+    runs with a retryable ``ServiceUnavailableError`` and releases the slot on
+    every exit path, including a crashing run.
+    """
+
+    def _service(self, budget: int) -> AgentService:
+        llm = MagicMock()
+        llm.llm = MagicMock()
+        return AgentService(llm_runtime=llm, max_concurrent_runs=budget)
+
+    def test_slots_are_global_across_sessions_and_released_afterward(self) -> None:
+        service = self._service(2)
+        entered = threading.Semaphore(0)
+        release = threading.Event()
+        self.addCleanup(release.set)
+        guard = threading.Lock()
+        state = {"active": 0, "max_active": 0}
+
+        def fake_run(**kwargs):
+            with guard:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            entered.release()
+            try:
+                if not release.wait(timeout=_GATE_TIMEOUT):
+                    msg = "gate was never released"
+                    raise RuntimeError(msg)
+            finally:
+                with guard:
+                    state["active"] -= 1
+            return {"status": "completed"}
+
+        with patch.object(agents_context, "run_langgraph_agent", side_effect=fake_run):
+            threads = [
+                threading.Thread(
+                    target=service.execute,
+                    args=(AgentExecuteRequest(task=f"t{idx}", session_id=f"s{idx}"),),
+                )
+                for idx in range(2)
+            ]
+            threads[0].start()
+            self.assertTrue(entered.acquire(timeout=_GATE_TIMEOUT))
+            threads[1].start()
+            self.assertTrue(entered.acquire(timeout=_GATE_TIMEOUT))
+            with guard:
+                self.assertEqual(state["max_active"], 2)
+            # A third session is refused while both slots are occupied…
+            with self.assertRaises(ServiceUnavailableError):
+                service.execute(AgentExecuteRequest(task="overflow", session_id="s3"))
+            release.set()
+            for thread in threads:
+                thread.join(timeout=_GATE_TIMEOUT)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            # …and admitted once a slot frees up (the budget is released).
+            result = service.execute(AgentExecuteRequest(task="after", session_id="s4"))
+        self.assertEqual(result["status"], "completed")
+
+    def test_a_failed_run_releases_its_slot(self) -> None:
+        service = self._service(1)
+        with patch.object(
+            agents_context, "run_langgraph_agent",
+            side_effect=[RuntimeError("boom"), {"status": "completed"}],
+        ):
+            with self.assertRaises(RuntimeError):
+                service.execute(AgentExecuteRequest(task="explode", session_id="s1"))
+            result = service.execute(AgentExecuteRequest(task="retry", session_id="s2"))
+        self.assertEqual(result["status"], "completed")
+
+    def test_a_zero_budget_keeps_the_facade_unlimited(self) -> None:
+        self.assertIsNone(self._service(0)._run_slots)
 
 
 if __name__ == "__main__":

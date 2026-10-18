@@ -15,16 +15,9 @@ add_library(ViewerPlugin SHARED
 
 target_include_directories(ViewerPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/app
     ${PROJECT_SOURCE_DIR}/src/core
     ${PROJECT_SOURCE_DIR}/src/utils
-    ${PROJECT_SOURCE_DIR}/src/services/scene
-    ${PROJECT_SOURCE_DIR}/src/services/viewer
-    ${PROJECT_SOURCE_DIR}/src/services/settings
-    ${PROJECT_SOURCE_DIR}/src/services/reconstruction
-    ${PROJECT_SOURCE_DIR}/src/services/ai
     ${VTK_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS}
 )
 
 target_precompile_headers(ViewerPlugin REUSE_FROM SharedPCH)
@@ -35,11 +28,8 @@ target_link_libraries(ViewerPlugin
         Qt6::Core
         Qt6::Widgets
         ${VTK_LIBRARIES}
-        3D-Reconstruction # Link against the main executable if symbols are exported
+        AppCore # Import core/utils ABI (SignalBus, UserManager, IconFactory, ...)
 )
-
-# Export symbols from the main executable on Windows
-set_target_properties(3D-Reconstruction PROPERTIES ENABLE_EXPORTS ON)
 
 # Install plugin to a 'plugins' directory in the build folder
 set_target_properties(ViewerPlugin PROPERTIES

@@ -1,12 +1,13 @@
 #include "ViewerService.h"
 #include "ISceneService.h"
+#include "SignalBus.h"
 #include "Image2DLoader.h"
 #include <QFileInfo>
 #include <QVTKOpenGLNativeWidget.h>
 #include <vtkRenderWindow.h>
 
-ViewerService::ViewerService(IAppContext* ctx, QObject* parent) 
-    : QObject(parent), m_ctx(ctx), currentImageIndex(-1), currentAIMode(AIMode::None), isAutoNext(true) 
+ViewerService::ViewerService(ISceneService* scene, SignalBus* bus, QObject* parent) 
+    : QObject(parent), m_scene(scene), m_bus(bus), currentImageIndex(-1), isAutoNext(true) 
 {
     autoTimer = new QTimer(this);
     connect(autoTimer, &QTimer::timeout, this, &ViewerService::onAutoTimerTimeout);
@@ -23,20 +24,19 @@ void ViewerService::setCurrent2DImagePath(const QString &path) {
 void ViewerService::setImageList(const QStringList &list, int index) {
     imageFileList = list;
     currentImageIndex = index;
-    emit m_ctx->signalBus()->imageListUpdated(imageFileList, currentImageIndex);
-    emit m_ctx->signalBus()->imageIndexChanged(currentImageIndex, imageFileList.size());
+    emit m_bus->imageListUpdated(imageFileList, currentImageIndex);
+    emit m_bus->imageIndexChanged(currentImageIndex, imageFileList.size());
 }
 
 void ViewerService::loadCurrentIndexImage() {
     if (currentImageIndex < 0 || currentImageIndex >= imageFileList.size()) return;
     current2DImagePath = QFileInfo(current2DImagePath).absolutePath() + "/" + imageFileList[currentImageIndex];
     
-    if (m_updateScene) {
-        m_ctx->scene()->setTextureActor(Image2DLoader::load(current2DImagePath));
-        m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-    }
+    // Always render the current image when navigating so buttons update the main screen
+    m_scene->setTextureActor(Image2DLoader::load(current2DImagePath));
+    m_scene->render();
     
-    emit m_ctx->signalBus()->imageIndexChanged(currentImageIndex, imageFileList.size());
+    emit m_bus->imageIndexChanged(currentImageIndex, imageFileList.size());
 }
 
 void ViewerService::onNextImage() {
@@ -60,7 +60,7 @@ void ViewerService::onAutoNext() {
         isAutoNext = true;
         autoTimer->start(500);
     }
-    emit m_ctx->signalBus()->autoNavigationChanged(autoTimer->isActive(), isAutoNext);
+    emit m_bus->autoNavigationChanged(autoTimer->isActive(), isAutoNext);
 }
 
 void ViewerService::onAutoPrev() {
@@ -70,14 +70,14 @@ void ViewerService::onAutoPrev() {
         isAutoNext = false;
         autoTimer->start(500);
     }
-    emit m_ctx->signalBus()->autoNavigationChanged(autoTimer->isActive(), isAutoNext);
+    emit m_bus->autoNavigationChanged(autoTimer->isActive(), isAutoNext);
 }
 
-QString ViewerService::getCurrentAIMode() const { 
+AIMode ViewerService::getCurrentAIMode() const { 
     return currentAIMode; 
 }
 
-void ViewerService::setAIMode(const QString& mode) { 
+void ViewerService::setAIMode(AIMode mode) { 
     currentAIMode = mode; 
 }
 
@@ -89,5 +89,5 @@ void ViewerService::onAutoTimerTimeout() {
         if (currentImageIndex > 0) onPrevImage();
         else autoTimer->stop();
     }
-    if (!autoTimer->isActive()) emit m_ctx->signalBus()->autoNavigationChanged(false, isAutoNext);
+    if (!autoTimer->isActive()) emit m_bus->autoNavigationChanged(false, isAutoNext);
 }

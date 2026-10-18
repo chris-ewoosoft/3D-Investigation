@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "description": "Canonical desktop-agent action contract shared by Python and Qt. v2 adds 'description' (shown to the LLM), 'intents' (phrases matched against plan steps) and 'aliases'.",
+  "version": 3,
+  "description": "Canonical desktop-agent action contract shared by Python and Qt. v2 adds 'description' (shown to the LLM), 'intents' (phrases matched against plan steps) and 'aliases'. v3 adds 'sample_data' (demo fixtures the Qt app falls back to when an action needs an input the caller did not provide).",
   "workflows": [
     {
       "id": "reconstruction.load_and_start",
@@ -381,5 +381,11 @@
         }
       }
     }
-  ]
+  ],
+  "sample_data": {
+    "images_dir": "3DRecontruction/templeRing",
+    "model_obj": "3DModels/FinalBaseMesh.obj",
+    "dicom_dir": "Dicom/HippocampalMRISlices/01",
+    "video_dir": "VideoTracking"
+  }
 }

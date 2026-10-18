@@ -10,16 +10,14 @@ on:
     paths:
       - "AIAssistant/**"
       - "AIComputerVision/**"
-      - "src/app/AppConstants.h"
-      # Read by tests/test_qt_contract.py (launch argv, labels, pct= regex).
-      - "src/modules/AIProcessorPlugin/AITrainDockWidget.cpp"
+      # Contract header mirrored by AIComputerVision/tests/test_contract.py.
+      - "src/core/AppConstants.h"
   pull_request:
     branches: [main]
     paths:
       - "AIAssistant/**"
       - "AIComputerVision/**"
-      - "src/app/AppConstants.h"
-      - "src/modules/AIProcessorPlugin/AITrainDockWidget.cpp"
+      - "src/core/AppConstants.h"
   workflow_dispatch:
 
 concurrency:
@@ -71,7 +69,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     # Finite budget containing the worst case: the full suite + coverage +
-    # mypy + 39 mutants, where the recompose-guard mutant alone may burn its
+    # mypy + 44 mutants, where the recompose-guard mutant alone may burn its
     # 180s timeout pin (ADR 0022) instead of failing fast.
     timeout-minutes: 20
 
@@ -84,12 +82,18 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: AIAssistant/requirements-test.txt
+          cache-dependency-path: AIAssistant/requirements-test.lock
 
-      - name: Install test dependencies
+      - name: Install test dependencies (hash-verified lock)
+        # requirements-test.lock pins every distribution version *and*
+        # SHA-256; --require-hashes makes pip refuse any artifact whose digest
+        # does not match, so a republished or tampered wheel cannot enter the
+        # coverage run (ADR 0023). Regenerate with:
+        #   uv pip compile requirements-test.txt --python-version 3.11 \
+        #       --universal --generate-hashes -o requirements-test.lock
         run: |
           python -m pip install --upgrade pip
-          pip install -r AIAssistant/requirements-test.txt
+          pip install --require-hashes -r AIAssistant/requirements-test.lock
 
       - name: Run test suite with coverage gate
         working-directory: AIAssistant

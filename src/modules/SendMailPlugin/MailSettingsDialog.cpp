@@ -3,20 +3,25 @@
 #include "IAppContext.h"
 #include "IMailService.h"
 #include "ModernMessageBox.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 
 #include <QDialog>
 #include <QFormLayout>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QtConcurrent>
 
 namespace MailSettingsDialog {
 
 void show(QWidget *parent, IAppContext *context, IMailService *mailService)
 {
+    auto* users = context->services()->get<IUserManager>();
+    if (!users) return;
+
     QDialog dlg(parent);
     dlg.setWindowTitle(context->translate("mail.settings"));
     dlg.setMinimumWidth(460);
@@ -26,15 +31,15 @@ void show(QWidget *parent, IAppContext *context, IMailService *mailService)
     auto *email = new QLineEdit(mailService ? mailService->senderEmail() : QString(), &dlg);
     auto *password = new QLineEdit(&dlg);
     password->setEchoMode(QLineEdit::Password);
-    auto *displayName = new QLineEdit(UserManager::instance()->currentUsername(), &dlg);
+    auto *displayName = new QLineEdit(users->currentUsername(), &dlg);
     auto *signature = new QTextEdit(&dlg);
     signature->setAcceptRichText(true);
     signature->setMinimumHeight(110);
 
-    const QString username = UserManager::instance()->currentUsername();
-    password->setText(UserManager::instance()->getUserPref(username, "mail_password"));
-    displayName->setText(UserManager::instance()->getUserPref(username, "mail_display_name", username));
-    signature->setHtml(UserManager::instance()->getUserPref(
+    const QString username = users->currentUsername();
+    password->setText(users->getUserSecret(username, "mail_password"));
+    displayName->setText(users->getUserPref(username, "mail_display_name", username));
+    signature->setHtml(users->getUserPref(
         username,
         "mail_signature",
         QString("<b>%1</b><br>3D-Reconstruction").arg(username)));
@@ -60,19 +65,34 @@ void show(QWidget *parent, IAppContext *context, IMailService *mailService)
     QObject::connect(saveBtn, &QPushButton::clicked, &dlg, [&]() {
         if (mailService) {
             mailService->setCredentials(email->text().trimmed(), password->text(), displayName->text().trimmed());
-            UserManager::instance()->setUserPref(username, "mail_signature", signature->toHtml());
+            context->services()->get<IUserManager>()->setUserPref(username, "mail_signature", signature->toHtml());
         }
         dlg.accept();
     });
     QObject::connect(testBtn, &QPushButton::clicked, &dlg, [&]() {
         if (!mailService) return;
         mailService->setCredentials(email->text().trimmed(), password->text(), displayName->text().trimmed());
-        QString error;
-        if (mailService->testConnection(error)) {
-            ModernMessageBox::information(&dlg, context->translate("common.success"), context->translate("mail.test_ok"));
-        } else {
-            ModernMessageBox::warning(&dlg, context->translate("common.error"), error);
-        }
+
+        // Network I/O off the GUI thread; the dialog stays responsive.
+        testBtn->setEnabled(false);
+        auto *watcher = new QFutureWatcher<QPair<bool, QString>>(&dlg);
+        QObject::connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, &dlg,
+                [&dlg, testBtn, context, watcher]() {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            if (!dlg.isVisible()) return; // dialog closed while the test ran
+            testBtn->setEnabled(true);
+            if (result.first) {
+                ModernMessageBox::information(&dlg, context->translate("common.success"), context->translate("mail.test_ok"));
+            } else {
+                ModernMessageBox::warning(&dlg, context->translate("common.error"), result.second);
+            }
+        });
+        watcher->setFuture(QtConcurrent::run([mailService]() {
+            QString error;
+            const bool ok = mailService->testConnection(error);
+            return qMakePair(ok, error);
+        }));
     });
 
     dlg.exec();

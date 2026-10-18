@@ -13,40 +13,66 @@ from ai_assistant.settings import load_agent_runtime_settings
 logger = logging.getLogger(__name__)
 
 
+def _build_configured_saver(backend: str, url: str, path: str) -> Any | None:
+    """Build the explicitly configured saver, or ``None`` when unusable here."""
+    if backend == "postgres" and url:
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        saver = PostgresSaver.from_conn_string(url)
+        saver.setup()
+        logger.info("Using Postgres LangGraph checkpointer")
+        return saver
+    if backend == "redis" and url:
+        from langgraph.checkpoint.redis import RedisSaver
+
+        saver = RedisSaver.from_conn_string(url)
+        saver.setup()
+        logger.info("Using Redis LangGraph checkpointer")
+        return saver
+    if backend in ("sqlite", "default"):
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path, check_same_thread=False)
+        saver = SqliteSaver(conn)
+        saver.setup()
+        logger.info("Using SQLite LangGraph checkpointer at %s", path)
+        return saver
+    return None
+
+
 def build_checkpointer() -> Any:
-    """Return Postgres/Redis saver when explicitly configured, otherwise memory."""
+    """Return Postgres/Redis saver when explicitly configured, otherwise memory.
+
+    With ``AGENT_CHECKPOINT_REQUIRED=1`` (production gate, ADR 0023) the
+    in-memory fallback is refused: a run that silently degrades to a
+    process-local checkpointer is not durable, so startup fails instead.
+    """
     runtime_settings = load_agent_runtime_settings()
     backend = runtime_settings.checkpoint_backend
     url = runtime_settings.checkpoint_url
+    required = runtime_settings.checkpoint_required
+    if required and backend == "memory":
+        msg = ("AGENT_CHECKPOINT_REQUIRED=1 refuses the in-memory checkpointer; "
+               "configure AGENT_CHECKPOINT_BACKEND=sqlite|postgres|redis.")
+        raise RuntimeError(msg)
     try:
-        if backend == "postgres" and url:
-            from langgraph.checkpoint.postgres import PostgresSaver
-
-            saver = PostgresSaver.from_conn_string(url)
-            saver.setup()
-            logger.info("Using Postgres LangGraph checkpointer")
+        saver = _build_configured_saver(backend, url, runtime_settings.checkpoint_path)
+        if saver is not None:
             return saver
-        if backend == "redis" and url:
-            from langgraph.checkpoint.redis import RedisSaver
-
-            saver = RedisSaver.from_conn_string(url)
-            saver.setup()
-            logger.info("Using Redis LangGraph checkpointer")
-            return saver
-        if backend in ("sqlite", "default"):
-            from langgraph.checkpoint.sqlite import SqliteSaver
-
-            db_path = runtime_settings.checkpoint_path
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
-            conn = sqlite3.connect(db_path, check_same_thread=False)
-            saver = SqliteSaver(conn)
-            saver.setup()
-            logger.info("Using SQLite LangGraph checkpointer at %s", db_path)
-            return saver
-        if backend != "memory":
-            logger.warning("Checkpoint backend %s is not configured; using MemorySaver", backend)
-    except Exception:
+    except Exception as error:
+        if required:
+            msg = (f"Checkpoint backend {backend!r} failed to initialize; "
+                   "AGENT_CHECKPOINT_REQUIRED=1 refuses the memory fallback.")
+            raise RuntimeError(msg) from error
         logger.exception("Checkpoint backend unavailable; using MemorySaver")
+        return MemorySaver()
+    if required:
+        msg = (f"Checkpoint backend {backend!r} is not usable; "
+               "AGENT_CHECKPOINT_REQUIRED=1 refuses the memory fallback.")
+        raise RuntimeError(msg)
+    if backend != "memory":
+        logger.warning("Checkpoint backend %s is not configured; using MemorySaver", backend)
     return MemorySaver()
 
 

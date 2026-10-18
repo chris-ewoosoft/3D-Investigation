@@ -7,18 +7,18 @@
 ViewerNavigatorUI::ViewerNavigatorUI(IAppContext* ctx, QObject* parent)
     : QObject(parent), m_ctx(ctx)
 {
-    m_widget = new QWidget(m_ctx->mainWindow()); 
+    m_widget = new QWidget(m_ctx->shell()->dialogParent()); 
     m_widget->setObjectName("viewerNavigatorWidget");
     QHBoxLayout *nl = new QHBoxLayout(m_widget);
     m_widget->setFixedHeight(80);
     
-    m_btnPrev = new QPushButton(m_ctx->translate("viewer.prev"), m_ctx->mainWindow());
+    m_btnPrev = new QPushButton(m_ctx->translate("viewer.prev"), m_widget);
     m_btnPrev->setMinimumWidth(80);
-    m_btnAutoPrev = new QPushButton(m_ctx->translate("viewer.auto_prev"), m_ctx->mainWindow());
+    m_btnAutoPrev = new QPushButton(m_ctx->translate("viewer.auto_prev"), m_widget);
     m_btnAutoPrev->setMinimumWidth(100);
-    m_btnAutoNext = new QPushButton(m_ctx->translate("viewer.auto_next"), m_ctx->mainWindow());
+    m_btnAutoNext = new QPushButton(m_ctx->translate("viewer.auto_next"), m_widget);
     m_btnAutoNext->setMinimumWidth(100);
-    m_btnNext = new QPushButton(m_ctx->translate("viewer.next"), m_ctx->mainWindow());
+    m_btnNext = new QPushButton(m_ctx->translate("viewer.next"), m_widget);
     m_btnNext->setMinimumWidth(80);
     
     m_btnPrev->setEnabled(false);
@@ -42,7 +42,14 @@ ViewerNavigatorUI::ViewerNavigatorUI(IAppContext* ctx, QObject* parent)
     nl->addWidget(m_btnNext); 
     nl->addStretch();
     
-    if (m_ctx->mainWindow()->centralWidget() && m_ctx->mainWindow()->centralWidget()->layout()) {
-        qobject_cast<QVBoxLayout*>(m_ctx->mainWindow()->centralWidget()->layout())->addWidget(m_widget);
+    if (auto *central = m_ctx->shell()->centralWidget()) {
+        if (auto *box = qobject_cast<QVBoxLayout*>(central->layout())) {
+            box->addWidget(m_widget);
+        } else {
+            // Unexpected central layout — park the navigator as a floating
+            // dock-style child of the main window instead of crashing.
+            m_widget->setParent(m_ctx->shell()->dialogParent());
+            m_widget->show();
+        }
     }
 }

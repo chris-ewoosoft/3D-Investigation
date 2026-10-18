@@ -1,5 +1,7 @@
 #include "FeatureMatcher.h"
 
+#include <opencv2/calib3d.hpp>
+
 void FeatureMatcher::match(const cv::Mat &desc1, const cv::Mat &desc2,
                            const ReconstructionConfig &config,
                            std::vector<cv::DMatch> &goodMatches)
@@ -34,4 +36,38 @@ void FeatureMatcher::match(const cv::Mat &desc1, const cv::Mat &desc2,
         }
         goodMatches = crossMatches;
     }
+}
+
+std::vector<cv::DMatch> FeatureMatcher::filterByFundamental(
+    const std::vector<cv::DMatch> &matches,
+    const std::vector<cv::KeyPoint> &keypoints1,
+    const std::vector<cv::KeyPoint> &keypoints2,
+    double ransacThreshold)
+{
+    if (matches.size() < 8 || ransacThreshold <= 0.0)
+        return matches;
+
+    std::vector<cv::Point2f> points1;
+    std::vector<cv::Point2f> points2;
+    points1.reserve(matches.size());
+    points2.reserve(matches.size());
+    for (const auto &match : matches) {
+        points1.push_back(keypoints1[match.queryIdx].pt);
+        points2.push_back(keypoints2[match.trainIdx].pt);
+    }
+
+    cv::Mat inlierMask;
+    cv::Mat fundamental = cv::findFundamentalMat(
+        points1, points2, cv::FM_RANSAC, ransacThreshold, 0.995, inlierMask);
+    if (fundamental.empty() || inlierMask.empty())
+        return std::vector<cv::DMatch>();
+
+    std::vector<cv::DMatch> inliers;
+    inliers.reserve(matches.size());
+    for (int i = 0; i < inlierMask.rows; ++i) {
+        if (inlierMask.at<uchar>(i))
+            inliers.push_back(matches[i]);
+    }
+
+    return inliers.size() >= 8 ? inliers : std::vector<cv::DMatch>();
 }

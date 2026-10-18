@@ -95,6 +95,7 @@ CMakeLists.txt.user*
 /AIAssistant/Docs/*
 !/AIAssistant/Docs/adr/
 !/AIAssistant/Docs/archive/
+!/AIAssistant/Docs/RUNBOOK.md
 /AIAssistant/logs/
 # Legacy location the composition root used before it resolved the package root.
 /AIAssistant/src/logs/
@@ -109,6 +110,7 @@ CMakeLists.txt.user*
 /AIAssistant/evals/latest_tool_call_report.json
 /AIAssistant/evals/agentic_eval_report.json
 /AIAssistant/evals/model_in_loop_report.json
+/AIAssistant/evals/sbom.json
 # Coverage artifacts (Python)
 /AIAssistant/.coverage
 /AIAssistant/htmlcov/

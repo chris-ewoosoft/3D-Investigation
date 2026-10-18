@@ -1,11 +1,11 @@
 #include "SceneService.h"
+#include "PointCloudData.h"
 #include "ISettingsService.h"
 #include "DicomLoader.h"
 #include "Model3DLoader.h"
 #include "Image2DLoader.h"
 #include "PanStyle.h"
-#include "SignalBus.h"
-#include "UserManager.h"
+#include "IUserPreferences.h"
 
 #include <vtkRenderWindow.h>
 #include <vtkLight.h>
@@ -26,22 +26,12 @@
 #include <vtkActor.h>
 #include <algorithm>
 #include <limits>
-#include <QFileDialog>
-#include "../utils/ModernMessageBox.h"
-#include <vtkRenderWindow.h>
-#include <vtkLight.h>
-#include <vtkCornerAnnotation.h>
-#include <vtkTextProperty.h>
-#include <vtkPoints.h>
-#include <vtkCellArray.h>
-#include <vtkPolyData.h>
-#include <vtkCoordinate.h>
-#include <vtkPolyDataMapper2D.h>
-#include <vtkActor2D.h>
-#include <vtkProperty2D.h>
+#include <vtkUnsignedCharArray.h>
+#include <vtkPointData.h>
+#include <vtkVertexGlyphFilter.h>
 
-SceneService::SceneService(IAppContext* ctx, QVTKOpenGLNativeWidget* vtkWidget, QObject* parent) 
-    : QObject(parent), m_ctx(ctx), m_vtkWidget(vtkWidget) 
+SceneService::SceneService(IUserPreferences* prefs, QVTKOpenGLNativeWidget* vtkWidget, QObject* parent) 
+    : QObject(parent), m_prefs(prefs), m_vtkWidget(vtkWidget) 
 {
     m_renderer = vtkSmartPointer<vtkRenderer>::New();
     m_renderer->SetBackground(0, 0, 0);
@@ -68,6 +58,22 @@ void SceneService::setTextureActor(vtkSmartPointer<vtkActor> actor) {
     }
 }
 
+vtkSmartPointer<vtkActor> SceneService::loadImageActor(const QString& imagePath) {
+    return Image2DLoader::load(imagePath);
+}
+
+vtkSmartPointer<vtkActor> SceneService::loadImageActor(const cv::Mat& image) {
+    return Image2DLoader::loadFromMat(image);
+}
+
+void SceneService::showImage(const QString& imagePath) {
+    setTextureActor(Image2DLoader::load(imagePath));
+}
+
+void SceneService::showImage(const cv::Mat& image) {
+    setTextureActor(Image2DLoader::loadFromMat(image));
+}
+
 void SceneService::setPointCloudActor(vtkSmartPointer<vtkActor> actor) {
     clearPointCloud();
     m_cloudActor = actor;
@@ -75,6 +81,64 @@ void SceneService::setPointCloudActor(vtkSmartPointer<vtkActor> actor) {
         m_renderer->AddActor(m_cloudActor);
         m_pointCloudVisible = true;
     }
+}
+
+void SceneService::render() {
+    if (m_vtkWidget && m_vtkWidget->renderWindow()) {
+        m_vtkWidget->renderWindow()->Render();
+    }
+}
+
+void SceneService::setPointCloudData(const std::vector<Point3D>& points,
+                                     const std::vector<PointColor>& colors) {
+    clear3DModel();
+    clearPointCloud();
+    resetToSingleRenderer();
+
+    if (points.empty()) {
+        render();
+        return;
+    }
+
+    vtkNew<vtkPoints> vP;
+    vtkNew<vtkCellArray> vV;
+    vtkNew<vtkUnsignedCharArray> vC;
+    vC->SetNumberOfComponents(3);
+
+    const size_t n = points.size();
+    vP->SetNumberOfPoints(static_cast<vtkIdType>(n));
+    const bool hasColors = (colors.size() == n);
+
+    for (size_t i = 0; i < n; ++i) {
+        vP->SetPoint(static_cast<vtkIdType>(i), points[i].x, points[i].y, points[i].z);
+        vV->InsertNextCell(1);
+        vV->InsertCellPoint(static_cast<vtkIdType>(i));
+        if (hasColors) {
+            vC->InsertNextTuple3(colors[i].r, colors[i].g, colors[i].b);
+        } else {
+            vC->InsertNextTuple3(255, 255, 255);
+        }
+    }
+
+    vtkNew<vtkPolyData> pd;
+    pd->SetPoints(vP);
+    pd->SetVerts(vV);
+    pd->GetPointData()->SetScalars(vC);
+
+    vtkNew<vtkVertexGlyphFilter> gf;
+    gf->SetInputData(pd);
+    vtkNew<vtkPolyDataMapper> m;
+    m->SetInputConnection(gf->GetOutputPort());
+
+    vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
+    actor->SetMapper(m);
+    actor->GetProperty()->SetPointSize(3);
+
+    setPointCloudActor(actor);
+    if (m_renderer) {
+        m_renderer->ResetCamera();
+    }
+    render();
 }
 
 void SceneService::clear3DModel() {
@@ -142,21 +206,19 @@ void SceneService::loadOBJwithMTL(const QString &objPath, const QString &mtlPath
         }
     }
     if (!m_modelActors.empty()) m_renderer->ResetCamera(bounds);
-    m_vtkWidget->renderWindow()->Render();
+    render();
 }
 
-void SceneService::onLoadDicom(const QString &path) {
-    QString fn = path;
-    if (fn.isEmpty()) {
-        fn = QFileDialog::getExistingDirectory(m_ctx->mainWindow(), m_ctx->translate("file.select_dicom"), m_ctx->settings()->getLastUsedPath("viewer_dicom"), QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+bool SceneService::onLoadDicom(const QString &path) {
+    if (path.isEmpty()) {
+        // No UI in the service layer — an empty path means the caller's file
+        // dialog was cancelled; report nothing.
+        return false;
     }
-    if (fn.isEmpty()) return;
 
-    m_ctx->settings()->setLastUsedPath("viewer_dicom", fn);
-    auto volume = DicomLoader::loadSeries(fn);
+    auto volume = DicomLoader::loadSeries(path);
     if (!volume || volume->GetNumberOfPoints() < 1) {
-        ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("dicom.load_err_title"), m_ctx->translate("dicom.load_err_msg"));
-        return;
+        return false;
     }
 
     clear3DModel();
@@ -176,7 +238,8 @@ void SceneService::onLoadDicom(const QString &path) {
     m_coronalRenderer->ResetCamera();
     m_renderer->ResetCamera();
     
-    m_vtkWidget->renderWindow()->Render();
+    render();
+    return true;
 }
 
 void SceneService::setupDicomRenderers(vtkSmartPointer<vtkImageData> volume) {
@@ -272,11 +335,11 @@ void SceneService::setupCrosshairInteractor() {
 void SceneService::applyViewSettings(const QString& username) {
     if (!m_renderer || !m_vtkWidget || !m_vtkWidget->renderWindow()) return;
 
-    auto* um = UserManager::instance();
-    if (!um) return;
+    IUserPreferences* prefs = m_prefs;
+    if (!prefs) return;
 
     // ── 1. Background color ─────────────────────────────────────────────────
-    int bgColorIdx = um->getUserPref(username, "view_bg_color", "0").toInt();
+    int bgColorIdx = prefs->getUserPref(username, "view_bg_color", "0").toInt();
     switch (bgColorIdx) {
     case 1: // Light
         m_renderer->SetBackground(0.85, 0.87, 0.90);
@@ -296,7 +359,7 @@ void SceneService::applyViewSettings(const QString& username) {
     }
 
     // 2. Axes
-    bool showAxes = um->getUserPref(username, "view_show_axes", "true") == "true";
+    bool showAxes = prefs->getUserPref(username, "view_show_axes", "true") == "true";
     if (showAxes) {
         if (!m_axesWidget) {
             auto axesActor = vtkSmartPointer<vtkAxesActor>::New();
@@ -317,7 +380,7 @@ void SceneService::applyViewSettings(const QString& username) {
     }
 
     // 3. Grid
-    bool showGrid = um->getUserPref(username, "view_show_grid", "true") == "true";
+    bool showGrid = prefs->getUserPref(username, "view_show_grid", "true") == "true";
     if (showGrid && !m_gridActor) {
         // Build a large grid-plane slightly below the scene origin
         vtkNew<vtkPlaneSource> plane;
@@ -343,5 +406,5 @@ void SceneService::applyViewSettings(const QString& username) {
         m_gridActor = nullptr;
     }
 
-    m_vtkWidget->renderWindow()->Render();
+    render();
 }

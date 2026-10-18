@@ -1,7 +1,6 @@
 #include "ForgotPasswordDialog.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
-#include "LanguageManager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -10,6 +9,8 @@
 #include <QStackedWidget>
 #include <QTimer>
 #include "../../utils/ModernMessageBox.h"
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QRegularExpression>
 
 ForgotPasswordDialog::ForgotPasswordDialog(QWidget *parent)
@@ -120,24 +121,36 @@ void ForgotPasswordDialog::onSendOtp() {
         return;
     }
 
-    if (UserManager::instance()->findUsernameByEmail(email).isEmpty()) {
+    if (UserAuthPlugin::users()->findUsernameByEmail(email).isEmpty()) {
         ModernMessageBox::warning(this, UserAuthPlugin::translate("common.error"), UserAuthPlugin::translate("forgot.err_no_email"));
         return;
     }
     
-    QString msg;
-    if (UserManager::instance()->sendPasswordResetOtp(email, msg)) {
-        m_pendingEmail = email;
-        m_stack->setCurrentIndex(1);
-        m_statusLabel->setVisible(false);
-    } else {
-        setError(msg);
-    }
+    m_sendOtpBtn->setEnabled(false);
+    auto *watcher = new QFutureWatcher<QPair<bool, QString>>(this);
+    connect(watcher, &QFutureWatcher<QPair<bool, QString>>::finished, this,
+            [this, watcher, email]() {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        m_sendOtpBtn->setEnabled(true);
+        if (result.first) {
+            m_pendingEmail = email;
+            m_stack->setCurrentIndex(1);
+            m_statusLabel->setVisible(false);
+        } else {
+            setError(result.second);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run([email]() {
+        QString error;
+        const bool ok = UserAuthPlugin::users()->sendPasswordResetOtp(email, error);
+        return qMakePair(ok, error);
+    }));
 }
 
 void ForgotPasswordDialog::onVerifyOtp() {
     QString otp = m_otpEdit->text().trimmed();
-    if (UserManager::instance()->verifyOtp(m_pendingEmail, otp)) {
+    if (UserAuthPlugin::users()->verifyOtp(m_pendingEmail, otp)) {
         m_stack->setCurrentIndex(2);
         m_statusLabel->setVisible(false);
     } else {
@@ -150,7 +163,7 @@ void ForgotPasswordDialog::onResetPassword() {
     QString p2 = m_confirmPassEdit->text();
     if (p1.isEmpty() || p1 != p2) { setError(UserAuthPlugin::translate("changepw.err_mismatch")); return; }
 
-    if (UserManager::instance()->resetPassword(m_pendingEmail, p1)) {
+    if (UserAuthPlugin::users()->resetPassword(m_pendingEmail, p1)) {
         m_statusLabel->setText(UserAuthPlugin::translate("changepw.success"));
         m_statusLabel->setStyleSheet("color: #4ade80; background: rgba(74,222,128,0.1);");
         m_statusLabel->setVisible(true);

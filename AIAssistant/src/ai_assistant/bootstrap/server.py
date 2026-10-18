@@ -45,6 +45,7 @@ from ai_assistant.settings import (
     agent_bind_host,
     agent_bind_port,
     apply_startup_environment_defaults,
+    load_agent_runtime_settings,
     load_local_dotenv,
     settings_config_dir,
     vision_llm_enabled,
@@ -629,6 +630,7 @@ def compose() -> None:
             a2a_router=A2ARouter(),
             task_coordinator=platform.coordinator,
             pending_actions=PendingActionStore(_pending_actions_path()),
+            max_concurrent_runs=load_agent_runtime_settings().max_concurrent_runs,
         )
         # The MCP adapter owns one server instance bound to the shared gateway;
         # ``mcp_server`` is what the admin routes import (the old

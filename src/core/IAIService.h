@@ -2,8 +2,15 @@
 #define IAISERVICE_H
 
 #include <QString>
-
+#include <vector>
+// ABI boundary: plugin must not link OpenCV just to include this interface.
 namespace cv { class Mat; }
+
+struct AIDetectionResult {
+    int classId = -1;
+    float confidence = 0.0f;
+    int x = 0, y = 0, width = 0, height = 0; // bbox, OpenCV-independent
+};
 
 /**
  * @brief Interface trừu tượng cho dịch vụ AI (Detection & Segmentation).
@@ -18,6 +25,10 @@ namespace cv { class Mat; }
  */
 class IAIService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IAIService";
+
     virtual ~IAIService() = default;
 
     // --- Model Loading ---
@@ -41,6 +52,11 @@ public:
     virtual bool isTrackingReady() const = 0;
 
     // --- Inference ---
+    /**
+     * Chạy object detection và trả về danh sách bounding boxes có cấu trúc.
+     */
+    virtual std::vector<AIDetectionResult> detectObjects(const cv::Mat& inputImage) = 0;
+
     /**
      * Chạy object detection trên ảnh đầu vào.
      * @return cv::Mat với bounding boxes đã vẽ, hoặc empty nếu lỗi.

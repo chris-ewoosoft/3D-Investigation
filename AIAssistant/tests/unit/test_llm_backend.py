@@ -6,6 +6,7 @@ attribute-proxy behaviour are exercised without loading real weights.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -228,12 +229,11 @@ class ModelLoaderBackendStateTests(unittest.TestCase):
 
     def test_load_model_publishes_global_backend(self) -> None:
         """load_model publishes the backend as global."""
-        mock_registry = MagicMock()
-        mock_model = MagicMock()
-        mock_model.is_vision = False
-        mock_model.repo_id = "test-repo"
-        mock_model.filename = "test.gguf"
-        mock_registry.get_by_index.return_value = mock_model
+        # A real ModelDefinition, not a MagicMock: the pin fields are part of
+        # the dataclass contract the loader reads (ADR 0023), and an
+        # auto-attribute MagicMock would fake a pin that nothing verifies.
+        mock_model = ModelDefinition("test-repo", "test.gguf", "test")
+        mock_registry = ModelRegistry(models=(mock_model,), fallback=mock_model)
 
         with patch("ai_assistant.llm.model_loader.LlamaCppBackend") as mock_backend_class:
             mock_backend = MagicMock()
@@ -344,6 +344,119 @@ class ModelLoaderLifecycleTests(unittest.TestCase):
     def test_get_backend_initially_none(self) -> None:
         model_loader._global_backend = None
         self.assertIsNone(model_loader.get_backend())
+
+
+class PinnedArtifactTests(unittest.TestCase):
+    """ADR 0023: registry pins are enforced, never advisory."""
+
+    @staticmethod
+    def _write_download(content: bytes):
+        def fake_download(*, repo_id, filename, local_dir, revision=None):
+            Path(local_dir, filename).write_bytes(content)
+        return fake_download
+
+    def test_pinned_existing_file_is_verified_without_a_download(self) -> None:
+        content = b"pinned-weights"
+        sha = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "m.gguf").write_bytes(content)
+            with patch("huggingface_hub.hf_hub_download") as mock_download:
+                path = model_loader.download_if_missing(
+                    ModelDefinition("repo", "m.gguf", "desc", sha256=sha), tmpdir)
+        mock_download.assert_not_called()
+        self.assertEqual(path, os.path.join(tmpdir, "m.gguf"))
+
+    def test_corrupt_pinned_file_is_discarded_and_redownloaded(self) -> None:
+        good = b"good-weights"
+        sha = hashlib.sha256(good).hexdigest()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "m.gguf").write_bytes(b"corrupt")
+            with patch(
+                "huggingface_hub.hf_hub_download",
+                side_effect=self._write_download(good),
+            ) as mock_download:
+                path = model_loader.download_if_missing(
+                    ModelDefinition("repo", "m.gguf", "desc", sha256=sha), tmpdir)
+            self.assertEqual(Path(path).read_bytes(), good)
+        # No revision declared: the loader asks for the repo default, not a guess.
+        self.assertIsNone(mock_download.call_args.kwargs["revision"])
+
+    def test_revision_pin_is_forwarded_to_the_download(self) -> None:
+        sha = hashlib.sha256(b"x").hexdigest()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "huggingface_hub.hf_hub_download",
+                side_effect=self._write_download(b"x"),
+            ) as mock_download:
+                model_loader.download_if_missing(
+                    ModelDefinition("repo", "m.gguf", "desc", revision="abc123", sha256=sha), tmpdir)
+        self.assertEqual(mock_download.call_args.kwargs["revision"], "abc123")
+
+    def test_a_persistent_mismatch_raises_instead_of_loading(self) -> None:
+        sha = hashlib.sha256(b"expected").hexdigest()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "huggingface_hub.hf_hub_download",
+                side_effect=self._write_download(b"wrong"),
+            ):
+                with self.assertRaises(model_loader.ModelIntegrityError):
+                    model_loader.download_if_missing(
+                        ModelDefinition("repo", "m.gguf", "desc", sha256=sha), tmpdir)
+
+    def test_an_unreadable_file_counts_as_a_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = str(Path(tmpdir, "m.gguf"))
+            Path(target).write_bytes(b"x")
+            with patch.object(model_loader, "_sha256_of", side_effect=OSError("locked")):
+                self.assertFalse(model_loader._matches_pin(target, "deadbeef"))
+
+    def test_hash_comparison_is_case_insensitive(self) -> None:
+        content = b"weights"
+        sha = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = str(Path(tmpdir, "m.gguf"))
+            Path(target).write_bytes(content)
+            self.assertTrue(model_loader._matches_pin(target, sha.upper()))
+            self.assertFalse(model_loader._matches_pin(target, "0" * 64))
+
+
+class MmprojRevisionTests(unittest.TestCase):
+    """The vision projector inherits the model pin only from the same repo."""
+
+    def test_explicit_mmproj_revision_wins(self) -> None:
+        model = ModelDefinition("repo/a", "a.gguf", "a", mmproj_repo_id="repo/b",
+                                mmproj_revision="proj-rev", revision="model-rev")
+        self.assertEqual(model_loader._mmproj_revision(model), "proj-rev")
+
+    def test_same_repo_inherits_the_model_revision(self) -> None:
+        model = ModelDefinition("repo/a", "a.gguf", "a", mmproj_repo_id="repo/a",
+                                mmproj_revision="", revision="model-rev")
+        self.assertEqual(model_loader._mmproj_revision(model), "model-rev")
+
+    def test_foreign_repo_without_a_pin_stays_unpinned(self) -> None:
+        model = ModelDefinition("repo/a", "a.gguf", "a", mmproj_repo_id="repo/b",
+                                mmproj_revision="", revision="model-rev")
+        self.assertEqual(model_loader._mmproj_revision(model), "")
+
+
+class TrackedModelPinsTests(unittest.TestCase):
+    """The tracked registry pins every downloadable artifact (ADR 0023)."""
+
+    def test_every_tracked_entry_pins_revision_and_sha256(self) -> None:
+        config_dir = Path(__file__).resolve().parents[2] / "config"
+        from ai_assistant.config.model_registry import load_model_registry
+
+        registry = load_model_registry(config_dir)
+        entries = [*registry.models, registry.fallback]
+        self.assertTrue(entries)
+        for entry in entries:
+            with self.subTest(model=entry.filename):
+                self.assertEqual(len(entry.revision), 40, "revision must be a commit SHA")
+                self.assertEqual(len(entry.sha256), 64, "sha256 must be a digest")
+                self.assertEqual(entry.sha256, entry.sha256.lower())
+                if entry.is_vision:
+                    self.assertEqual(len(entry.mmproj_sha256), 64)
+                    self.assertTrue(entry.mmproj_revision)
 
 
 class BackendGenerationSerializationTests(unittest.TestCase):

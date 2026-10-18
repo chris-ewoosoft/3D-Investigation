@@ -268,10 +268,15 @@ def _docker_argv(argv: list[str], cwd: str, image: str) -> tuple[list[str], str]
 
     The generated ``--name`` lets the timeout path force-remove the container:
     killing the ``docker run`` client does NOT stop the container it started.
+    The hardening flags are part of the isolation contract (ADR 0023): no
+    network (egress deny by policy), no Linux capabilities and no path to
+    regaining them via setuid binaries.
     """
     container_name = f"agent-sbx-{uuid.uuid4().hex[:12]}"
     wrapped = ["docker", "run", "--rm", "--name", container_name,
-               "--network", "none", "--memory", "1g", "--cpus", "1.0",
+               "--network", "none", "--cap-drop", "ALL",
+               "--security-opt", "no-new-privileges",
+               "--memory", "1g", "--cpus", "1.0",
                "--pids-limit", "128", "-v", f"{cwd}:/workspace:rw",
                "-w", "/workspace", image, *argv]
     return wrapped, container_name
@@ -293,6 +298,11 @@ def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:
     runtime_settings = load_agent_runtime_settings()
     if not runtime_settings.sandbox_enabled:
         return {"error": "Agent command sandbox is disabled by policy."}
+    if runtime_settings.sandbox_require_isolation and runtime_settings.sandbox_runtime != "docker":
+        # Production gate (ADR 0023): an allow-list is not an OS boundary, so
+        # deployments that declare untrusted tool execution refuse to run
+        # commands with the server's own privileges.
+        return {"error": "Sandbox isolation is required by policy; set AGENT_SANDBOX_RUNTIME=docker."}
     rejection = _policy_rejection(command)
     if rejection:
         return {"error": rejection}

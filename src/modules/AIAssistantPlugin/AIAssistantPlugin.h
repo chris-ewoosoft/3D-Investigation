@@ -17,6 +17,8 @@ class ChatBotDockWidget;
 class QListWidgetItem;
 class QWidget;
 
+class CustomProgressDialog;
+
 class AIAssistantPlugin : public QObject, public IPlugin {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID IPlugin_iid)
@@ -24,7 +26,7 @@ class AIAssistantPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "AI Assistant Plugin"; }
-    void initialize(IAppContext* context) override;
+    bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 40; }
 

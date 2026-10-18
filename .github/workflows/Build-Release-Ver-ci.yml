@@ -29,6 +29,10 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   # libaec version pinned to match vcpkg baseline 9432c416
   LIBAEC_VERSION: "1.1.6"
+  # Pre-provisioned ONNX Runtime.  Configure points FetchContent at this
+  # directory instead of downloading the ~323 MB release zip; the version is
+  # read from CMakeLists.txt so the two cannot drift apart.
+  ONNXRUNTIME_DIR: D:/ort
 
 jobs:
   release-build:
@@ -40,6 +44,55 @@ jobs:
         uses: actions/checkout@v4
         with:
           lfs: true
+
+      # ── ONNX Runtime: provision once, reuse from cache afterwards ─────
+      - name: Read ONNX Runtime version from CMakeLists.txt
+        id: ort
+        shell: pwsh
+        run: |
+          $match = (Select-String -Path CMakeLists.txt -Pattern '^\s*set\(ONNXRUNTIME_VERSION\s+"([^"]+)"\)').Matches
+          if (-not $match) { Write-Error "set(ONNXRUNTIME_VERSION ...) not found in CMakeLists.txt"; exit 1 }
+          "version=$($match.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          Write-Host "ONNX Runtime version: $($match.Groups[1].Value)"
+
+      - name: Restore ONNX Runtime cache
+        id: ort-cache
+        uses: actions/cache@v4.2.3
+        with:
+          path: ${{ env.ONNXRUNTIME_DIR }}
+          key: onnxruntime-win-x64-gpu-${{ steps.ort.outputs.version }}
+
+      - name: Provision ONNX Runtime (cache miss)
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ort.outputs.version }}"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-gpu-$ver.zip"
+          # Keep the URL template above in lock-step with CMakeLists.txt.
+          $declared = (Select-String -Path CMakeLists.txt -Pattern '^\s*set\(ONNXRUNTIME_URL\s+"([^"]+)"\)').Matches.Groups[1].Value
+          $declared = $declared.Replace('${ONNXRUNTIME_VERSION}', $ver)
+          if ($declared -ne $url) { Write-Error "CMakeLists.txt ONNXRUNTIME_URL ($declared) does not match the workflow URL ($url)"; exit 1 }
+          $zip = "$env:RUNNER_TEMP/onnxruntime.zip"
+          Write-Host "Downloading $url (cache miss)"
+          curl.exe --fail --location --retry 3 --output $zip $url
+          if ($LASTEXITCODE -ne 0) { Write-Error "curl.exe failed with exit code $LASTEXITCODE"; exit 1 }
+          $extract = "$env:RUNNER_TEMP/ort-extract"
+          Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          # bsdtar extracts the ~1.2 GB tree far faster than Expand-Archive.
+          tar -xf $zip -C $extract
+          if ($LASTEXITCODE -ne 0) { Write-Error "tar failed with exit code $LASTEXITCODE"; exit 1 }
+          # The release zip wraps everything in one versioned directory; strip
+          # it so the layout matches FetchContent's (include/, lib/ at the root).
+          $top = @(Get-ChildItem -Path $extract)
+          Remove-Item $env:ONNXRUNTIME_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          if ($top.Count -eq 1 -and $top[0].PSIsContainer) {
+            Move-Item -Path $top[0].FullName -Destination $env:ONNXRUNTIME_DIR
+          } else {
+            New-Item -ItemType Directory -Path $env:ONNXRUNTIME_DIR -Force | Out-Null
+            Move-Item -Path (Join-Path $extract '*') -Destination $env:ONNXRUNTIME_DIR
+          }
+          Write-Host "Provisioned ONNX Runtime $ver at $env:ONNXRUNTIME_DIR"
 
       # ── Export GitHub Actions cache env for vcpkg binary caching ──────
       - name: Export GitHub Actions cache env
@@ -181,6 +234,7 @@ jobs:
             "-DVCPKG_INSTALL_OPTIONS=--clean-after-build" `
             "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/custom-triplets" `
             "-DVCPKG_OVERLAY_PORTS=${{ github.workspace }}/custom-ports" `
+            "-DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$env:ONNXRUNTIME_DIR" `
             -Wno-dev
 
       - name: Build Release

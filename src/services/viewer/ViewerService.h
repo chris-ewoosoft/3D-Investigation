@@ -1,15 +1,20 @@
 #ifndef VIEWERSERVICE_H
 #define VIEWERSERVICE_H
 
-#include "IAppContext.h"
 #include "IViewerService.h"
-#include "SignalBus.h"
+#include "Global.h"
 #include <QTimer>
 
-class ViewerService : public QObject, public IViewerService {
+class ISceneService;
+class SignalBus;
+
+class APP_EXPORT ViewerService : public QObject, public IViewerService {
     Q_OBJECT
 public:
-    ViewerService(IAppContext* ctx, QObject* parent = nullptr);
+    /// Collaborators are injected by the composition root (AppShell) instead
+    /// of resolving them through IAppContext: the dependency set is explicit
+    /// and a unit test only needs these two fakes.
+    ViewerService(ISceneService* scene, SignalBus* bus, QObject* parent = nullptr);
 
     QString getCurrent2DImagePath() const override;
     void setCurrent2DImagePath(const QString &path) override;
@@ -19,8 +24,8 @@ public:
     void onPrevImage() override;
     void onAutoNext() override;
     void onAutoPrev() override;
-    QString getCurrentAIMode() const override;
-    void setAIMode(const QString& mode) override;
+    AIMode getCurrentAIMode() const override;
+    void setAIMode(AIMode mode) override;
 
     bool isUpdateSceneEnabled() const override { return m_updateScene; }
     void setUpdateSceneEnabled(bool enabled) override { m_updateScene = enabled; }
@@ -29,11 +34,12 @@ private slots:
     void onAutoTimerTimeout();
 
 private:
-    IAppContext* m_ctx;
+    ISceneService* m_scene = nullptr; ///< not owned (AppShell)
+    SignalBus*     m_bus   = nullptr; ///< not owned (AppShell)
     QString current2DImagePath;
     QStringList imageFileList;
     int currentImageIndex;
-    QString currentAIMode;
+    AIMode currentAIMode = AIMode::None;
     QTimer *autoTimer;
     bool isAutoNext;
     bool m_updateScene = true;

@@ -67,6 +67,12 @@ ignore_missing_imports = true
 # ``tensorboard`` is probed (not used) by the adapter so ``--tensorboard``
 # fails fast instead of silently writing no logs; it ships no stubs either, and
 # it must stay out of the import set of everything else.
+# ``torch`` is imported lazily in ``backend.check_device`` (only when CUDA is
+# requested) so the adapter must type-check without it present.
+[[tool.mypy.overrides]]
+module = ["torch"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["tensorboard"]
 ignore_missing_imports = true

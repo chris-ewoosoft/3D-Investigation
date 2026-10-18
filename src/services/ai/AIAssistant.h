@@ -13,11 +13,17 @@
 #include <QDateTime>
 #include "Global.h"
 #include "IAIAssistantService.h"
+#include "ChatSessionManager.h"
+
+class ILanguageService;
+class IUserManager;
+class IAppPaths;
 
 class APP_EXPORT AIAssistant : public IAIAssistantService {
     Q_OBJECT
 public:
-    explicit AIAssistant(QObject *parent = nullptr);
+    explicit AIAssistant(ILanguageService* lang, IUserManager* users,
+                         IAppPaths* paths, QObject *parent = nullptr);
     ~AIAssistant();
 
     void startServer(int modelIndex) override;
@@ -48,8 +54,8 @@ public:
     void clearHistory() override;
     void reloadSessions() override;
 
-    QList<ChatSession> getSessions() const override { return m_sessions; }
-    QString currentSessionId() const override { return m_currentSessionId; }
+    QList<ChatSession> getSessions() const override { return m_sessions.sessions(); }
+    QString currentSessionId() const override { return m_sessions.currentId(); }
     QList<QJsonObject> getHistory() const override;
     bool isThinking() const override { return m_isThinking; }
     bool isSessionThinking(const QString &sessionId) const override;
@@ -65,6 +71,9 @@ private slots:
     void onReplyFinished(QNetworkReply* reply);
 
 private:
+    ILanguageService* m_lang = nullptr;  ///< injected, never null in practice
+    IUserManager* m_users = nullptr;     ///< injected, never null in practice
+    IAppPaths* m_paths = nullptr;        ///< injected by AppShell (composition root)
     struct QueuedCompletionRequest {
         QString sessionId;
         QJsonObject payload;
@@ -77,8 +86,7 @@ private:
 
     QProcess *aiServerProcess;
     QNetworkAccessManager *networkManager;
-    QList<ChatSession> m_sessions;
-    QString m_currentSessionId;
+    ChatSessionManager m_sessions; ///< session collection + current pointer
     QMap<QNetworkReply*, QueuedCompletionRequest> m_pendingRequests;
     QList<QueuedCompletionRequest> m_queuedRequests;
     // Maps requestId → {sessionId, insertAfterIndex} so that the
@@ -100,6 +108,10 @@ private:
     bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
     void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
     void startServerProcess(int modelIndex);
+    /// Clears all in-flight request state (queued requests, pending replies,
+    /// pending UI-action sessions) and resets thinking/recovery flags.
+    /// Called whenever the backend generation is torn down (stop/restart).
+    void resetTransientRequestState();
     void enqueueCompletionRequest(const QString &sessionId, const QJsonObject &payload, int insertAfterIndex = -1);
     void processNextQueuedRequest();
     void saveAllSessions();

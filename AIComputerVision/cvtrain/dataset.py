@@ -11,11 +11,18 @@ Everything here answers with a single :class:`~cvtrain.checks.Check` named
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from .checks import Check, module_available
 
-__all__ = ["check_data_yaml", "dataset_base", "missing_dataset_paths", "ref_exists"]
+__all__ = [
+    "check_data_yaml",
+    "dataset_base",
+    "dataset_content_fingerprint",
+    "missing_dataset_paths",
+    "ref_exists",
+]
 
 
 def dataset_base(parsed: dict[object, object], yaml_dir: Path) -> Path:
@@ -118,3 +125,60 @@ def check_data_yaml(path: Path) -> Check:
     if missing_paths:
         return Check("dataset", False, "missing path(s): " + "; ".join(missing_paths))
     return Check("dataset", True, f"{path} ({len(parsed.get('names') or [])} classes)")
+
+
+def dataset_content_fingerprint(path: Path) -> str | None:
+    """Compute a fast inventory fingerprint (relative paths and sizes) of dataset files.
+
+    Returns ``None`` when the YAML file is absent or unreadable. Combines the
+    raw hash of ``data.yaml`` with the sorted ``(relative_path, size)`` pairs
+    of every file present in the referenced ``train``/``val`` splits.
+    """
+
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+
+    digest = hashlib.sha256(text.encode("utf-8"))
+    if not module_available("yaml"):
+        return digest.hexdigest()
+
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return digest.hexdigest()
+
+    if not isinstance(parsed, dict):
+        return digest.hexdigest()
+
+    base = dataset_base(parsed, path.parent)
+    for key in ("train", "val"):
+        value = parsed.get(key)
+        if not isinstance(value, str) or "://" in value:
+            continue
+        target = Path(value) if Path(value).is_absolute() else base / value
+        if target.is_dir():
+            entries: list[tuple[str, int]] = []
+            for child in target.rglob("*"):
+                if child.is_file():
+                    try:
+                        entries.append((child.relative_to(target).as_posix(), child.stat().st_size))
+                    except OSError:
+                        pass
+            for rel_path, size in sorted(entries):
+                digest.update(f"{key}:{rel_path}:{size}\n".encode("utf-8"))
+        elif target.is_file():
+            try:
+                digest.update(f"{key}:{target.name}:{target.stat().st_size}\n".encode("utf-8"))
+            except OSError:
+                pass
+
+    return digest.hexdigest()
+

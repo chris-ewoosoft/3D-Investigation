@@ -1,9 +1,15 @@
 #include "VideoTrackerThread.h"
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QMetaType>
 
 VideoTrackerThread::VideoTrackerThread(IAIService* aiService, const QString& videoPath, QObject* parent)
     : QThread(parent), m_aiService(aiService), m_videoPath(videoPath), m_stopRequested(false), m_paused(false) {
+    // frameProcessed(const cv::Mat&) được phát cross-thread (tracker → main)
+    // theo queued connection, nên cv::Mat phải được đăng ký làm metatype —
+    // nếu thiếu, Qt drop signal kèm warning "Cannot queue arguments of type
+    // 'cv::Mat'" và view tracking không bao giờ nhận frame.
+    qRegisterMetaType<cv::Mat>("cv::Mat");
 }
 
 VideoTrackerThread::~VideoTrackerThread() {

@@ -26,7 +26,13 @@ struct MailMessage {
  * @brief Interface for the Mail Service.
  *
  * Provides contract for sending and receiving emails.
- * Implementations should run network I/O on a background thread.
+ *
+ * Threading contract (enforced): every method below performs blocking network
+ * I/O with multi-second timeouts. Callers MUST invoke them from a background
+ * thread — MailDockWidget / MailSettingsDialog / ForgotPasswordDialog use
+ * QtConcurrent::run. The implementation warns in every build and asserts in
+ * debug builds when a blocking entry point is invoked on the GUI thread
+ * (mail::enforceBackgroundThread).
  *
  * Usage:
  *   auto* mail = ctx->services()->get<IMailService>();
@@ -34,6 +40,10 @@ struct MailMessage {
  */
 class IMailService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IMailService";
+
     virtual ~IMailService() = default;
 
     /**

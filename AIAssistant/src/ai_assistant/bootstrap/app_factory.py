@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from ..adapters.http.rate_limit import PeerRateLimiter, RateLimitMiddleware
 from ..domain.errors import (
     AuthorizationError,
     ModelNotLoadedError,
@@ -16,7 +17,7 @@ from ..domain.errors import (
     UnprocessableRequestError,
 )
 from ..observability.tracing import attach_inbound_traceparent
-from ..settings import ArchitectureSettings, max_request_bytes
+from ..settings import ArchitectureSettings, max_request_bytes, rate_limit_per_minute
 
 # FastAPI accepts both sync and async exception handlers.
 ExceptionHandler = Callable[[Request, Exception], JSONResponse | Awaitable[JSONResponse]]
@@ -142,6 +143,12 @@ def create_app(settings: ArchitectureSettings, lifespan: Callable[..., Any]) -> 
     # Every JSON surface is bounded before parsing: declared oversize bodies
     # die with 413, streamed oversize bodies surface as a disconnect.
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=max_request_bytes())
+    # Admission governor (ADR 0024): a fixed-window per-peer budget answers
+    # 429 + Retry-After before any handler runs. Installed only when
+    # configured; the container probes are exempt inside the middleware.
+    limiter = PeerRateLimiter(rate_limit_per_minute())
+    if limiter.enabled:
+        app.add_middleware(RateLimitMiddleware, limiter=limiter)
     # Outermost: the inbound traceparent must wrap every other middleware and
     # route so their spans join the caller's trace (ADR 0001).
     app.add_middleware(TraceContextMiddleware)

@@ -1,7 +1,6 @@
 #include "ChangePasswordDialog.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
-#include "LanguageManager.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
@@ -12,7 +11,7 @@
 ChangePasswordDialog::ChangePasswordDialog(const QString &username, QWidget *parent)
     : ModernDialog(UserAuthPlugin::translate("changepw.title"), parent), m_username(username)
 {
-    m_isExternal = !UserManager::instance()->isLoggedIn();
+    m_isExternal = !UserAuthPlugin::users()->isLoggedIn();
     if (m_isExternal) {
         setFixedSize(380, 500);
     } else {
@@ -102,7 +101,7 @@ void ChangePasswordDialog::onApply() {
             return;
         }
         if (targetUser.contains('@')) {
-            QString resolved = UserManager::instance()->findUsernameByEmail(targetUser);
+            QString resolved = UserAuthPlugin::users()->findUsernameByEmail(targetUser);
             if (!resolved.isEmpty()) {
                 targetUser = resolved;
             }
@@ -123,19 +122,14 @@ void ChangePasswordDialog::onApply() {
     }
 
     QString msg;
-    if (UserManager::instance()->changePassword(targetUser, oldP, newP, msg)) {
+    AuthError code = AuthError::Unknown;
+    if (UserAuthPlugin::users()->changePassword(targetUser, oldP, newP, msg, &code)) {
         setStatus(UserAuthPlugin::translate("changepw.success"), true);
         m_applyBtn->setEnabled(false);
         QTimer::singleShot(1500, this, &QDialog::accept);
     } else {
-        QString transMsg = msg;
-        if (msg == "User không tồn tại.") {
-            transMsg = UserAuthPlugin::translate("auth.no_user");
-        } else if (msg == "Mật khẩu cũ không đúng.") {
-            transMsg = UserAuthPlugin::translate("auth.wrong_pass");
-        } else if (msg == "Mật khẩu mới phải có ít nhất 6 ký tự.") {
-            transMsg = UserAuthPlugin::translate("changepw.err_length");
-        }
-        setStatus(transMsg, false);
+        // Branch on the structured code — never on the Vietnamese message text.
+        const QString key = IUserManager::authErrorKey(code);
+        setStatus(key.isEmpty() ? msg : UserAuthPlugin::translate(key), false);
     }
 }

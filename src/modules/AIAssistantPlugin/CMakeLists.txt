@@ -9,6 +9,8 @@ add_library(AIAssistantPlugin SHARED
     AIAssistantRibbonUI.cpp
     ChatBotDockWidget.h
     ChatBotDockWidget.cpp
+    ChatImageViewer.h
+    ChatImageViewer.cpp
     ChatMessageRenderer.h
     ChatMessageRenderer.cpp
     ChatTemplates.h
@@ -16,30 +18,21 @@ add_library(AIAssistantPlugin SHARED
 
 target_include_directories(AIAssistantPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/app
     ${PROJECT_SOURCE_DIR}/src/core
-    ${PROJECT_SOURCE_DIR}/src/services/scene
-    ${PROJECT_SOURCE_DIR}/src/services/viewer
-    ${PROJECT_SOURCE_DIR}/src/services/settings
-    ${PROJECT_SOURCE_DIR}/src/services/reconstruction
-    ${PROJECT_SOURCE_DIR}/src/services/ai
     ${PROJECT_SOURCE_DIR}/src/utils
-    ${CMAKE_CURRENT_SOURCE_DIR}/../UserAuthPlugin
-    ${VTK_INCLUDE_DIRS}
-    ${OpenCV_INCLUDE_DIRS}
 )
 
-target_precompile_headers(AIAssistantPlugin REUSE_FROM SharedPCH)
-target_link_libraries(AIAssistantPlugin PRIVATE SharedPCH)
+# Light PCH + light ABI: AIAssistantPlugin chỉ dùng Qt, không parse hay link
+# VTK/OpenCV/PCL (enforced by tests/CheckArchitectureBoundaries.cmake).
+target_precompile_headers(AIAssistantPlugin REUSE_FROM SharedPCHLight)
+target_link_libraries(AIAssistantPlugin PRIVATE SharedPCHLight)
 
 target_link_libraries(AIAssistantPlugin
     PRIVATE
         Qt6::Core
         Qt6::Widgets
         Qt6::Network
-        ${VTK_LIBRARIES}
-        3D-Reconstruction
-        UserAuthPlugin
+        AppCore
 )
 
 set_target_properties(AIAssistantPlugin PROPERTIES
