@@ -1,4 +1,4 @@
-target_sources(3D-Reconstruction PRIVATE
+target_sources(AppCore PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/SceneService.h
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/SceneService.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/scene/CrosshairGeometry.h
@@ -14,19 +14,25 @@ target_sources(3D-Reconstruction PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/viewer/Model3DLoader.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/viewer/DicomLoader.h
     ${CMAKE_CURRENT_SOURCE_DIR}/viewer/DicomLoader.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/viewer/ChatImageViewer.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/viewer/ChatImageViewer.cpp
-    
+
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/SettingsService.h
     ${CMAKE_CURRENT_SOURCE_DIR}/settings/SettingsService.cpp
     
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionPipeline.h
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionPipeline.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionPostProcessor.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionPostProcessor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/SfmStage.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/SfmStage.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/TrackSfM.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/TrackSfM.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/IncrementalSfM.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/IncrementalSfM.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionConfig.h
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/CameraParamsParser.h
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/CameraParamsParser.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructThread.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructThread.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionWorker.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionWorker.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionService.h
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/ReconstructionService.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/reconstruction/FeatureExtractor.h
@@ -58,6 +64,10 @@ target_sources(3D-Reconstruction PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/mail/MailService.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/mail/MailMimeParser.h
     ${CMAKE_CURRENT_SOURCE_DIR}/mail/MailMimeParser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mail/SmtpMailer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/mail/SmtpMailer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/mail/SmtpOutbox.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/mail/SmtpOutbox.cpp
 
     
 )

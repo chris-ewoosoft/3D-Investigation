@@ -1,16 +1,15 @@
 #include "AIProcessorPlugin.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
 #include "IViewerService.h"
 #include "ISceneService.h"
 #include "IAIService.h"
 #include "SignalBus.h"
-#include "Image2DLoader.h"
 #include "AITrainDockWidget.h"
 #include "AIProcessorRibbonUI.h"
 #include "AIPredictionLogger.h"
 #include "AppConstants.h"
-#include "LanguageManager.h"
 #include "VideoTrackerThread.h"
 #include "IconFactory.h"
 #include "ModernMessageBox.h"
@@ -36,7 +35,7 @@
 #include <QtConcurrent>
 #include <QGroupBox>
 #include <QStyle>
-#include "AppConfig.h"
+#include "IAppPaths.h"
 #include <vtkRenderWindow.h>
 #include <opencv2/opencv.hpp>
 #include "../../utils/CustomProgressDialog.h"
@@ -50,7 +49,7 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
       qWarning() << "[AIProcessorPlugin] IAIService not found in ServiceRegistry!";
   }
 
-  m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
+  m_progressDialog = m_ctx->shell()->getProgressDialog();
   
   // Setup Dock Widget
   m_trainDock = new AITrainDockWidget(m_ctx, m_ctx->mainWindow());
@@ -66,7 +65,9 @@ void AIProcessorPlugin::initialize(IAppContext *context) {
 
 void AIProcessorPlugin::loadModelsInBackground() {
   if (!m_aiSvc) return;
-  QString modelsPath = AppConfig::instance().modelsDir();
+  auto* paths = m_ctx->services()->get<IAppPaths>();
+  if (!paths) return;
+  QString modelsPath = paths->modelsDir();
   QString detPath = modelsPath + "/" + AppConstants::AIProcessor::detectionModelFile();
   QString segPath = modelsPath + "/" + AppConstants::AIProcessor::segmentationModelFile();
   QString trackPath = modelsPath + "/" + AppConstants::AIProcessor::trackingModelFile();
@@ -127,22 +128,26 @@ void AIProcessorPlugin::loadModelsInBackground() {
       bool _trackExists = trackExists;
       auto *cancelFlag  = &m_cancelModelLoad;
 
-      QFuture<void> future = QtConcurrent::run([svc, dlg, ctx, detPath, segPath, trackPath, _detExists, _segExists, _trackExists, cancelFlag]() {
+      // Resolve progress labels on the GUI thread — IAppContext::translate()
+      // touches the ServiceRegistry, which is not thread-safe, so it must not
+      // be called from the QtConcurrent worker below.
+      QString detMsg = ctx->translate("aiproc.loading_det");
+      if (detMsg.isEmpty()) detMsg = "Loading Detection...";
+      QString segMsg = ctx->translate("aiproc.loading_seg");
+      if (segMsg.isEmpty()) segMsg = "Loading Segmentation...";
+      QString trackMsg = ctx->translate("aiproc.loading_track");
+      if (trackMsg.isEmpty()) trackMsg = "Loading Tracking...";
+
+      QFuture<void> future = QtConcurrent::run([svc, dlg, detPath, segPath, trackPath, _detExists, _segExists, _trackExists, cancelFlag, detMsg, segMsg, trackMsg]() {
           if (_detExists && !cancelFlag->load()) {
-              QString detMsg = ctx->translate("aiproc.loading_det");
-              if (detMsg.isEmpty()) detMsg = "Loading Detection...";
               QMetaObject::invokeMethod(dlg, [dlg, detMsg]() { if (dlg) dlg->setLabelText(detMsg); }, Qt::QueuedConnection);
               svc->loadDetectionModel(detPath);
           }
           if (_segExists && !cancelFlag->load()) {
-              QString segMsg = ctx->translate("aiproc.loading_seg");
-              if (segMsg.isEmpty()) segMsg = "Loading Segmentation...";
               QMetaObject::invokeMethod(dlg, [dlg, segMsg]() { if (dlg) dlg->setLabelText(segMsg); }, Qt::QueuedConnection);
               svc->loadSegmentationModel(segPath);
           }
           if (_trackExists && !cancelFlag->load()) {
-              QString trackMsg = ctx->translate("aiproc.loading_track");
-              if (trackMsg.isEmpty()) trackMsg = "Loading Tracking...";
               QMetaObject::invokeMethod(dlg, [dlg, trackMsg]() { if (dlg) dlg->setLabelText(trackMsg); }, Qt::QueuedConnection);
               svc->loadTrackingModel(trackPath);
           }
@@ -152,21 +157,21 @@ void AIProcessorPlugin::loadModelsInBackground() {
 }
 
 void AIProcessorPlugin::setupMenus() {
-  QMenu *aiMenu = m_ctx->getMenu("ai_menu");
+  QMenu *aiMenu = m_ctx->shell()->getMenu("ai_menu");
   aiMenu->clear();
 
-  QMenu *detMenu = aiMenu->addMenu(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), "Object Detection");
-  m_runDetAct = detMenu->addAction(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), m_ctx->translate("ai.run_detection"), this, &AIProcessorPlugin::onObjectDetection);
-  m_hideDetAct = detMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
+  m_detMenu = aiMenu->addMenu(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), m_ctx->translate("ai.detection"));
+  m_runDetAct = m_detMenu->addAction(IconFactory::createModern("🔍", QColor("#f59e0b"), QColor("#d97706")), m_ctx->translate("ai.run_detection"), this, &AIProcessorPlugin::onObjectDetection);
+  m_hideDetAct = m_detMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
 
-  QMenu *segMenu = aiMenu->addMenu(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), "Segmentation");
-  m_runSegAct = segMenu->addAction(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), m_ctx->translate("ai.run_segmentation"), this, &AIProcessorPlugin::onSegmentation);
-  m_hideSegAct = segMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
+  m_segMenu = aiMenu->addMenu(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), m_ctx->translate("ai.segmentation"));
+  m_runSegAct = m_segMenu->addAction(IconFactory::createModern("🎯", QColor("#10b981"), QColor("#059669")), m_ctx->translate("ai.run_segmentation"), this, &AIProcessorPlugin::onSegmentation);
+  m_hideSegAct = m_segMenu->addAction(IconFactory::createModern("👁️", QColor("#6b7280"), QColor("#4b5563")), m_ctx->translate("ai.hide_results"), this, &AIProcessorPlugin::onHideAIResults);
 
-  QMenu *trackMenu = aiMenu->addMenu(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), "Video Tracking");
-  m_runTrackingAct = trackMenu->addAction(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), "Run Video Tracking", this, &AIProcessorPlugin::onObjectTracking);
-  m_pauseTrackingAct = trackMenu->addAction(IconFactory::createModern("⏸️", QColor("#f59e0b"), QColor("#d97706")), "Pause/Resume", this, &AIProcessorPlugin::onPauseResumeTracking);
-  m_stopTrackingAct = trackMenu->addAction(IconFactory::createModern("⏹️", QColor("#ef4444"), QColor("#b91c1c")), "Stop Tracking", this, &AIProcessorPlugin::onStopTracking);
+  m_trackMenu = aiMenu->addMenu(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), m_ctx->translate("ai.video_tracking"));
+  m_runTrackingAct = m_trackMenu->addAction(IconFactory::createModern("🎥", QColor("#ef4444"), QColor("#b91c1c")), m_ctx->translate("ai.run_video_tracking"), this, &AIProcessorPlugin::onObjectTracking);
+  m_pauseTrackingAct = m_trackMenu->addAction(IconFactory::createModern("⏸️", QColor("#f59e0b"), QColor("#d97706")), m_ctx->translate("ai.pause_resume"), this, &AIProcessorPlugin::onPauseResumeTracking);
+  m_stopTrackingAct = m_trackMenu->addAction(IconFactory::createModern("⏹️", QColor("#ef4444"), QColor("#b91c1c")), m_ctx->translate("ai.stop_tracking"), this, &AIProcessorPlugin::onStopTracking);
 
   aiMenu->addSeparator();
   aiMenu->addAction(IconFactory::createModern("⚙️", QColor("#8b5cf6"), QColor("#7c3aed")), m_ctx->translate("ai.training"), this, &AIProcessorPlugin::onTrainModel);
@@ -174,7 +179,7 @@ void AIProcessorPlugin::setupMenus() {
 }
 
 void AIProcessorPlugin::setupRibbonUI() {
-  if (QWidget* panel = m_ctx->getTabPanel("tab.ai")) {
+  if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.ai")) {
       m_ribbonUI = new AIProcessorRibbonUI(m_ctx, panel, this);
       connect(m_ribbonUI->btnDet(), &QToolButton::clicked, this, &AIProcessorPlugin::onObjectDetection);
       connect(m_ribbonUI->btnSeg(), &QToolButton::clicked, this, &AIProcessorPlugin::onSegmentation);
@@ -193,7 +198,8 @@ void AIProcessorPlugin::setupConnections() {
   connect(m_ctx->signalBus(), &SignalBus::imageIndexChanged, this, &AIProcessorPlugin::onImageChanged);
   connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
           [this](const QString &action, const QVariantMap &parameters) {
-      const QDir root(AppConfig::instance().projectRootDir());
+      auto* paths = m_ctx->services()->get<IAppPaths>();
+      const QDir root(paths ? paths->projectRootDir() : QString());
       bool handled = false;
       if (action == "ai.run_detection" || action == "ai.run_segmentation") {
           const QDir images(root.filePath("3DRecontruction/templeRing"));
@@ -275,11 +281,11 @@ void AIProcessorPlugin::onObjectDetection() {
   emit m_ctx->signalBus()->aiInferenceFinished("detection");
 
   m_ctx->viewer()->setAIMode(AIMode::Detection);
-  m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(res));
+  m_ctx->scene()->showImage(res);
   m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-  m_ctx->updateMenuStates();
+  m_ctx->shell()->updateMenuStates();
 
-  AIPredictionLogger::logAsync("detection", currentImg, res);
+  AIPredictionLogger::logAsync(m_ctx->services()->get<IAppPaths>(), "detection", currentImg, res);
 }
 
 void AIProcessorPlugin::onSegmentation() {
@@ -303,31 +309,33 @@ void AIProcessorPlugin::onSegmentation() {
   emit m_ctx->signalBus()->aiInferenceFinished("segmentation");
 
   m_ctx->viewer()->setAIMode(AIMode::Segmentation);
-  m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(res));
+  m_ctx->scene()->showImage(res);
   m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-  m_ctx->updateMenuStates();
+  m_ctx->shell()->updateMenuStates();
 
-  AIPredictionLogger::logAsync("segmentation", currentImg, res);
+  AIPredictionLogger::logAsync(m_ctx->services()->get<IAppPaths>(), "segmentation", currentImg, res);
 }
 
 void AIProcessorPlugin::onHideAIResults() {
     const QString originalPath = m_ctx->viewer()->getCurrent2DImagePath();
     m_ctx->viewer()->setAIMode(AIMode::None);
     if (!originalPath.isEmpty() && QFile::exists(originalPath)) {
-        m_ctx->scene()->setTextureActor(Image2DLoader::load(originalPath));
+        m_ctx->scene()->showImage(originalPath);
         m_ctx->scene()->vtkWidget()->renderWindow()->Render();
     } else {
         m_ctx->viewer()->loadCurrentIndexImage();
     }
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
 }
 
 void AIProcessorPlugin::onViewCharts() {
-  QString aiComputerVisionDir = AppConfig::instance().aiComputerVisionDir();
+  auto* paths = m_ctx->services()->get<IAppPaths>();
+  if (!paths) return;
+  QString aiComputerVisionDir = paths->aiComputerVisionDir();
   QString runsDir = QDir::cleanPath(aiComputerVisionDir + "/runs");
   if (!QDir(runsDir).exists()) {
       ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("common.error"),
-                                "TensorBoard log directory does not exist: " + runsDir);
+                                m_ctx->translate("aiproc.tb_dir_missing").arg(runsDir));
       return;
   }
 
@@ -386,7 +394,7 @@ void AIProcessorPlugin::onViewCharts() {
           const QString output = QString::fromLocal8Bit(process->readAll());
           m_progressDialog->hide();
           ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("common.error"),
-              "TensorBoard could not start. Make sure it is installed in the Python environment.\n" + output);
+              m_ctx->translate("aiproc.tb_start_failed") + "\n" + output);
       } else if (m_progressDialog) {
           m_progressDialog->setValue((*elapsedMs * 100) / (totalSeconds * 1000));
           int remainingSeconds = totalSeconds - (*elapsedMs / 1000);
@@ -407,7 +415,7 @@ void AIProcessorPlugin::onViewCharts() {
       if (m_tensorboardWaitTimer == waitTimer) m_tensorboardWaitTimer = nullptr;
       m_progressDialog->hide();
       ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("common.error"),
-          "TensorBoard could not start. Make sure it is installed in the Python environment.\n" +
+          m_ctx->translate("aiproc.tb_start_failed") + "\n" +
           QString::fromLocal8Bit(process->readAll()));
   });
   waitTimer->start();
@@ -470,12 +478,12 @@ void AIProcessorPlugin::onPauseResumeTracking() {
     m_trackingPaused = !m_trackingPaused;
     if (m_trackingPaused) {
         m_trackerThread->pause();
-        if (m_pauseTrackingAct) m_pauseTrackingAct->setText("Resume");
-        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText("Resume");
+        if (m_pauseTrackingAct) m_pauseTrackingAct->setText(m_ctx->translate("ai.resume"));
+        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText(m_ctx->translate("ai.resume"));
     } else {
         m_trackerThread->resume();
-        if (m_pauseTrackingAct) m_pauseTrackingAct->setText("Pause");
-        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText("Pause");
+        if (m_pauseTrackingAct) m_pauseTrackingAct->setText(m_ctx->translate("ai.pause"));
+        if (m_ribbonUI) m_ribbonUI->btnPauseTrack()->setText(m_ctx->translate("ai.pause"));
     }
 }
 
@@ -492,7 +500,7 @@ void AIProcessorPlugin::onStopTracking() {
 
 void AIProcessorPlugin::onTrackingFrameReceived(const cv::Mat& frame) {
     if (m_ctx->viewer()->getCurrentAIMode() != AIMode::Tracking) return;
-    m_ctx->scene()->setTextureActor(Image2DLoader::loadFromMat(frame));
+    m_ctx->scene()->showImage(frame);
     m_ctx->scene()->vtkWidget()->renderWindow()->Render();
 }
 
@@ -503,12 +511,12 @@ void AIProcessorPlugin::onTrackingFinished() {
         m_trackerThread = nullptr;
     }
     m_ctx->viewer()->setAIMode(AIMode::None);
-    ModernMessageBox::information(m_ctx->mainWindow(), "Tracking Finished", "Video tracking completed.");
+    ModernMessageBox::information(m_ctx->mainWindow(), m_ctx->translate("aiproc.track_finished"), m_ctx->translate("aiproc.track_finished_msg"));
     updateActions();
 }
 
 void AIProcessorPlugin::updateActions() {
-    QMenu *aiMenu = m_ctx->getMenu("ai_menu");
+    QMenu *aiMenu = m_ctx->shell()->getMenu("ai_menu");
     if (aiMenu) {
         aiMenu->setTitle(m_ctx->translate("ai.menu"));
     }
@@ -520,6 +528,19 @@ void AIProcessorPlugin::updateActions() {
   bool segReady = m_aiSvc && m_aiSvc->isSegmentationReady();
   bool trackReady = m_aiSvc && m_aiSvc->isTrackingReady();
   bool isTrackingMode = (mode == AIMode::Tracking);
+
+  // Re-apply translated menu/action texts (also runs on languageChanged).
+  if (m_detMenu)   m_detMenu->setTitle(m_ctx->translate("ai.detection"));
+  if (m_segMenu)   m_segMenu->setTitle(m_ctx->translate("ai.segmentation"));
+  if (m_trackMenu) m_trackMenu->setTitle(m_ctx->translate("ai.video_tracking"));
+  m_runDetAct->setText(m_ctx->translate("ai.run_detection"));
+  m_hideDetAct->setText(m_ctx->translate("ai.hide_results"));
+  m_runSegAct->setText(m_ctx->translate("ai.run_segmentation"));
+  m_hideSegAct->setText(m_ctx->translate("ai.hide_results"));
+  m_runTrackingAct->setText(m_ctx->translate("ai.run_video_tracking"));
+  m_pauseTrackingAct->setText(m_ctx->translate(
+      isTrackingMode ? (m_trackingPaused ? "ai.resume" : "ai.pause") : "ai.pause_resume"));
+  m_stopTrackingAct->setText(m_ctx->translate("ai.stop_tracking"));
 
   if (m_modelsLoading) {
       m_runDetAct->setEnabled(false);
@@ -565,12 +586,16 @@ void AIProcessorPlugin::updateActions() {
   m_hideDetAct->setEnabled(mode == AIMode::Detection);
   m_hideSegAct->setEnabled(mode == AIMode::Segmentation);
 
+  if (m_trainDock) m_trainDock->retranslate();
+
   if (m_ribbonUI) {
       m_ribbonUI->btnHide()->setText(m_ctx->translate("ai.hide_results"));
       m_ribbonUI->btnHide()->setEnabled(mode != AIMode::None);
       m_ribbonUI->btnTrack()->setText(m_ctx->translate("ai.video_tracking"));
       m_ribbonUI->btnTrain()->setText(m_ctx->translate("ai.training"));
       m_ribbonUI->btnChart()->setText(m_ctx->translate("ai.charts"));
+      m_ribbonUI->btnPauseTrack()->setText(m_ctx->translate(m_trackingPaused ? "ai.resume" : "ai.pause"));
+      m_ribbonUI->btnStopTrack()->setText(m_ctx->translate("aiproc.stop"));
       
       // Update GroupBox titles
       if (QLabel *lbl = m_ribbonUI->groupAI()->findChild<QLabel*>("groupTitleLabel")) {

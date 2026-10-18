@@ -244,20 +244,26 @@ MainWindow (Shell)
 │       │   PanStyle.*                      ← Custom VTK interactor: chuột phải = pan thay vì rotate
 │       └── CMakeLists.txt                  ← Cấu hình CMake cho thư viện utils (static lib)
 │
-├── tests/                      ← Unit tests (CTest/Qt Test) + smoke test Python (pytest)
-│   ├── CMakeLists.txt                  ← Cấu hình CMake cho test runner (10 executable, add_test)
+├── tests/                      ← Unit tests (CTest/Qt Test) — 16 executable + 1 architecture guard
+│   ├── CMakeLists.txt                  ← Cấu hình CMake cho test runner (add_test)
+│   ├── CheckArchitectureBoundaries.cmake ← Guard ranh giới plugin ↔ AppCore (AGENTS.md)
+│   ├── SyntheticSceneFixture.h         ← Fixture dựng 3 ảnh tổng hợp + camera params cho test SfM
 │   ├── TestAgentActions.cpp            ← Test chuẩn hoá action & tham số của Agent (AgentActionManifest)
 │   ├── TestAIYoloPostProcessor.cpp     ← Test hậu xử lý output YOLO (NMS, mask overlay)
 │   ├── TestAppConfig.cpp               ← Test quản lý đường dẫn hệ thống
-│   ├── TestCameraParamsParser.cpp      ← Test đọc/ghi camera parameters
+│   ├── TestCameraParamsParser.cpp      ← Test đọc camera parameters (FORMAT A/B, dòng lỗi)
+│   ├── TestCrosshairGeometry.cpp       ← Test hình học crosshair (không cần VTK)
 │   ├── TestLanguageManager.cpp         ← Test chuyển đổi ngôn ngữ EN/VI
 │   ├── TestMailMimeParser.cpp          ← Test phân tích cấu trúc MIME email
 │   ├── TestPointCloudFilter.cpp        ← Test lọc nhiễu đám mây điểm 3D
-│   ├── TestReconstructionPipeline.cpp  ← Test pipeline SfM end-to-end
+│   ├── TestReconstructionFinalize.cpp  ← Test hậu kỳ end-to-end (densify/Poisson/artifacts, label slow)
+│   ├── TestReconstructionPipeline.cpp  ← Test SfM end-to-end trên ảnh tổng hợp + hủy/teardown
 │   ├── TestServiceRegistry.cpp         ← Test đăng ký/tra cứu service type-safe
+│   ├── TestSettingsService.cpp         ← Test ISettingsService (round-trip, defaults)
+│   ├── TestShellService.cpp            ← Test contract IShellService (menu/tab/progress dialog)
 │   ├── TestSignalBus.cpp               ← Test Event Bus phát/nhận signal
-│   ├── test_contract_agent_routes.py   ← Contract test schema AgentExecuteResponse (AI server)
-│   └── test_p0_rag_no_mock.py          ← Smoke test tầng RAG không dùng mock
+│   ├── TestSmtpOutbox.cpp              ← Test seam gửi mail (IOutgoingMail)
+│   └── TestUserManagerCrypto.cpp       ← Test mã hóa license DPAPI + migration legacy
 │
 ├── AIAssistant/                ← AI Server: Agent, RAG, LLM cục bộ (Python, FastAPI)
 │   ├── README.md               ← Tài liệu tổng: layout, kiến trúc, API, cài đặt, test + mục lục ADR

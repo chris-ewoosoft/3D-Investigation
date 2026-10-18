@@ -170,6 +170,11 @@ if(QT_QMAKE_EXECUTABLE)
 endif()
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets OpenGL Network Concurrent OpenGLWidgets Svg SvgWidgets)
 qt_standard_project_setup()
+# qt_standard_project_setup() only turns on AUTOMOC/AUTOUIC. Without AUTORCC the
+# .qrc files listed in target_sources() are ignored by the generator (they ended
+# up as plain "None" items), so ":/app_icon.png" and the language flags in
+# ":/flags/..." never existed at runtime and the icons stayed blank.
+set(CMAKE_AUTORCC ON)
 
 # ─── 2. VTK ───────────────────────────────────────────────────────────────────
 set(VTK_MODULE_ENABLE_VTK_RenderingVulkan NO)
@@ -256,12 +261,12 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/app)
 # We create a clean STATIC library to build the PCH. This avoids baking in macros 
 # like APP_LIBRARY or _EXPORTS, so plugins can reuse it safely without link errors.
 add_library(SharedPCH STATIC src/pch_dummy.cpp)
-target_include_directories(SharedPCH PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/app
+target_include_directories(SharedPCH PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/scene
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/viewer
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/settings
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/shell
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/reconstruction
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/ai
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/mail
@@ -294,34 +299,152 @@ target_link_libraries(SharedPCH PUBLIC
 )
 
 # ─── 7c. Executable ────────────────────────────────────────────────────────────
+# ─── 7a. AppCore — foundation shared library ───────────────────────────────────
+# core (interfaces + kernel: UserManager, SignalBus, AppConfig, …) and utils
+# (StyleManager, IconFactory, AbstractRibbonPanel, …) form the stable ABI that
+# the exe, every plugin and every test import. Building them as their own
+# shared library removes the exe↔plugin circular link (plugins used to link
+# the exe just for APP_EXPORT symbols) and gives one canonical set of Qt
+# link dependencies for the whole product.
+add_library(AppCore SHARED
+    # core
+    src/core/Global.h
+    src/core/AppConfig.h
+    src/core/AppConfig.cpp
+    src/core/AgentActionManifest.h
+    src/core/AgentActionManifest.cpp
+    src/core/SecretVault.h
+    src/core/SecretVault.cpp
+    src/core/SignalBus.h
+    src/core/SignalBus.cpp
+    src/core/LanguageManager.h
+    src/core/LanguageManager.cpp
+    src/core/UserManager.h
+    src/core/UserManager.cpp
+    src/core/IOutgoingMail.h
+    src/core/ServiceRegistry.h
+    src/core/IReconstructionService.h
+    src/core/IAIService.h
+    src/core/IMailService.h
+    src/core/IAppContext.h
+    src/core/IAIAssistantService.h
+    src/core/IUserManager.h
+    src/core/ILanguageService.h
+    src/core/ISceneService.h
+    src/core/ISettingsService.h
+    src/core/IViewerService.h
+    src/core/IPlugin.h
+    src/core/IShellService.h
+    src/core/IAppPaths.h
+    src/core/AIMode.h
+    src/core/AppConstants.h
+    # shell
+    src/services/shell/ShellService.h
+    src/services/shell/ShellService.cpp
+    # utils
+    src/utils/PanStyle.h
+    src/utils/PanStyle.cpp
+    src/utils/StyleManager.h
+    src/utils/StyleManager.cpp
+    src/utils/AbstractRibbonPanel.h
+    src/utils/AbstractRibbonPanel.cpp
+    src/utils/Logger.h
+    src/utils/Logger.cpp
+    src/utils/CustomProgressDialog.h
+    src/utils/CustomProgressDialog.cpp
+    src/utils/ModernDialog.h
+    src/utils/ModernDialog.cpp
+    src/utils/ModernMessageBox.h
+    src/utils/ModernMessageBox.cpp
+    src/utils/HtmlUtilities.h
+    src/utils/HtmlUtilities.cpp
+    src/utils/FileUtilities.h
+    src/utils/FileUtilities.cpp
+    src/utils/IconFactory.h
+    src/utils/IconFactory.cpp
+)
+target_precompile_headers(AppCore REUSE_FROM SharedPCH)
+# PUBLIC surface = the plugin-facing ABI only: interfaces (core) + shared UI
+# utilities. Service implementation headers are NOT part of that surface.
+target_include_directories(AppCore PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+    ${VTK_INCLUDE_DIRS}
+    ${OpenCV_INCLUDE_DIRS}
+    ${PCL_INCLUDE_DIRS}
+    ${onnxruntime_SOURCE_DIR}/include
+)
+# Implementation-only include paths for AppCore's own sources (SceneService.h,
+# ShellService.h, …). PRIVATE on purpose: plugins/tests must use the I*.h
+# interfaces; the build graph now enforces the boundary that
+# tests/CheckArchitectureBoundaries.cmake double-checks.
+target_include_directories(AppCore PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/scene
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/viewer
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/settings
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/shell
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/reconstruction
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/mail
+)
+# APP_LIBRARY private to AppCore → APP_EXPORT = dllexport here, dllimport in
+# every consumer (exe / plugins / tests) that links this target.
+target_compile_definitions(AppCore PRIVATE APP_LIBRARY)
+# PCH flag parity: the reused PCH (REUSE_FROM SharedPCH) is compiled with
+# SharedPCH's PUBLIC definitions, but AppCore does not link that target — so
+# it must repeat them on its own TUs. Otherwise MSVC fires C4651
+# ("specified for precompiled header but not for current compile") on every
+# unity source.
+target_compile_definitions(AppCore PUBLIC
+    ${VTK_DEFINITIONS}
+    ${PCL_DEFINITIONS}
+    PCL_SILENCE_MALLOC_WARNING=1
+)
+# The whole plugin-facing ABI (core + utils + services) lives here, so AppCore
+# carries the full third-party link set and every consumer inherits it
+# transitively.
+target_link_libraries(AppCore
+    PUBLIC
+        Qt6::Core
+        Qt6::Widgets
+        Qt6::OpenGL
+        Qt6::Network
+        Qt6::Concurrent
+        Qt6::OpenGLWidgets
+        ${VTK_LIBRARIES}
+        ${OpenCV_LIBS}
+        ${PCL_LIBRARIES}
+        Eigen3::Eigen
+        ${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib
+)
+if(WIN32)
+    target_link_libraries(AppCore PUBLIC crypt32)
+endif()
+
 qt_add_executable(3D-Reconstruction WIN32 MACOSX_BUNDLE)
 target_precompile_headers(3D-Reconstruction REUSE_FROM SharedPCH)
 # ─── Source subdirectories ───────────────────────────────────────────────────
 add_subdirectory(src/app)
-add_subdirectory(src/core)
 add_subdirectory(src/services)
-add_subdirectory(src/utils)
-
 # ─── 8. Include directories ───────────────────────────────────────────────────
-target_include_directories(3D-Reconstruction PUBLIC
+# PRIVATE on purpose: the exe (composition root) is the only target allowed to
+# reach every layer directly — src/app plus the concrete service headers it
+# wires together. Plugins import core/utils transitively from AppCore and can
+# no longer resolve service headers at all (they are PRIVATE on AppCore).
+target_include_directories(3D-Reconstruction PRIVATE
     # App shell
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app
 
-    # Core layer (interfaces + kernel)
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
-
-    # Services layer
+    # Concrete service headers (composition-root wiring only)
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/scene
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/viewer
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/settings
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/services/shell
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/reconstruction
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/ai
     ${CMAKE_CURRENT_SOURCE_DIR}/src/services/mail
 
-    # Utils
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
-
-    # Third-party
+    # Third-party (core/utils arrive transitively through AppCore)
     ${VTK_INCLUDE_DIRS}
     ${OpenCV_INCLUDE_DIRS}
     ${PCL_INCLUDE_DIRS}
@@ -334,9 +457,8 @@ target_compile_definitions(3D-Reconstruction PUBLIC
     ${PCL_DEFINITIONS}
     PCL_SILENCE_MALLOC_WARNING=1
 )
-target_compile_definitions(3D-Reconstruction PRIVATE
-    APP_LIBRARY
-)
+# (APP_LIBRARY intentionally NOT defined here: core/utils classes are imported
+# from AppCore.dll instead of being dllexport'ed from this executable.)
 if(MSVC)
     # /MP enables multi-core compilation. Since heavy PCL/VTK headers are now in PCH,
     # cl.exe uses much less memory per file, avoiding the previous heap exhaustion issues.
@@ -346,6 +468,7 @@ endif()
 # ─── 10. Link libraries ───────────────────────────────────────────────────────
 target_link_libraries(3D-Reconstruction
     PRIVATE
+        AppCore
         Qt6::Core
         Qt6::Widgets
         Qt6::OpenGL
@@ -359,9 +482,17 @@ target_link_libraries(3D-Reconstruction
         ${onnxruntime_SOURCE_DIR}/lib/onnxruntime.lib
 )
 
-set_target_properties(3D-Reconstruction PROPERTIES ENABLE_EXPORTS ON)
+set_target_properties(3D-Reconstruction PROPERTIES WIN32_EXECUTABLE ON)
 
 # ─── 11. Post-build: Copy DLLs ───────────────────────────────────────────────
+# AppCore.dll must sit next to the executable (the exe and every plugin import
+# its symbols; plugins resolve it from the executable directory).
+add_custom_command(TARGET AppCore POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:AppCore>
+        $<TARGET_FILE_DIR:3D-Reconstruction>
+    COMMENT "Copying AppCore.dll next to the executable"
+)
 # ONNX Runtime is fetched and linked directly by this project rather than by
 # vcpkg. It must therefore be copied even when the vcpkg toolchain is active;
 # otherwise Windows can load an unrelated onnxruntime.dll found on PATH.

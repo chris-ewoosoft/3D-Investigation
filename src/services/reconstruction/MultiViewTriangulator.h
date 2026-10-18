@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MULTIVIEWTRIANGULATOR_H
+#define MULTIVIEWTRIANGULATOR_H
 #include <opencv2/core.hpp>
 #include <vector>
 #include "FeatureTrack.h"
@@ -26,3 +27,5 @@ private:
     static double maxPairwiseAngleDeg(const FeatureTrack &track,
                                       const std::vector<CameraParams> &camParams);
 };
+
+#endif // MULTIVIEWTRIANGULATOR_H

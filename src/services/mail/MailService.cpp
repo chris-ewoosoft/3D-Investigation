@@ -2,7 +2,7 @@
 
 #include "MailMimeParser.h"
 #include "SmtpMailer.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 
 #include <QHostAddress>
 #include <QHostInfo>
@@ -14,50 +14,73 @@ namespace {
 constexpr int ImapTimeoutMs = 8000;
 }
 
-MailService::MailService()
+MailService::MailService(IUserManager* users)
+    : m_users(users)
 {
     loadFromCurrentUser();
 }
 
 QString MailService::currentUsername() const
 {
-    auto *um = UserManager::instance();
+    auto *um = m_users;
     return um ? um->currentUsername() : QString();
 }
 
-void MailService::loadFromCurrentUser()
+void MailService::loadFromCurrentUser() const
 {
-    auto *um = UserManager::instance();
+    auto *um = m_users;
     const QString username = currentUsername();
-    if (!um || username.isEmpty()) return;
+
+    if (!um || username.isEmpty()) {
+        // Logout / not logged in: drop the cached credentials so a previous
+        // session's account is never reused after the user changes state.
+        std::unique_lock lock(m_mutex);
+        m_email.clear();
+        m_password.clear();
+        m_displayName.clear();
+        m_signature.clear();
+        return;
+    }
+
+    // Read through IUserManager before taking our own lock — its getters take
+    // the UserManager lock internally; keeping the two lock domains
+    // non-overlapping avoids any lock-order coupling.
+    const QString email = um->getUserPref(username, "mail_email", um->currentUser().email);
+    const QString password = um->getUserSecret(username, "mail_password");
+    const QString displayName = um->getUserPref(username, "mail_display_name", username);
+    const QString signature = um->getUserPref(
+        username, "mail_signature",
+        QString("<b>%1</b><br>3D-Reconstruction").arg(displayName));
 
     std::unique_lock lock(m_mutex);
-    m_email = um->getUserPref(username, "mail_email", um->currentUser().email);
-    m_password = um->getUserPref(username, "mail_password");
-    m_displayName = um->getUserPref(username, "mail_display_name", username);
-    m_signature = um->getUserPref(username, "mail_signature",
-                                  QString("<b>%1</b><br>3D-Reconstruction").arg(m_displayName));
+    m_email = email;
+    m_password = password;
+    m_displayName = displayName;
+    m_signature = signature;
 }
 
 void MailService::setCredentials(const QString& email,
                                  const QString& password,
                                  const QString& displayName)
 {
+    const QString trimmedEmail = email.trimmed();
+    const QString trimmedName = displayName.trimmed();
     {
         std::unique_lock lock(m_mutex);
-        m_email = email.trimmed();
+        m_email = trimmedEmail;
         m_password = password;
-        m_displayName = displayName.trimmed();
+        m_displayName = trimmedName;
     }
 
-    auto *um = UserManager::instance();
+    // Persist outside the lock — calling into IUserManager while holding
+    // m_mutex would invert the natural lock order and is unnecessary here.
+    auto *um = m_users;
     const QString username = currentUsername();
     if (!um || username.isEmpty()) return;
-    
-    std::shared_lock lock(m_mutex);
-    um->setUserPref(username, "mail_email", m_email);
-    um->setUserPref(username, "mail_password", m_password);
-    um->setUserPref(username, "mail_display_name", m_displayName);
+
+    um->setUserPref(username, "mail_email", trimmedEmail);
+    um->setUserSecret(username, "mail_password", password);
+    um->setUserPref(username, "mail_display_name", trimmedName);
 }
 
 QString MailService::signature() const
@@ -78,7 +101,7 @@ void MailService::setSignature(const QString &signature)
         std::unique_lock lock(m_mutex);
         m_signature = signature;
     }
-    auto *um = UserManager::instance();
+    auto *um = m_users;
     const QString username = currentUsername();
     if (um && !username.isEmpty()) {
         um->setUserPref(username, "mail_signature", signature);
@@ -87,14 +110,14 @@ void MailService::setSignature(const QString &signature)
 
 bool MailService::hasCredentials() const
 {
-    const_cast<MailService*>(this)->loadFromCurrentUser();
+    loadFromCurrentUser();
     std::shared_lock lock(m_mutex);
     return !m_email.trimmed().isEmpty() && !m_password.isEmpty();
 }
 
 QString MailService::senderEmail() const
 {
-    const_cast<MailService*>(this)->loadFromCurrentUser();
+    loadFromCurrentUser();
     std::shared_lock lock(m_mutex);
     return m_email;
 }
@@ -150,7 +173,7 @@ bool MailService::openImap(QString &errorMsg, QSslSocket &sock) const
         return false;
     }
 
-    sock.setPeerVerifyMode(QSslSocket::VerifyNone);
+    sock.setPeerVerifyMode(QSslSocket::VerifyPeer);
 
     // Resolve host and prefer IPv4
     const QString host = imapHost();

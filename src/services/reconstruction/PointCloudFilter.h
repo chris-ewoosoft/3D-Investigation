@@ -1,4 +1,5 @@
-#pragma once
+#ifndef POINTCLOUDFILTER_H
+#define POINTCLOUDFILTER_H
 #include <opencv2/core.hpp>
 #include <vector>
 
@@ -31,3 +32,5 @@ public:
                               std::vector<cv::Vec3b> &cols,
                               float radius, int minNeighbors);
 };
+
+#endif // POINTCLOUDFILTER_H

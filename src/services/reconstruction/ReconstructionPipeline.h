@@ -4,24 +4,28 @@
 #include <QString>
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
+#include <functional>
 #include <vector>
-
-#include <pcl/filters/radius_outlier_removal.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/io/ply_io.h> // nếu muốn lưu kết quả
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-
-typedef pcl::PointXYZRGB PointT;
-typedef pcl::PointCloud<PointT> PointCloudT;
 
 #include "Global.h"
 #include "ReconstructionConfig.h"
-#include "AppConstants.h"
-#include "FeatureTrack.h"
-#include "MultiViewTriangulator.h"
 
+/**
+ * Orchestrator of the 3D reconstruction pipeline.
+ *
+ * Owns all storage (images, features, camera model, result cloud) and only
+ * sequences the stages; every algorithm lives in its own translation unit:
+ *
+ *   - feature extraction : FeatureExtractor (parallel per image)
+ *   - reconstruction     : TrackSfM (ground-truth poses) OR IncrementalSfM
+ *                          (estimated poses), picked from the loaded params
+ *   - cleanup            : ReconstructionPostProcessor::processPointCloud
+ *   - densify / texture / Poisson meshing : ReconstructionPostProcessor
+ *   - disk cache (PLY)   : private helpers below
+ *
+ * PCL types no longer leak into this header: cache/mesh I/O is confined to
+ * the .cpp translation unit.
+ */
 class APP_EXPORT ReconstructionPipeline {
 public:
     ReconstructionPipeline();
@@ -29,8 +33,22 @@ public:
 
     void setImages(const std::vector<QString> &imagePaths);
     bool loadCameraParams(const QString &paramsFilePath);
-    bool reconstruct();
-    
+
+    /**
+     * Chạy toàn bộ pipeline (đồng bộ, blocking).
+     *
+     * @param shouldCancel  Predicate hủy cooperative, được kiểm tại các ranh
+     *                      giới stage (entry / từng ảnh / giữa các bước hậu kỳ).
+     *                      Rỗng = không hỗ trợ hủy. Khi hủy, trả về false và
+     *                      errorString() = "Reconstruction cancelled.".
+     * @return true nếu có point cloud kết quả.
+     */
+    bool reconstruct(const std::function<bool()> &shouldCancel = {});
+
+    /// Lý do thất bại của lần reconstruct() gần nhất (rỗng nếu thành công).
+    /// Dùng để hiển thị chẩn đoán cho người dùng thay vì thông báo chung chung.
+    QString errorString() const { return m_lastError; }
+
     // Configuration access
     ReconstructionConfig& config() { return m_config; }
     void setConfig(const ReconstructionConfig &cfg);
@@ -39,50 +57,18 @@ public:
     std::vector<cv::Vec3b> getPointColors() const;
     std::vector<QString> getImages() const { return imageFiles; }
 
-    // Lọc Statistical Outlier Removal (SOR)
-    void statisticalOutlierFilter(float meanK = 50, float stdDevMulThresh = 1.0);
-    // Lọc Radius Outlier Removal (ROR)
-    void radiusOutlierFilter(float radius = 0.02, int minNeighbors = 3);
-    // Giảm mẫu bằng Voxel Grid
-    void voxelGridDownsample(float leafSize = 0.005);
-
-    // Pipeline lọc tổng hợp
+    /// Pipeline lọc tổng hợp (adaptive ROR → SOR → voxel) trên cloud hiện có.
+    /// Delegate sang ReconstructionPostProcessor (không còn nội bộ ở đây).
     void processPointCloud();
-
-    void filterFarOutliers(float sigma);
-
-    std::vector<cv::Point3f> densifyPointCloudMLS(
-        const std::vector<cv::Point3f>& pts,
-        const std::vector<cv::Vec3b>& cols,
-        int targetCount = 2500000);
-
-    pcl::PolygonMesh poissonMeshing(
-        const std::vector<cv::Point3f>& densePts,
-        const std::vector<cv::Vec3b>& denseCols,
-        int poissonDepth = 11);
-
-    bool projectWithP(const cv::Point3f& pw, const CameraParams& cam, cv::Point2f& uv);
-
-    void textureFromImages(
-        std::vector<cv::Point3f>& pts,
-        std::vector<cv::Vec3b>& cols,
-        const std::vector<cv::Mat>& images,
-        const std::vector<CameraParams>& cams);
-
-    void textureMeshFromImages(
-        pcl::PolygonMesh& mesh,
-        const std::vector<cv::Mat>& images,
-        const std::vector<CameraParams>& cams);
 
 private:
     ReconstructionConfig m_config;
-    
+
     // Dữ liệu
     std::vector<QString> imageFiles;
     std::vector<cv::Mat> images;
     std::vector<std::vector<cv::KeyPoint>> keypoints;
     std::vector<cv::Mat> descriptors;
-    cv::Ptr<cv::Feature2D> detector;
 
     cv::Mat K_fallback; // intrinsic khi không có params
     cv::Mat distCoeffs; // (bỏ qua distortion)
@@ -90,34 +76,34 @@ private:
     // Ground truth params
     std::vector<CameraParams> camParams;
     bool hasGroundTruthParams = false;
-    bool m_usedTrackBasedGroundTruth = false;
 
     // Kết quả
     std::vector<cv::Point3f> points3D;
     std::vector<cv::Vec3b> colors;
 
-    // Hàm nội bộ
+    // Lý do thất bại gần nhất (xem errorString())
+    QString m_lastError;
+
+    // Predicate hủy cooperative — sống trong đúng một lần reconstruct().
+    // Wrapper reconstruct() set trước / clear sau reconstructImpl().
+    std::function<bool()> m_shouldCancel;
+
+    /// true nếu caller đã yêu cầu hủy kể từ checkpoint gần nhất.
+    bool cancelRequested() const { return m_shouldCancel && m_shouldCancel(); }
+
+    /// Checkpoint hủy: set m_lastError + trả true nếu đã yêu cầu hủy.
+    bool abortIfCancelled();
+
+    // Các bước của reconstruct() — tách ra để orchestrator dễ đọc,
+    // mỗi bước xử lý đúng một việc.
+    bool reconstructImpl();
     void extractFeatures(int idx);
-    void matchFeatures(int idx1, int idx2, std::vector<cv::DMatch> &goodMatches);
-    bool estimatePoseFromMatches(const std::vector<cv::Point2f> &pts1,
-                                 const std::vector<cv::Point2f> &pts2, cv::Mat &R,
-                                 cv::Mat &t);
-    void doTriangulate(const cv::Mat &P0, const cv::Mat &P1,
-                       const std::vector<cv::Point2f> &pts0,
-                       const std::vector<cv::Point2f> &pts1,
-                       std::vector<cv::Point3f> &outPts);
-    double computeReprojectionError(const cv::Mat &P, const cv::Point3f &pt3d,
-                                    const cv::Point2f &pt2d);
-
-    // Hai phương thức reconstruct riêng
-    bool reconstructWithGroundTruth();
-    bool reconstructWithEstimatedPose();
-
-    PointCloudT::Ptr convertToPCLCloud(const std::vector<cv::Point3f> &pts,
-                                       const std::vector<cv::Vec3b> &cols) const;
-    void convertFromPCLCloud(PointCloudT::Ptr cloud,
-                             std::vector<cv::Point3f> &pts,
-                             std::vector<cv::Vec3b> &cols);
+    void computeCachePaths(QString &cachePath, QString &meshCachePath) const;
+    bool loadFromCache(const QString &cachePath, const QString &meshCachePath);
+    bool extractAllFeatures();
+    bool runSfMBranch();
+    void finalizeReconstruction(const QString &cachePath,
+                                const QString &meshCachePath);
 };
 
 #endif

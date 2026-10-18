@@ -5,9 +5,10 @@
 #include "MailMessageFormatter.h"
 #include "MailSettingsDialog.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "CustomProgressDialog.h"
 #include "ModernMessageBox.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 
 #include <QAction>
 #include <QApplication>
@@ -298,18 +299,18 @@ void MailDockWidget::refreshInbox()
     if (!m_mail) return;
     setBusy(true);
 
-    auto *progress = new CustomProgressDialog(m_ctx->mainWindow());
+    auto *progress = m_ctx->shell()->getProgressDialog();
     progress->setLabelText(m_ctx->translate("mail.loading_inbox"));
     progress->setRange(0, 0);
-    connect(progress, &CustomProgressDialog::stopRequested, progress, &CustomProgressDialog::hide);
+    connect(progress, &CustomProgressDialog::stopRequested, progress, &CustomProgressDialog::hide, Qt::UniqueConnection);
     progress->show();
     progress->centerOnWidget(m_dock);
-    QApplication::processEvents();
+    // Repaint without re-entering user input (see ViewerPlugin).
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     auto *watcher = new QFutureWatcher<QPair<QList<MailMessage>, QString>>(this);
     connect(watcher, &QFutureWatcher<QPair<QList<MailMessage>, QString>>::finished, this, [this, watcher, progress]() {
         progress->hide();
-        progress->deleteLater();
         const auto result = watcher->result();
         setBusy(false);
         watcher->deleteLater();
@@ -467,7 +468,7 @@ void MailDockWidget::loadFilterSettings()
 {
     m_filterKeywords.clear();
 
-    auto *um = UserManager::instance();
+    auto *um = m_ctx->services()->get<IUserManager>();
     if (um) {
         QString username = um->currentUsername();
         QString customFilters = um->getUserPref(username, "mail_filter_keywords", "");
@@ -484,7 +485,7 @@ void MailDockWidget::loadFilterSettings()
 
 void MailDockWidget::saveFilterSettings()
 {
-    auto *um = UserManager::instance();
+    auto *um = m_ctx->services()->get<IUserManager>();
     if (!um) return;
 
     QStringList customKeywords;

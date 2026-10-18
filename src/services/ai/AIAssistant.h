@@ -14,10 +14,15 @@
 #include "Global.h"
 #include "IAIAssistantService.h"
 
+class ILanguageService;
+class IUserManager;
+class IAppPaths;
+
 class APP_EXPORT AIAssistant : public IAIAssistantService {
     Q_OBJECT
 public:
-    explicit AIAssistant(QObject *parent = nullptr);
+    explicit AIAssistant(ILanguageService* lang, IUserManager* users,
+                         IAppPaths* paths, QObject *parent = nullptr);
     ~AIAssistant();
 
     void startServer(int modelIndex) override;
@@ -65,6 +70,9 @@ private slots:
     void onReplyFinished(QNetworkReply* reply);
 
 private:
+    ILanguageService* m_lang = nullptr;  ///< injected, never null in practice
+    IUserManager* m_users = nullptr;     ///< injected, never null in practice
+    IAppPaths* m_paths = nullptr;        ///< injected by AppShell (composition root)
     struct QueuedCompletionRequest {
         QString sessionId;
         QJsonObject payload;
@@ -100,6 +108,10 @@ private:
     bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
     void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
     void startServerProcess(int modelIndex);
+    /// Clears all in-flight request state (queued requests, pending replies,
+    /// pending UI-action sessions) and resets thinking/recovery flags.
+    /// Called whenever the backend generation is torn down (stop/restart).
+    void resetTransientRequestState();
     void enqueueCompletionRequest(const QString &sessionId, const QJsonObject &payload, int insertAfterIndex = -1);
     void processNextQueuedRequest();
     void saveAllSessions();

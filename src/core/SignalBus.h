@@ -44,16 +44,6 @@ signals:
 
     // --- App events ---
     void themeChanged(const QString &themeName);
-
-    /**
-     * Signal chung cho plugin giao tiếp với nhau.
-     * @param pluginName  Tên plugin phát signal
-     * @param event       Tên sự kiện (e.g. "modelLoaded", "exportDone")
-     * @param data        Dữ liệu kèm theo (có thể là QVariantMap)
-     */
-    void pluginEvent(const QString &pluginName,
-                     const QString &event,
-                     const QVariant &data);
 };
 
 #endif // SIGNALBUS_H

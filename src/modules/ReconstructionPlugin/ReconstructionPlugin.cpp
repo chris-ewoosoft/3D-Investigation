@@ -1,13 +1,11 @@
 #include "ReconstructionPlugin.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
 #include "IViewerService.h"
 #include "ISceneService.h"
 #include "IReconstructionService.h"
-#include "Image2DLoader.h"
 #include "SignalBus.h"
-#include "ReconstructThread.h"
-#include "LanguageManager.h"
 #include "../../utils/CustomProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
 #include <QMessageBox>
@@ -39,8 +37,8 @@
 #include <QListWidgetItem>
 #include <QStyle>
 #include "ReconstructionRibbonUI.h"
-#include "AppConfig.h"
-#include "UserManager.h"
+#include "IAppPaths.h"
+#include "IUserManager.h"
 
 void ReconstructionPlugin::initialize(IAppContext* context) {
     m_ctx = context;
@@ -51,11 +49,40 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
         qWarning() << "[ReconstructionPlugin] IReconstructionService not found in ServiceRegistry!";
     }
 
-    m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
+    m_progressDialog = m_ctx->shell()->getProgressDialog();
     connect(m_progressDialog, &CustomProgressDialog::stopRequested,
             this, &ReconstructionPlugin::onProgressStopped);
 
-    QMenu* reconMenu = m_ctx->getMenu("recon_menu");
+    // Reconstruction now runs inside the service's own worker; the plugin
+    // only reacts to the interface signal (connected once, app lifetime).
+    connect(m_reconSvc, &IReconstructionService::reconstructFinished, this,
+            [this](bool success, const QString& errorMessage) {
+        if (m_progressDialog) m_progressDialog->hide();
+        if (m_cancelRequested) {
+            m_cancelRequested = false;
+            return; // "cancelled" notice already shown by onProgressStopped
+        }
+
+        const int pointCount = m_reconSvc ? (int)m_reconSvc->getPointCloud().size() : 0;
+
+        // Emit lifecycle signal via SignalBus
+        emit m_ctx->signalBus()->reconstructionFinished(success, pointCount);
+
+        if (!success || pointCount == 0) {
+            QString msg = m_ctx->translate("recon.failed_msg");
+            if (!errorMessage.isEmpty())
+                msg += QStringLiteral("\n\n") + errorMessage; // chẩn đoán từ pipeline
+            ModernMessageBox::warning(m_ctx->mainWindow(),
+                m_ctx->translate("recon.failed_title"), msg);
+        } else {
+            onTogglePointCloud(true);
+            ModernMessageBox::information(m_ctx->mainWindow(),
+                m_ctx->translate("recon.success_title"),
+                m_ctx->translate("recon.success_msg").arg(pointCount));
+        }
+    }, Qt::QueuedConnection);
+
+    QMenu* reconMenu = m_ctx->shell()->getMenu("recon_menu");
     reconMenu->clear();
 
     reconMenu->addAction(m_ctx->translate("recon.load_images"), this, &ReconstructionPlugin::onLoadMultipleImages);
@@ -74,7 +101,8 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ReconstructionPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
             [this](const QString &action, const QVariantMap &parameters) {
-        const QString sampleFolder = QDir(AppConfig::instance().projectRootDir())
+        auto* paths = m_ctx->services()->get<IAppPaths>();
+        const QString sampleFolder = QDir(paths ? paths->projectRootDir() : QString())
                                          .filePath("3DRecontruction/templeRing");
         bool handled = false;
         if (action == "reconstruction.load_images") {
@@ -105,10 +133,8 @@ void ReconstructionPlugin::initialize(IAppContext* context) {
 }
 
 void ReconstructionPlugin::cleanup() {
-    if (m_currentReconstructThread) {
-        m_currentReconstructThread->terminate();
-        m_currentReconstructThread->wait();
-    }
+    // Service owns the worker thread now; just make it stop.
+    if (m_reconSvc) m_reconSvc->stopReconstruction();
 }
 void ReconstructionPlugin::onLoadMultipleImages() {
     QString folderPath = m_agentImageFolder;
@@ -139,7 +165,8 @@ void ReconstructionPlugin::onLoadMultipleImages() {
         m_progressDialog->setRange(0, 0);
         m_progressDialog->show();
         m_progressDialog->centerOnWidget();
-        QApplication::processEvents();
+        // Repaint without re-entering user input (see ViewerPlugin).
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
     }
 
     m_ctx->settings()->setLastUsedPath("recon", QFileInfo(fileNames.first()).absolutePath());
@@ -174,7 +201,7 @@ void ReconstructionPlugin::onLoadMultipleImages() {
     m_ctx->scene()->clear2DTexture();
 
     // Display the first image on the VTK scene
-    vtkSmartPointer<vtkActor> actor = Image2DLoader::load(fileNames.first());
+    vtkSmartPointer<vtkActor> actor = m_ctx->scene()->loadImageActor(fileNames.first());
     if (actor) {
         m_ctx->scene()->setTextureActor(actor);
         m_ctx->scene()->renderer()->ResetCamera();
@@ -245,13 +272,14 @@ void ReconstructionPlugin::onRunReconstruction() {
     m_progressDialog->setRange(0, 0);
     m_progressDialog->show();
     m_progressDialog->centerOnWidget(); // Centers on MainWindow by default
-    QApplication::processEvents();
+    // Repaint without re-entering user input (see ViewerPlugin).
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     // Lấy IReconstructionService interface thay vì pipeline cụ thể
     if (!m_reconSvc) return;
 
     // Apply configuration from Settings
-    auto* um = UserManager::instance();
+    auto* um = m_ctx->services()->get<IUserManager>();
     if (um) {
         QString username = um->currentUsername();
         int density = um->getUserPref(username, "recon_density", "1").toInt();
@@ -260,34 +288,15 @@ void ReconstructionPlugin::onRunReconstruction() {
         m_reconSvc->configure(density, maxFeatures, autoClean);
     }
 
-    m_currentReconstructThread = new ReconstructThread(m_reconSvc, this);
-    QPointer<CustomProgressDialog> progressPtr(m_progressDialog);
-    connect(m_currentReconstructThread, &QThread::finished, this, [this, progressPtr]() {
-        if (progressPtr) progressPtr->hide();
-        if (!m_currentReconstructThread) return;
-
-        bool success  = m_currentReconstructThread->isSuccess();
-        int pointCount = m_reconSvc ? (int)m_reconSvc->getPointCloud().size() : 0;
-        m_currentReconstructThread->deleteLater();
-        m_currentReconstructThread = nullptr;
-
-        // Emit lifecycle signal via SignalBus
-        emit m_ctx->signalBus()->reconstructionFinished(success, pointCount);
-
-        if (!success || pointCount == 0) {
-            ModernMessageBox::warning(m_ctx->mainWindow(),
-                m_ctx->translate("recon.failed_title"),
-                m_ctx->translate("recon.failed_msg"));
-        } else {
-            onTogglePointCloud(true);
-            ModernMessageBox::information(m_ctx->mainWindow(),
-                m_ctx->translate("recon.success_title"),
-                m_ctx->translate("recon.success_msg").arg(pointCount));
-        }
-    }, Qt::QueuedConnection);
-
+    m_cancelRequested = false;
     emit m_ctx->signalBus()->reconstructionStarted();
-    m_currentReconstructThread->start();
+    if (!m_reconSvc->reconstruct()) {
+        // Busy: another reconstruction started and was never stopped.
+        if (m_progressDialog) m_progressDialog->hide();
+        ModernMessageBox::warning(m_ctx->mainWindow(),
+            m_ctx->translate("recon.failed_title"),
+            m_ctx->translate("recon.busy_msg"));
+    }
 }
 
 void ReconstructionPlugin::onTogglePointCloud(bool forceShow) {
@@ -343,30 +352,29 @@ void ReconstructionPlugin::onShowPointCloud() {
     m_ctx->scene()->setPointCloudActor(actor);
     m_ctx->scene()->renderer()->ResetCamera();
     m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
 }
 
 void ReconstructionPlugin::onHidePointCloud() {
     m_ctx->scene()->clearPointCloud();
     m_ctx->scene()->setPointCloudVisible(false);
-    m_ctx->updateMenuStates();
+    m_ctx->shell()->updateMenuStates();
     m_ctx->scene()->vtkWidget()->renderWindow()->Render();
 }
 
 void ReconstructionPlugin::onProgressStopped() {
     if (m_progressDialog) m_progressDialog->hide();
 
-    if (m_currentReconstructThread) {
-        m_currentReconstructThread->terminate();
-        m_currentReconstructThread->wait();
-        m_currentReconstructThread->deleteLater();
-        m_currentReconstructThread = nullptr;
-        ModernMessageBox::information(m_ctx->mainWindow(), m_ctx->translate("recon.cancelled"), m_ctx->translate("recon.cancelled_desc"));
+    if (m_reconSvc && m_reconSvc->isRunning()) {
+        m_cancelRequested = true;
+        m_reconSvc->stopReconstruction();
+        ModernMessageBox::information(m_ctx->mainWindow(),
+            m_ctx->translate("recon.cancelled"), m_ctx->translate("recon.cancelled_desc"));
     }
 }
 
 void ReconstructionPlugin::updateActions() {
-    QMenu* reconMenu = m_ctx->getMenu("recon_menu");
+    QMenu* reconMenu = m_ctx->shell()->getMenu("recon_menu");
     if (reconMenu) {
         reconMenu->setTitle(m_ctx->translate("recon.menu"));
     }

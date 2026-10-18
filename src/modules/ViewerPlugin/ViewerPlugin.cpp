@@ -1,13 +1,12 @@
 #include "ViewerPlugin.h"
-#include "MainWindow.h"
+#include <QMainWindow>
 #include "IAppContext.h"
+#include "IAppPaths.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
 #include "IViewerService.h"
 #include "ISceneService.h"
 #include "SignalBus.h"
-#include "Image2DLoader.h"
-#include "Model3DLoader.h"
-#include "DicomLoader.h"
 #include "AppConstants.h"
 #include <QFileDialog>
 #include <QFileInfo>
@@ -21,8 +20,6 @@
 #include <QStyle>
 #include <QPainter>
 #include <QLinearGradient>
-#include "LanguageManager.h"
-#include "AppConfig.h"
 #include "../../utils/CustomProgressDialog.h"
 #include <QApplication>
 #include <vtkRenderWindow.h>
@@ -37,7 +34,7 @@
 
 void ViewerPlugin::initialize(IAppContext* context) {
     m_ctx = context;
-    m_progressDialog = new CustomProgressDialog(m_ctx->mainWindow());
+    m_progressDialog = m_ctx->shell()->getProgressDialog();
     m_viewModel = new ViewerViewModel(m_ctx, this);
     
     connect(m_viewModel, &ViewerViewModel::loadingStarted, this, [this](const QString& msg){
@@ -47,13 +44,15 @@ void ViewerPlugin::initialize(IAppContext* context) {
             m_progressDialog->setValue(0);
             m_progressDialog->show();
             m_progressDialog->centerOnWidget();
-            QApplication::processEvents();
+            // Keep the dialog painted without re-entering user input — a nested
+            // event loop during a synchronous load is a re-entrancy hazard.
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         }
     });
     connect(m_viewModel, &ViewerViewModel::progressUpdated, this, [this](int percent){
         if (m_progressDialog) {
             m_progressDialog->setValue(percent);
-            QApplication::processEvents();
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
         }
     });
     connect(m_viewModel, &ViewerViewModel::loadingFinished, this, [this](){
@@ -66,7 +65,7 @@ void ViewerPlugin::initialize(IAppContext* context) {
         }
     });
     
-    QMenu* viewerMenu = m_ctx->getMenu("viewer_menu");
+    QMenu* viewerMenu = m_ctx->shell()->getMenu("viewer_menu");
     viewerMenu->clear();
     
     m_load2DAct = viewerMenu->addAction(m_ctx->translate("viewer.load_2d"), this, &ViewerPlugin::onLoad2DImages);
@@ -83,7 +82,7 @@ void ViewerPlugin::initialize(IAppContext* context) {
     connect(m_navUI->btnAutoNext(), &QPushButton::clicked, this, &ViewerPlugin::onAutoNext);
 
     // Inject Load/Data tools into tab.view panel
-    if (QWidget* panel = m_ctx->getTabPanel("tab.view")) {
+    if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.view")) {
         m_ribbonUI = new ViewerRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnLoad2D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad2DImages);
         connect(m_ribbonUI->btnLoad3D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad3DImages);
@@ -96,7 +95,8 @@ void ViewerPlugin::initialize(IAppContext* context) {
     connect(m_ctx->signalBus(), &SignalBus::languageChanged, this, &ViewerPlugin::updateActions);
     connect(m_ctx->signalBus(), &SignalBus::agentUiActionRequested, this,
             [this](const QString &action, const QVariantMap &parameters) {
-        const QDir root(AppConfig::instance().projectRootDir());
+        auto* paths = m_ctx->services()->get<IAppPaths>();
+        const QDir root(paths ? paths->projectRootDir() : QString());
         bool handled = false;
         if (action == "viewer.load_2d") {
             const QDir images(root.filePath("3DRecontruction/templeRing"));
@@ -195,7 +195,7 @@ void ViewerPlugin::onAutoNavigationChanged(bool active, bool isNext) {
 }
 
 void ViewerPlugin::updateActions() {
-    QMenu* viewerMenu = m_ctx->getMenu("viewer_menu");
+    QMenu* viewerMenu = m_ctx->shell()->getMenu("viewer_menu");
     if (viewerMenu) {
         viewerMenu->setTitle(m_ctx->translate("viewer.menu"));
     }

@@ -450,5 +450,27 @@ class ScopedVerificationTests(unittest.TestCase):
             )
 
 
+class GitCommitResolutionTests(unittest.TestCase):
+    def test_successful_git_resolution(self) -> None:
+        fake_sha = "a" * 40
+        mock_res = mock.Mock(returncode=0, stdout=f"{fake_sha}\n")
+        with mock.patch("subprocess.run", return_value=mock_res):
+            self.assertEqual(manifest_mod.resolve_git_commit(Path(".")), fake_sha)
+
+    def test_git_failure_returns_unversioned(self) -> None:
+        mock_res = mock.Mock(returncode=128, stdout="fatal: not a git repo\n")
+        with mock.patch("subprocess.run", return_value=mock_res):
+            self.assertEqual(manifest_mod.resolve_git_commit(Path(".")), "unversioned")
+
+    def test_invalid_sha_returns_unversioned(self) -> None:
+        mock_res = mock.Mock(returncode=0, stdout="short-sha\n")
+        with mock.patch("subprocess.run", return_value=mock_res):
+            self.assertEqual(manifest_mod.resolve_git_commit(Path(".")), "unversioned")
+
+    def test_subprocess_oserror_returns_unversioned(self) -> None:
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(manifest_mod.resolve_git_commit(Path(".")), "unversioned")
+
+
 if __name__ == "__main__":
     unittest.main()

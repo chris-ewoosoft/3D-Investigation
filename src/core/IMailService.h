@@ -34,6 +34,10 @@ struct MailMessage {
  */
 class IMailService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IMailService";
+
     virtual ~IMailService() = default;
 
     /**

@@ -80,7 +80,7 @@ AIComputerVision/
 | `test_backend.py` | Adapter `UltralyticsBackend` thật, chạy trên package `ultralytics` giả: resolve checkpoint, gắn callback, đối số export, nhánh thiếu dependency. |
 | `test_cli.py` | wiring argparse, ánh xạ đối số → `TrainConfig` và mã thoát — `main()` là nơi duy nhất biến thất bại thành mã process. |
 | `test_config.py` | Model contract (map spec, tên export không trùng), cách resolve lựa chọn, mặc định `TrainConfig`, override đường dẫn `--models-dir`/`--weights-dir`. |
-| `test_contract.py` | Ràng buộc hai chiều với `src/app/AppConstants.h` (tên file ONNX) và `MAX_OPSET` với ONNX Runtime được pin trong `CMakeLists.txt`. |
+| `test_contract.py` | Ràng buộc hai chiều với `src/core/AppConstants.h` (tên file ONNX) và `MAX_OPSET` với ONNX Runtime được pin trong `CMakeLists.txt`. |
 | `test_dataset.py` | Kiểm tra `data.yaml`: khóa bắt buộc, di chuyển bằng `path:`, tham chiếu tuyệt đối/tương đối/glob và các dạng không phải chuỗi mà framework tự resolve. |
 | `test_fsio.py` | Primitive hệ thống tệp: digest, ghi nguyên tử, sao chép có backup, và toàn bộ quy tắc sở hữu của advisory lock (từ chối lock đang sống, đánh cắp lock cũ, không mở lock của chủ khác). |
 | `test_manifest.py` | Tính toàn vẹn và provenance của manifest: digest, migration `schema_version`, cách ly manifest hỏng, xác minh hai chiều. |
@@ -265,7 +265,7 @@ khoảng `0..1` (precision, recall, mAP, fitness), không dành cho loss.
 
 ## Hợp đồng mô hình (C++ ↔ Python)
 
-Tên file xuất bản là một hợp đồng với `src/app/AppConstants.h`. Thay đổi bên
+Tên file xuất bản là một hợp đồng với `src/core/AppConstants.h`. Thay đổi bên
 nào cũng phải được phản chiếu sang bên kia; `tests/test_contract.py` làm
 đỏ CI nếu hai bên lệch nhau.
 

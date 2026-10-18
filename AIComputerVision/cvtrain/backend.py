@@ -87,6 +87,9 @@ class TrainingBackend(Protocol[H]):
     def train(self, spec: ModelSpec, cfg: TrainConfig, on_epoch: EpochCallback) -> TrainedModel[H]:
         """Train ``spec`` from its base checkpoint, reporting per-epoch progress."""
 
+    def check_device(self, cfg: TrainConfig) -> tuple[bool, str]:
+        """Validate device availability against the ML runtime environment."""
+
     def export(self, model: TrainedModel[H], cfg: TrainConfig) -> Path:
         """Export ``model`` to ONNX and return the path of the generated file."""
 
@@ -217,6 +220,20 @@ class UltralyticsBackend:
         results = model.train(project=str(project), name=name, **train_kwargs(cfg))
         run_dir = Path(getattr(model.trainer, "save_dir", project / name))
         return TrainedModel(metrics=metrics_from(results), run_dir=run_dir, handle=model)
+
+    def check_device(self, cfg: TrainConfig) -> tuple[bool, str]:
+        device = (cfg.device or "").strip().lower()
+        if not device or device == "auto" or device == "cpu":
+            return True, "device ok"
+        if "cuda" in device or device.isdigit() or any(token.isdigit() for token in device.split(",")):
+            try:
+                import torch
+
+                if not torch.cuda.is_available():
+                    return False, f"device {cfg.device!r} requested but CUDA is not available in torch"
+            except ImportError:
+                pass
+        return True, "device ok"
 
     def export(self, model: TrainedModel[Any], cfg: TrainConfig) -> Path:
         return Path(model.handle.export(format="onnx", opset=cfg.opset))

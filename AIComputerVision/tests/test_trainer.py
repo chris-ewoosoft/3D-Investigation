@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from cvtrain import gate
 from cvtrain import manifest as manifest_mod
 from cvtrain.backend import TrainedModel, UltralyticsBackend
 from cvtrain.checks import module_available
@@ -43,6 +44,11 @@ class FakeBackend:
         # without asking for any framework module: the offline suite must not
         # need the ML stack to exercise this path.
         return ()
+
+    def check_device(self, cfg: TrainConfig) -> tuple[bool, str]:
+        if cfg.device == "invalid_hardware":
+            return False, "device invalid_hardware not found"
+        return True, "device ok"
 
     def prepare(self, cfg: TrainConfig) -> None:
         self.prepared = cfg
@@ -292,6 +298,14 @@ class FailurePathTests(_SandboxedTestCase):
         failures = [line for line in captured.output if "Preflight failure" in line and "dependency.tensorboard" in line]
         self.assertEqual(len(failures), 1)
 
+    def test_runtime_device_failure_fails_in_preflight(self) -> None:
+        cfg = _config(self.root, device="invalid_hardware")
+        with self.assertLogs("cvtrain.trainer", level="INFO") as captured:
+            code = run(cfg, backend=FakeBackend())
+        self.assertEqual(code, ExitCode.PREFLIGHT)
+        failures = [line for line in captured.output if "runtime.device" in line]
+        self.assertEqual(len(failures), 2)  # report summary + explicit failure
+
 
 class ManifestVerificationTests(_SandboxedTestCase):
     def test_verification_problems_fail_the_run(self) -> None:
@@ -366,6 +380,16 @@ class ProvenanceRecordingTests(_SandboxedTestCase):
 
         entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_SPECS["det"].output]
         self.assertNotIn("dataset_sha256", entry)
+        self.assertNotIn("dataset_content_sha256", entry)
+
+    def test_records_git_commit_and_dataset_content_sha256(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        self.assertIn("git_commit", manifest["last_run"])
+        entry = manifest["entries"][MODEL_SPECS["det"].output]
+        self.assertIn("dataset_content_sha256", entry)
+        self.assertEqual(len(entry.get("dataset_content_sha256") or ""), 64)
 
 
 class ConfirmRetrainTests(_SandboxedTestCase):
@@ -547,6 +571,33 @@ class SkipUnchangedTests(_SandboxedTestCase):
 
         _, backend = self._run(models=("det",), skip_unchanged=True)
         self.assertIn("train:det", backend.calls)
+
+    def test_a_changed_dataset_content_inventory_is_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        new_img = cfg.data_yaml.parent / "images" / "train" / "new.jpg"
+        new_img.write_bytes(b"new-image-data")
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_missing_dataset_when_content_digest_expected_is_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        cfg.data_yaml = cfg.data_yaml.parent / "ghost.yaml"
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        self.assertFalse(gate.already_current(MODEL_SPECS["det"], cfg, manifest, FakeBackend.version))
+    def test_missing_content_digest_in_entry_still_allows_skip(self) -> None:
+        # Old manifest entries lack dataset_content_sha256; the content check
+        # should be silently skipped (not treated as a mismatch).
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_SPECS["det"].output].pop("dataset_content_sha256", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertEqual(backend.calls, ["prepare"])
 
     def test_a_backend_upgrade_is_trained(self) -> None:
         # A newer ultralytics exports differently, so the recorded artifact no

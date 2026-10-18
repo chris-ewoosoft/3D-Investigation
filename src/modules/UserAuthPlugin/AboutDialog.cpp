@@ -1,8 +1,7 @@
 #include "AboutDialog.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
 #include "LicenseActivationDialog.h"
-#include "LanguageManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,7 +18,7 @@ AboutDialog::AboutDialog(const QString &username, QWidget *parent)
 }
 
 void AboutDialog::setupUi() {
-    auto *um = UserManager::instance();
+    auto *um = UserAuthPlugin::users();
     UserInfo u = um->userInfo(m_username);
     int daysLeft = um->daysRemaining(m_username);
     QString status = um->licenseStatusStr(m_username);

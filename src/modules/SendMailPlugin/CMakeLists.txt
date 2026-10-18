@@ -19,10 +19,8 @@ add_library(SendMailPlugin SHARED
 
 target_include_directories(SendMailPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/app
     ${PROJECT_SOURCE_DIR}/src/core
     ${PROJECT_SOURCE_DIR}/src/utils
-    ${PROJECT_SOURCE_DIR}/src/services/mail
     ${VTK_INCLUDE_DIRS}
 )
 
@@ -36,10 +34,8 @@ target_link_libraries(SendMailPlugin
         Qt6::Network
         Qt6::Concurrent
         ${VTK_LIBRARIES}
-        3D-Reconstruction
+        AppCore
 )
-
-set_target_properties(3D-Reconstruction PROPERTIES ENABLE_EXPORTS ON)
 
 set_target_properties(SendMailPlugin PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins"

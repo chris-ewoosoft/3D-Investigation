@@ -1,13 +1,11 @@
 #ifndef RECONSTRUCTION_RIBBON_UI_H
 #define RECONSTRUCTION_RIBBON_UI_H
 
-#include <QObject>
+#include "AbstractRibbonPanel.h"
 
-class IAppContext;
 class QToolButton;
-class QAction;
 
-class ReconstructionRibbonUI : public QObject {
+class ReconstructionRibbonUI : public AbstractRibbonPanel {
     Q_OBJECT
 public:
     explicit ReconstructionRibbonUI(IAppContext* ctx, QObject* parent = nullptr);
@@ -22,7 +20,6 @@ public:
     QToolButton* btnToggleCloud() const { return m_btnToggleCloud; }
 
 private:
-    IAppContext* m_ctx = nullptr;
     QToolButton* m_btnLoad = nullptr;
     QToolButton* m_btnRun = nullptr;
     QToolButton* m_btnToggleCloud = nullptr;

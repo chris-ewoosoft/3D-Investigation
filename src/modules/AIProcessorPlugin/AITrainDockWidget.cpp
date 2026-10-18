@@ -1,6 +1,6 @@
 #include "AITrainDockWidget.h"
 #include "IAppContext.h"
-#include "AppConfig.h"
+#include "IAppPaths.h"
 #include "AppConstants.h"
 #include "../../utils/ModernMessageBox.h"
 #include <QVBoxLayout>
@@ -16,7 +16,7 @@
 #include <QTimer>
 
 AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
-    : QDockWidget("🚀 AI Training", parent), m_ctx(ctx) 
+    : QDockWidget(ctx->translate("aiproc.train_title"), parent), m_ctx(ctx) 
 {
     setMinimumWidth(520);
     QWidget     *dw = new QWidget(this);
@@ -30,8 +30,8 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     tl->setSpacing(6);
     topBar->setStyleSheet("background:#1a1a1f; border-bottom:1px solid #2e2e3a;");
     
-    QLabel *titleLabel = new QLabel("🚀 AI Training", topBar);
-    titleLabel->setStyleSheet("color:#ddd; font-weight:bold; font-size:14px;");
+    m_titleLabel = new QLabel(m_ctx->translate("aiproc.train_title"), topBar);
+    m_titleLabel->setStyleSheet("color:#ddd; font-weight:bold; font-size:14px;");
 
     trainProgressBar = new QProgressBar(topBar);
     trainProgressBar->setTextVisible(false);
@@ -42,7 +42,7 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     trainProgressBar->setRange(0, 0);
     trainProgressBar->hide();
     
-    btnStopTrain = new QPushButton("Stop", topBar);
+    btnStopTrain = new QPushButton(m_ctx->translate("aiproc.stop"), topBar);
     btnStopTrain->setStyleSheet(
         "QPushButton { background:#d32f2f; color:#fff; border:none; border-radius:6px; padding:4px 12px; font-weight:bold; height: 24px; }"
         "QPushButton:hover { background:#b71c1c; }"
@@ -57,7 +57,7 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
         "QPushButton:hover { color:#ffffff; background:#ef4444; border-radius:15px; }"
     );
     
-    tl->addWidget(titleLabel, 0);
+    tl->addWidget(m_titleLabel, 0);
     tl->addStretch(1);
     tl->addWidget(trainProgressBar, 2);
     tl->addWidget(btnStopTrain, 0);
@@ -86,8 +86,7 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     connect(trainProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, &AITrainDockWidget::onTrainProcessFinished);
     connect(trainProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error != QProcess::FailedToStart) return;
-        trainLogBrowser->append("<font color='#d32f2f'>Không thể khởi động Python. Hãy kiểm tra Python trong PATH "
-                                "hoặc đặt biến môi trường RECONSTRUCTION_PYTHON.</font>");
+        trainLogBrowser->append("<font color='#d32f2f'>" + m_ctx->translate("aiproc.python_start_failed") + "</font>");
         trainProgressBar->hide();
         btnStopTrain->hide();
     });
@@ -100,11 +99,19 @@ AITrainDockWidget::~AITrainDockWidget() {
     }
 }
 
+void AITrainDockWidget::retranslate() {
+    setWindowTitle(m_ctx->translate("aiproc.train_title"));
+    if (m_titleLabel) m_titleLabel->setText(m_ctx->translate("aiproc.train_title"));
+    if (btnStopTrain) btnStopTrain->setText(m_ctx->translate("aiproc.stop"));
+}
+
 void AITrainDockWidget::startTraining(bool autoConfirm) {
     show();
     if (trainProcess->state() == QProcess::NotRunning) {
-        QString scriptPath = AppConfig::instance().aiComputerVisionDir() + "/" + AppConstants::AIProcessor::trainScript();
-        QString modelsPath = AppConfig::instance().modelsDir();
+        auto* paths = m_ctx->services()->get<IAppPaths>();
+        if (!paths) return;
+        QString scriptPath = paths->aiComputerVisionDir() + "/" + AppConstants::AIProcessor::trainScript();
+        QString modelsPath = paths->modelsDir();
         const QStringList modelFiles = {
             AppConstants::AIProcessor::detectionModelFile(),
             AppConstants::AIProcessor::segmentationModelFile(),
@@ -120,13 +127,13 @@ void AITrainDockWidget::startTraining(bool autoConfirm) {
         dialog.setStyleSheet("QDialog { background-color: #1a1a1f; color: white; } QCheckBox { color: white; font-size: 14px; margin: 5px; }");
         
         QVBoxLayout *layout = new QVBoxLayout(&dialog);
-        QLabel* lbl = new QLabel("Select models to train:", &dialog);
+        QLabel* lbl = new QLabel(m_ctx->translate("aiproc.select_models"), &dialog);
         lbl->setStyleSheet("color: white; font-size: 14px; font-weight: bold;");
         layout->addWidget(lbl);
         
-        QCheckBox *chkDet = new QCheckBox("Detection (yolo11n)", &dialog);
-        QCheckBox *chkSeg = new QCheckBox("Segmentation (yolo11n-seg)", &dialog);
-        QCheckBox *chkTrack = new QCheckBox("Tracking (yolo11x-tracking)", &dialog);
+        QCheckBox *chkDet = new QCheckBox(m_ctx->translate("aiproc.train_model_det"), &dialog);
+        QCheckBox *chkSeg = new QCheckBox(m_ctx->translate("aiproc.train_model_seg"), &dialog);
+        QCheckBox *chkTrack = new QCheckBox(m_ctx->translate("aiproc.train_model_track"), &dialog);
         
         chkDet->setChecked(true);
         
@@ -149,18 +156,18 @@ void AITrainDockWidget::startTraining(bool autoConfirm) {
 
         if (!chkDet->isChecked() && !chkSeg->isChecked() && !chkTrack->isChecked()) {
             ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("ai.training"),
-                                      "Select at least one model to train.");
+                                      m_ctx->translate("aiproc.select_one_model"));
             return;
         }
 
         if (modelExists && !autoConfirm) {
-            if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
+            if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->mainWindow(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
                 return;
             }
         }
     
         trainLogBrowser->clear();
-        trainLogBrowser->append("<font color='#10a37f'>--- Bắt đầu tiến trình huấn luyện ---</font>");
+        trainLogBrowser->append("<font color='#10a37f'>" + m_ctx->translate("aiproc.train_started") + "</font>");
         trainProgressBar->setRange(0, 0);
         trainProgressBar->setValue(0);
         trainProgressBar->show();
@@ -190,7 +197,7 @@ void AITrainDockWidget::startTraining(bool autoConfirm) {
 void AITrainDockWidget::onStopTrain() {
     if (trainProcess->state() != QProcess::NotRunning) {
         trainProcess->kill();
-        trainLogBrowser->append("<font color='#d32f2f'>Đang dừng tiến trình...</font>");
+        trainLogBrowser->append("<font color='#d32f2f'>" + m_ctx->translate("aiproc.train_stopping") + "</font>");
         btnStopTrain->setEnabled(false);
         trainProgressBar->hide();
     }
@@ -198,7 +205,7 @@ void AITrainDockWidget::onStopTrain() {
 
 void AITrainDockWidget::closeTrainDock() {
     if (trainProcess->state() != QProcess::NotRunning) {
-        if (!ModernMessageBox::question(m_ctx->mainWindow(), m_ctx->translate("aiproc.warning"), m_ctx->translate("aiproc.train_running_warn"))) {
+        if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->mainWindow(), m_ctx->translate("common.warning"), m_ctx->translate("aiproc.train_running_warn"))) {
             return;
         }
         trainProcess->kill();
@@ -236,11 +243,11 @@ void AITrainDockWidget::onTrainProcessFinished(int exitCode, QProcess::ExitStatu
     trainProgressBar->hide();
     btnStopTrain->hide();
     if (exitStatus == QProcess::CrashExit) {
-        trainLogBrowser->append("<font color='#d32f2f'>Tiến trình bị gián đoạn (Crash).</font>");
+        trainLogBrowser->append("<font color='#d32f2f'>" + m_ctx->translate("aiproc.train_crashed") + "</font>");
     } else if (exitCode != 0) {
-        trainLogBrowser->append(QString("<font color='#d32f2f'>Có lỗi xảy ra (Mã lỗi: %1).</font>").arg(exitCode));
+        trainLogBrowser->append("<font color='#d32f2f'>" + m_ctx->translate("aiproc.train_error").arg(exitCode) + "</font>");
     } else {
-        trainLogBrowser->append("<font color='#10a37f'>Huấn luyện thành công!</font>");
-        ModernMessageBox::information(m_ctx->mainWindow(), m_ctx->translate("aiproc.success"), m_ctx->translate("aiproc.train_success"));
+        trainLogBrowser->append("<font color='#10a37f'>" + m_ctx->translate("aiproc.train_success") + "</font>");
+        ModernMessageBox::information(m_ctx->mainWindow(), m_ctx->translate("common.success"), m_ctx->translate("aiproc.train_success"));
     }
 }

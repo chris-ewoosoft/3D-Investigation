@@ -4,9 +4,13 @@
 #include <QString>
 #include <opencv2/core.hpp>
 
+class IAppPaths;
+
 namespace AIPredictionLogger {
 
-void logAsync(const QString &mode, const QString &sourceImagePath, const cv::Mat &resultImage);
+/// @param paths  injected path provider (resolved from the ServiceRegistry by
+///               the caller); a null pointer makes the call a no-op.
+void logAsync(IAppPaths* paths, const QString &mode, const QString &sourceImagePath, const cv::Mat &resultImage);
 
 }
 

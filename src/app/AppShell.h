@@ -2,6 +2,7 @@
 #define APPSHELL_H
 
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "IReconstructionService.h"
 #include "IAIService.h"
 #include "SignalBus.h"
@@ -20,6 +21,8 @@ class ReconstructionService;
 class AIService;
 class AIAssistant;
 class MailService;
+class SmtpOutbox;
+class ShellService;
 
 /**
  * @brief Concrete implementation của IAppContext — tách biệt hoàn toàn khỏi MainWindow.
@@ -48,38 +51,38 @@ public:
      */
     void initializeServices();
 
+    /**
+     * @brief Phase-2 services (reconstruction/AI/mail — heavy, non-UI).
+     * Idempotent; MainWindow calls this right before loadPlugins() so that
+     * plugins always find a fully populated registry.
+     */
+    void initializeDeferredServices();
+
     // ─── IAppContext ───────────────────────────────────────────────────────────
     ISceneService*    scene()      override;
     IViewerService*   viewer()     override;
     ISettingsService* settings()   override;
     QMainWindow*      mainWindow() override { return m_mainWindow; }
     SignalBus*        signalBus()  override { return m_signalBus; }
+    IShellService*    shell()      override;
     ServiceRegistry*  services()   override { return m_registry.get(); }
 
-    CustomProgressDialog*   getProgressDialog() override { return m_progressDialog; }
-
-    QMenu*    getMenu(const QString& id) override;
-    QMenuBar* menuBar() override;
-    void      updateMenuStates() override;
-    QWidget*  getTabPanel(const QString& tabName) override;
     QString   translate(const QString& key) override;
     void      setLanguage(const QString& lang) override;
 
-    // ─── Setters dùng bởi MainWindow sau khi UI build xong ───────────────────
-    void setMenuBar(QMenuBar* bar)        { m_menuBar = bar; }
-    void setProgressDialog(CustomProgressDialog* dlg) { m_progressDialog = dlg; }
-    void registerTabPanel(const QString& key, QWidget* panel);
+    // ─── Setters dùng bởi MainWindow sau khi UI build xong (wiring, not API) ─
+    void setMenuBar(QMenuBar* bar);
+    void setProgressDialog(CustomProgressDialog* dlg);
 
 private:
     // Injected from MainWindow
     QMainWindow*            m_mainWindow;
     QVTKOpenGLNativeWidget* m_vtkWidget;
-    QMenuBar*               m_menuBar       = nullptr;
-    CustomProgressDialog*   m_progressDialog = nullptr;
 
     // Owned services
     SignalBus*                                  m_signalBus    = nullptr;
     std::unique_ptr<ServiceRegistry>            m_registry;
+    std::unique_ptr<ShellService>               m_shellService;
     std::unique_ptr<SceneService>               m_sceneService;
     std::unique_ptr<ViewerService>              m_viewerService;
     std::unique_ptr<SettingsService>            m_settingsService;
@@ -87,12 +90,7 @@ private:
     std::unique_ptr<AIService>                  m_aiService;
     std::unique_ptr<AIAssistant>                m_aiAssistant;
     std::unique_ptr<MailService>                m_mailService;
-
-    // Tab panels map (key → QWidget*)
-    QMap<QString, QWidget*> m_tabPanels;
-    
-    // Cached menus
-    QMap<QString, QMenu*> m_menus;
+    std::unique_ptr<SmtpOutbox>                 m_outbox; ///< IOutgoingMail seam for UserManager
 };
 
 #endif // APPSHELL_H

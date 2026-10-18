@@ -80,6 +80,7 @@ cv::Size AIProcessor::inputSizeOf(const Ort::Session& session) {
 }
 
 bool AIProcessor::loadDetectionModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     detSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -97,6 +98,7 @@ bool AIProcessor::loadDetectionModel(const QString &modelPath) {
 }
 
 bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     segSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -115,6 +117,7 @@ bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
 }
 
 bool AIProcessor::loadTrackingModel(const QString &modelPath) {
+  std::unique_lock lock(m_sessionMutex);
   try {
     std::wstring w_modelPath = modelPath.toStdWString();
     trackingSession = std::make_unique<Ort::Session>(*env, w_modelPath.c_str(),
@@ -132,6 +135,7 @@ bool AIProcessor::loadTrackingModel(const QString &modelPath) {
 }
 
 cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
+  std::shared_lock lock(m_sessionMutex);
   if (!isDetModelLoaded || inputImage.empty()) {
     qWarning() << "Detection model not loaded or input image is empty.";
     return inputImage;
@@ -191,6 +195,7 @@ cv::Mat AIProcessor::runObjectDetection(const cv::Mat &inputImage) {
 }
 
 cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
+  std::shared_lock lock(m_sessionMutex);
   if (!isSegModelLoaded || inputImage.empty()) {
     qWarning() << "Segmentation model not loaded or input image is empty.";
     return inputImage;
@@ -296,6 +301,7 @@ void AIProcessor::resetTrackingState() {
 }
 
 cv::Mat AIProcessor::runTracking(const cv::Mat &inputImage) {
+  std::shared_lock sessionLock(m_sessionMutex);
   if (!isTrackingLoaded || inputImage.empty()) {
     qWarning() << "Tracking model not loaded or input image is empty.";
     return inputImage;

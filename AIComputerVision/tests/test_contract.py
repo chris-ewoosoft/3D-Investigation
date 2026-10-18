@@ -1,7 +1,7 @@
 """Cross-language contract test.
 
 The ONNX file names produced here are hard-coded expectations of the Qt app
-(``src/app/AppConstants.h``). This test fails if the two sides ever drift.
+(``src/core/AppConstants.h``). This test fails if the two sides ever drift.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from cvtrain.config import MODEL_SPECS
 from cvtrain.preflight import MAX_OPSET
 
-HEADER = Path(__file__).resolve().parents[2] / "src" / "app" / "AppConstants.h"
+HEADER = Path(__file__).resolve().parents[2] / "src" / "core" / "AppConstants.h"
 CMAKE = Path(__file__).resolve().parents[2] / "CMakeLists.txt"
 
 EXPECTED = {

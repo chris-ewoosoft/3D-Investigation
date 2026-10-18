@@ -31,10 +31,9 @@ void ViewerService::loadCurrentIndexImage() {
     if (currentImageIndex < 0 || currentImageIndex >= imageFileList.size()) return;
     current2DImagePath = QFileInfo(current2DImagePath).absolutePath() + "/" + imageFileList[currentImageIndex];
     
-    if (m_updateScene) {
-        m_ctx->scene()->setTextureActor(Image2DLoader::load(current2DImagePath));
-        m_ctx->scene()->vtkWidget()->renderWindow()->Render();
-    }
+    // Always render the current image when navigating so buttons update the main screen
+    m_ctx->scene()->setTextureActor(Image2DLoader::load(current2DImagePath));
+    m_ctx->scene()->vtkWidget()->renderWindow()->Render();
     
     emit m_ctx->signalBus()->imageIndexChanged(currentImageIndex, imageFileList.size());
 }

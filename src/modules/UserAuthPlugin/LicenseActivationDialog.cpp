@@ -1,7 +1,6 @@
 #include "LicenseActivationDialog.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
-#include "LanguageManager.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -121,34 +120,29 @@ void LicenseActivationDialog::setStatus(const QString &msg, bool ok) {
 }
 
 void LicenseActivationDialog::onActivate() {
-    UserManager *um = UserManager::instance();
+    IUserManager *um = UserAuthPlugin::users();
     bool success = false;
     QString msg;
+    AuthError code = AuthError::Unknown;
 
     if (m_trialRadio->isChecked()) {
-        success = um->activateTrial(m_username, msg);
+        success = um->activateTrial(m_username, msg, &code);
     } else {
         QString key = m_keyEdit->text();
         if (key.length() < 20) {
             setStatus(UserAuthPlugin::translate("license.err_length"), false);
             return;
         }
-        success = um->activateLicenseKey(m_username, key, msg);
+        success = um->activateLicenseKey(m_username, key, msg, &code);
     }
 
-    QString transMsg = msg;
+    // Branch on the structured code — never on the Vietnamese message text.
+    QString transMsg;
     if (success) {
         transMsg = UserAuthPlugin::translate("license.success_msg");
     } else {
-        if (msg == "User không tồn tại.") {
-            transMsg = UserAuthPlugin::translate("auth.no_user");
-        } else if (msg == "Tài khoản đã được kích hoạt.") {
-            transMsg = UserAuthPlugin::translate("license.err_already_activated");
-        } else if (msg == "License key không hợp lệ.") {
-            transMsg = UserAuthPlugin::translate("license.err_invalid_key");
-        } else if (msg == "License key đã được sử dụng.") {
-            transMsg = UserAuthPlugin::translate("license.err_used_key");
-        }
+        const QString key = IUserManager::authErrorKey(code);
+        transMsg = key.isEmpty() ? msg : UserAuthPlugin::translate(key);
     }
 
     setStatus(transMsg, success);

@@ -2,14 +2,30 @@
 #define ISCENESERVICE_H
 
 #include <QString>
-#include <vtkSmartPointer.h>
+#include <opencv2/core.hpp>
 
 class vtkRenderer;
 class QVTKOpenGLNativeWidget;
 class vtkActor;
+template <class T> class vtkSmartPointer;
+
+/**
+ * @brief Scene/render access for plugins.
+ *
+ * ACCEPTED EXCEPTION (documented deviation): this is the one interface that
+ * intentionally exposes concrete VTK types (vtkRenderer*, vtkActor*,
+ * vtkSmartPointer). Abstraction over VTK would add a full mirror hierarchy
+ * for little safety gain, since every consumer already links VTK directly.
+ * Keep new methods limited to actor/renderer plumbing — no vtk* algorithm
+ * types (mappers, filters, volumes) beyond these three forms.
+ */
 
 class ISceneService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.ISceneService";
+
     virtual ~ISceneService() = default;
     virtual vtkRenderer*            renderer() = 0;
     virtual QVTKOpenGLNativeWidget* vtkWidget() = 0;
@@ -20,7 +36,22 @@ public:
     virtual void clearPointCloud() = 0;
     virtual void resetToSingleRenderer() = 0;
     virtual void loadOBJwithMTL(const QString &objPath, const QString &mtlPath) = 0;
-    virtual void onLoadDicom(const QString &path = "") = 0;
+    /// Loads a DICOM series from an explicit directory. Returns false when the
+    /// directory is empty or contains no readable series — the caller owns the
+    /// file dialog and the error reporting (no UI in the service layer).
+    virtual bool onLoadDicom(const QString &path) = 0;
+
+    // ── Image display ────────────────────────────────────────────────────────
+    /// Builds a texture actor from an image file / cv::Mat without showing it.
+    /// The file/mat parsing stays inside the services layer; plugins never
+    /// include loader internals.
+    virtual vtkSmartPointer<vtkActor> loadImageActor(const QString& imagePath) = 0;
+    virtual vtkSmartPointer<vtkActor> loadImageActor(const cv::Mat& image) = 0;
+    /// Convenience: loads and displays the actor on the main renderer in one
+    /// call (equivalent to setTextureActor(loadImageActor(...))).
+    virtual void showImage(const QString& imagePath) = 0;
+    virtual void showImage(const cv::Mat& image) = 0;
+
     virtual bool isPointCloudVisible() const = 0;
     virtual void setPointCloudVisible(bool visible) = 0;
 

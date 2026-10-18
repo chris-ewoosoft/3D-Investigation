@@ -6,43 +6,33 @@
 #include <QMap>
 #include <shared_mutex>
 #include "Global.h"
+#include "ILanguageService.h"
 
 /**
  * @brief Singleton quản lý ngôn ngữ ứng dụng (Tiếng Việt / English).
  *
- * Sử dụng:
- *   LM.tr("key")           — lấy chuỗi theo ngôn ngữ hiện tại
- *   LM.setLanguage("vi")   — chuyển sang tiếng Việt
- *   LM.setLanguage("en")   — chuyển sang tiếng Anh
+ * Concrete implementation of ILanguageService, resolvable through
+ * ServiceRegistry:
+ *   ctx->services()->get<ILanguageService>()->translate("key")
+ *
+ * LanguageManager::instance() is kept as a deprecated alias for legacy code.
  *
  * Ngôn ngữ được lưu per-user vào Config_User.ini:
  *   [User_<username>]
  *   language=vi
  */
-class APP_EXPORT LanguageManager : public QObject {
+class APP_EXPORT LanguageManager : public ILanguageService {
     Q_OBJECT
 public:
     static LanguageManager& instance();
 
-    /** Trả về ngôn ngữ hiện tại: "vi" hoặc "en" */
-    QString currentLanguage() const;
-
-    /** Đổi ngôn ngữ và phát signal languageChanged() */
-    void setLanguage(const QString &lang);
-
-    /** Lấy chuỗi dịch theo key.
-     *  Trả về key nếu không tìm thấy bản dịch (để dễ debug). */
-    QString translate(const QString &key) const;
-    QString translate(const char *key) const;
-
-    /** Tên hiển thị của ngôn ngữ hiện tại */
-    QString displayName() const;
-
-    /** Unicode cờ của ngôn ngữ hiện tại */
-    QString flagEmoji() const;
-
-signals:
-    void languageChanged(const QString &lang);
+    // ILanguageService
+    QString currentLanguage() const override;
+    void setLanguage(const QString &lang) override;
+    QString translate(const QString &key) const override;
+    QString translate(const char *key) const override;
+    QString displayName() const override;
+    QString flagEmoji() const override;
 
 private:
     LanguageManager();
@@ -59,9 +49,5 @@ private:
     struct Entry { QString vi; QString en; };
     QMap<QString, Entry> m_dict;
 };
-
-// Convenience macros
-#define LM LanguageManager::instance()
-#define LM_TR(key) LanguageManager::instance().translate(key)
 
 #endif // LANGUAGEMANAGER_H

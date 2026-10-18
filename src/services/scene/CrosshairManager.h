@@ -43,10 +43,7 @@
 #include <vtkObjectFactory.h>
 #include <vtkCamera.h>
 
-// Orientation indices
-static const int ORI_SAGITTAL = 0;
-static const int ORI_CORONAL  = 1;
-static const int ORI_AXIAL    = 2;
+#include "CrosshairGeometry.h" // ORI_SAGITTAL / ORI_CORONAL / ORI_AXIAL
 
 // ─── Per-view state ───────────────────────────────────────────────────────────
 struct CrosshairOverlay {

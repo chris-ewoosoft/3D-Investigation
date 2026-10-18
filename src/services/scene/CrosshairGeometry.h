@@ -1,6 +1,13 @@
 #ifndef CROSSHAIR_GEOMETRY_H
 #define CROSSHAIR_GEOMETRY_H
 
+// Orientation indices — canonical definition shared by CrosshairManager
+// and CrosshairGeometry. Sống ở header pure-math này để CrosshairGeometry
+// không phải kéo theo VTK (CrosshairManager.h).
+inline constexpr int ORI_SAGITTAL = 0;
+inline constexpr int ORI_CORONAL  = 1;
+inline constexpr int ORI_AXIAL    = 2;
+
 namespace CrosshairGeometry {
 
 const double *resliceAxes(int orientation);

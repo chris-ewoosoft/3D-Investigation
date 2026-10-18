@@ -19,6 +19,7 @@ namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
 class IPlugin;
+class QCloseEvent;
 
 /**
  * @brief MainWindow — Pure UI Shell.
@@ -42,6 +43,7 @@ public:
     IAppContext* context() { return m_shell.get(); }
 
 protected:
+    void closeEvent(QCloseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
@@ -62,6 +64,7 @@ private:
     void discoverPlugins();
     void sortPlugins();
     void initPlugins();
+    void shutdownPlugins();
 
     // ── Core ──────────────────────────────────────────────────────────────────
     Ui::MainWindow*           ui;

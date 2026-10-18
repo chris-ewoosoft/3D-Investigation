@@ -1,8 +1,9 @@
 #include "UserAuthPlugin.h"
 #include "IAppContext.h"
+#include "IShellService.h"
 #include "ISettingsService.h"
-#include "UserManager.h"
-#include "LanguageManager.h"
+#include "IUserManager.h"
+#include "ILanguageService.h"
 #include "StyleManager.h"
 #include "SignalBus.h"
 #include "IconFactory.h"
@@ -16,7 +17,7 @@
 #include "ThemeSelectionDialog.h"
 #include "SettingsDialog.h"
 #include "AvatarCropperDialog.h"
-#include "AppConfig.h"
+#include "IAppPaths.h"
 
 #include <QMenu>
 #include <QMenuBar>
@@ -32,10 +33,15 @@
 #include <QStyle>
 #include <QGroupBox>
 
-#include "LanguageManager.h"
+ILanguageService* UserAuthPlugin::s_lang = nullptr;
+IUserManager* UserAuthPlugin::s_users = nullptr;
 
 QString UserAuthPlugin::translate(const QString& key) {
-    return LM_TR(key);
+    return s_lang ? s_lang->translate(key) : key;
+}
+
+IUserManager* UserAuthPlugin::users() {
+    return s_users;
 }
 
 // ─── Helper: create circular avatar pixmap ────────────────────────────────────
@@ -60,11 +66,14 @@ static QPixmap createAvatarPixmap(const QString &username, const QString &avatar
 // ─── Initialize ───────────────────────────────────────────────────────────────
 void UserAuthPlugin::initialize(IAppContext* context) {
     m_context = context;
+    s_lang = context->services()->get<ILanguageService>();
+    s_users = context->services()->get<IUserManager>();
 
-    QString configDir = QFileInfo(AppConfig::instance().configPath()).absolutePath();
+    auto* paths = context->services()->get<IAppPaths>();
+    QString configDir = QFileInfo(paths ? paths->configPath() : QString()).absolutePath();
     QDir().mkpath(configDir);
     QString configPath = configDir + "/Config_User.ini";
-    UserManager::instance()->loadConfig(configPath);
+    UserAuthPlugin::users()->loadConfig(configPath);
 
     if (!ensureAuthenticated()) {
         QMetaObject::invokeMethod(qApp, "quit", Qt::QueuedConnection);
@@ -104,9 +113,9 @@ void UserAuthPlugin::initialize(IAppContext* context) {
             handled = true;
         } else if (action == "admin.login") {
             QString errorMsg;
-            UserManager::instance()->logout();
-            if (UserManager::instance()->login(parameters.value("username", "Admin").toString(), parameters.value("password", "1").toString(), errorMsg)) {
-                m_currentUser = UserManager::instance()->currentUsername();
+            UserAuthPlugin::users()->logout();
+            if (UserAuthPlugin::users()->login(parameters.value("username", "Admin").toString(), parameters.value("password", "1").toString(), errorMsg)) {
+                m_currentUser = UserAuthPlugin::users()->currentUsername();
                 loadUserSettings();
                 checkLicense();
                 setupMenus();
@@ -131,12 +140,14 @@ void UserAuthPlugin::initialize(IAppContext* context) {
 }
 
 void UserAuthPlugin::cleanup() {
-    UserManager::instance()->saveConfig();
+    if (s_users) s_users->saveConfig();  // flush while the binding is alive
+    s_users = nullptr;
+    s_lang = nullptr;
 }
 
 // ─── Authentication ───────────────────────────────────────────────────────────
 bool UserAuthPlugin::ensureAuthenticated() {
-    auto *um = UserManager::instance();
+    auto *um = UserAuthPlugin::users();
     if (um->isLoggedIn()) {
         m_currentUser = um->currentUsername();
         return true;
@@ -150,22 +161,22 @@ bool UserAuthPlugin::ensureAuthenticated() {
 }
 
 void UserAuthPlugin::checkLicense() {
-    auto *um = UserManager::instance();
+    auto *um = UserAuthPlugin::users();
     if (um->needsActivation(m_currentUser)) {
         LicenseActivationDialog dlg(m_currentUser, false, m_context->mainWindow());
         dlg.exec();
     }
     if (um->isLicenseExpired(m_currentUser)) {
         ModernMessageBox::critical(m_context->mainWindow(),
-            LM_TR("common.error"),
-            LM_TR("auth.expired"));
+            translate("common.error"),
+            translate("auth.expired"));
         QMetaObject::invokeMethod(qApp, "quit", Qt::QueuedConnection);
     }
 }
 
 // ─── Per-user settings ────────────────────────────────────────────────────────
 void UserAuthPlugin::loadUserSettings() {
-    auto *um = UserManager::instance();
+    auto *um = UserAuthPlugin::users();
 
     // Language
     QString lang = um->getUserPref(m_currentUser, "language", "vi");
@@ -190,18 +201,18 @@ void UserAuthPlugin::loadUserSettings() {
 }
 
 void UserAuthPlugin::saveUserPref(const QString &key, const QString &value) {
-    UserManager::instance()->setUserPref(m_currentUser, key, value);
+    UserAuthPlugin::users()->setUserPref(m_currentUser, key, value);
 }
 
 void UserAuthPlugin::setupMenus() {
-    QMenuBar* menuBar = m_context->menuBar();
+    QMenuBar* menuBar = m_context->shell()->menuBar();
     if (!menuBar) menuBar = m_context->mainWindow()->menuBar();
 
-    UserInfo u = UserManager::instance()->userInfo(m_currentUser);
+    UserInfo u = UserAuthPlugin::users()->userInfo(m_currentUser);
     bool isAdmin = (u.role == UserRole::Admin);
 
     // ── Inject Help Buttons into tab.help panel ──────────────────────────────
-    if (QWidget* panel = m_context->getTabPanel("tab.help")) {
+    if (QWidget* panel = m_context->shell()->getTabPanel("tab.help")) {
         auto *layout = qobject_cast<QHBoxLayout*>(panel->layout());
         if (layout) {
             if (!m_groupHelp) {
@@ -253,14 +264,15 @@ void UserAuthPlugin::setupMenus() {
             "QToolButton::menu-indicator { image: none; }");
     }
     QString flagPath = UserAuthPlugin::translate("flag_icon_path");
+    if (!QFile::exists(flagPath)) flagPath = ":/flags/flag_en.png";
     m_langBtn->setIcon(QIcon(flagPath));
     m_langBtn->setIconSize(QSize(24, 16));
     m_langBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_langBtn->setText(" " + LM.displayName() + "  ▾");
+    m_langBtn->setText(" " + s_lang->displayName() + "  ▾");
 
     QMenu* langMenu = new QMenu(m_langBtn);
-    QAction* viAction = langMenu->addAction(QIcon("f:/PROJECTS/QT/3D-Reconstruction/src/app/flag_vn.png"), "Tiếng Việt");
-    QAction* enAction = langMenu->addAction(QIcon("f:/PROJECTS/QT/3D-Reconstruction/src/app/flag_en.png"), "English");
+    QAction* viAction = langMenu->addAction(QIcon(":/flags/flag_vn.png"), "Tiếng Việt");
+    QAction* enAction = langMenu->addAction(QIcon(":/flags/flag_en.png"), "English");
     connect(viAction, &QAction::triggered, this, [this]() {
         m_context->setLanguage("vi");
         saveUserPref("language", "vi");
@@ -286,7 +298,7 @@ void UserAuthPlugin::setupMenus() {
         isNewAvatarBtn = true;
     }
 
-    u = UserManager::instance()->userInfo(m_currentUser);
+    u = UserAuthPlugin::users()->userInfo(m_currentUser);
     QString displayName = u.username;
     if (!displayName.isEmpty()) displayName[0] = displayName[0].toUpper();
 
@@ -349,11 +361,11 @@ void UserAuthPlugin::setupMenus() {
 // ─── Retranslate ──────────────────────────────────────────────────────────────
 void UserAuthPlugin::retranslateMenus() {
     if (m_langBtn) {
-        QString flagPath = LM.currentLanguage() == "vi"
-            ? "f:/PROJECTS/QT/3D-Reconstruction/src/app/flag_vn.png"
-            : "f:/PROJECTS/QT/3D-Reconstruction/src/app/flag_en.png";
+        const QString flagPath = s_lang->currentLanguage() == "vi"
+            ? QStringLiteral(":/flags/flag_vn.png")
+            : QStringLiteral(":/flags/flag_en.png");
         m_langBtn->setIcon(QIcon(flagPath));
-        m_langBtn->setText(" " + LM.displayName() + "  ▾");
+        m_langBtn->setText(" " + s_lang->displayName() + "  ▾");
     }
 
     // Rebuild avatar menu with fresh translations
@@ -379,21 +391,22 @@ void UserAuthPlugin::onLanguageChanged(const QString &/*lang*/) {
 
 // ─── Slots ────────────────────────────────────────────────────────────────────
 void UserAuthPlugin::onOpenSettings() {
-    UserInfo u = UserManager::instance()->userInfo(m_currentUser);
+    UserInfo u = UserAuthPlugin::users()->userInfo(m_currentUser);
     bool isAdmin = (u.role == UserRole::Admin);
     SettingsDialog dlg(m_currentUser, isAdmin, m_context, m_context->mainWindow());
     dlg.exec();
 }
 
 void UserAuthPlugin::onChangeAvatar() {
-    AvatarCropperDialog dlg(m_currentUser, m_context->mainWindow());
+    AvatarCropperDialog dlg(m_currentUser, m_context->services()->get<IAppPaths>(),
+                            m_context->mainWindow());
     if (dlg.exec() == QDialog::Accepted) {
         setupMenus();
     }
 }
 
 void UserAuthPlugin::onLogout() {
-    UserManager::instance()->logout();
+    UserAuthPlugin::users()->logout();
     m_currentUser.clear();
 
     if (m_langBtn) {
@@ -405,7 +418,7 @@ void UserAuthPlugin::onLogout() {
         m_avatarBtn = nullptr;
     }
 
-    QMenuBar* menuBar = m_context->menuBar();
+    QMenuBar* menuBar = m_context->shell()->menuBar();
     if (!menuBar) menuBar = m_context->mainWindow()->menuBar();
     if (menuBar) {
         QWidget* oldCorner = menuBar->cornerWidget(Qt::TopRightCorner);

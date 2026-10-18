@@ -43,7 +43,7 @@ REPORT_PATH = Path(__file__).resolve().parent / "model_in_loop_report.json"
 GOLDEN = [
     {"id": "vn_001", "lang": "vi", "query": "Dự án này có chức năng gì?",
      "expected_kind": "rag_search"},
-    {"id": "vn_002", "lang": "vi", "query": "Tìm lỗi trong file src/app/AppConstants.h",
+    {"id": "vn_002", "lang": "vi", "query": "Tìm lỗi trong file src/core/AppConstants.h",
      "expected_kind": "rag_search"},
     {"id": "en_001", "lang": "en", "query": "What is the benefit of AI Agent?",
      "expected_kind": "direct"},

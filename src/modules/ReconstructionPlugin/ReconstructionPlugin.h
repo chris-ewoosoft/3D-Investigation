@@ -9,7 +9,6 @@
 #include <QToolButton>
 #include <QListWidget>
 
-class ReconstructThread;
 class CustomProgressDialog;
 class ReconstructionRibbonUI;
 
@@ -40,7 +39,7 @@ private:
     CustomProgressDialog* m_progressDialog = nullptr;
 
     QMenu* m_reconstructMenu = nullptr;
-    ReconstructThread* m_currentReconstructThread = nullptr;
+    bool m_cancelRequested = false;  ///< true while a stop-requested run is finishing
     
     QAction *m_toggleCloudAct = nullptr;
     ReconstructionRibbonUI* m_ribbonUI = nullptr;

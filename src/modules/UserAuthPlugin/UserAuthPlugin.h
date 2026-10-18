@@ -5,6 +5,8 @@
 #include "IPlugin.h"
 
 class IAppContext;
+class ILanguageService;
+class IUserManager;
 class QToolButton;
 class QGroupBox;
 
@@ -15,6 +17,12 @@ class UserAuthPlugin : public QObject, public IPlugin {
 
 public:
     static QString translate(const QString& key);
+    /** Module-scoped ILanguageService binding (registry-sourced), for dialogs
+     *  that need the service itself (e.g. ModernMessageBox::question). */
+    static ILanguageService* languageService() { return s_lang; }
+    /** Module-scoped IUserManager binding (registry-sourced). Bound during
+     *  initialize(), cleared on cleanup(); valid for every UI code path. */
+    static IUserManager* users();
 
     QString pluginName() const override { return "User Authentication Plugin"; }
     void initialize(IAppContext* context) override;
@@ -40,7 +48,11 @@ private:
     IAppContext *m_context = nullptr;
     QString m_currentUser;
 
-    // static IAppContext *s_context; removed
+    /// Module-scoped translation source, bound to the registry-provided
+    /// ILanguageService during initialize() (cleared on cleanup). Feeds the
+    /// static translate() facade used across this module's dialogs.
+    static ILanguageService *s_lang;
+    static IUserManager *s_users;
 
     // UI elements that need retranslation
     QToolButton *m_avatarBtn    = nullptr;

@@ -1,0 +1,74 @@
+#include "ShellService.h"
+#include "SignalBus.h"
+#include "ILanguageService.h"
+
+#include <QMenu>
+
+#include <utility>
+
+ShellService::ShellService(SignalBus* bus, ILanguageService* language)
+    : m_bus(bus)
+    , m_language(language)
+{
+}
+
+ShellService::~ShellService()
+{
+    // Chỉ dọn menu KHÔNG có parent (test hoặc shell chưa kịp gắn parent);
+    // menu đã parent cho MainWindow do Qt quản lý.
+    for (const QPointer<QMenu>& menu : std::as_const(m_menus)) {
+        if (menu && !menu->parent())
+            delete menu;
+    }
+}
+
+QMenu* ShellService::getMenu(const QString& id)
+{
+    const auto it = m_menus.constFind(id);
+    if (it != m_menus.constEnd() && it.value())
+        return it.value();
+
+    auto* menu = new QMenu(m_menuParent);
+    m_menus.insert(id, menu);
+    return menu;
+}
+
+QMenuBar* ShellService::menuBar()
+{
+    return m_menuBar;
+}
+
+void ShellService::updateMenuStates()
+{
+    if (m_bus)
+        emit m_bus->stateChanged();
+}
+
+QWidget* ShellService::getTabPanel(const QString& tabName)
+{
+    const auto it = m_tabPanels.constFind(tabName);
+    if (it != m_tabPanels.constEnd() && it.value())
+        return it.value();
+
+    // Fallback: tìm theo nhãn đã dịch (plugin có thể tra bằng label hiển thị).
+    if (m_language) {
+        for (auto i = m_tabPanels.cbegin(); i != m_tabPanels.cend(); ++i) {
+            if (i.value() && m_language->translate(i.key()) == tabName)
+                return i.value();
+        }
+    }
+    return nullptr;
+}
+
+CustomProgressDialog* ShellService::getProgressDialog()
+{
+    return m_progressDialog;
+}
+
+void ShellService::registerTabPanel(const QString& key, QWidget* panel)
+{
+    if (panel)
+        m_tabPanels.insert(key, panel);
+    else
+        m_tabPanels.remove(key);
+}

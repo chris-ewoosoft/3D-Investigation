@@ -5,8 +5,18 @@
 #include <QStringList>
 #include "AIMode.h"
 
+/**
+ * @brief 2D image browsing state for plugins (DICOM series paging, AI mode).
+ *
+ * Plain abstract interface (no signals needed) — implemented by ViewerService
+ * in AppCore and exposed through the ServiceRegistry.
+ */
 class IViewerService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IViewerService";
+
     virtual ~IViewerService() = default;
     virtual QString getCurrent2DImagePath() const = 0;
     virtual void    setCurrent2DImagePath(const QString& path) = 0;

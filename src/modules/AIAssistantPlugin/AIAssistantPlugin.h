@@ -17,6 +17,8 @@ class ChatBotDockWidget;
 class QListWidgetItem;
 class QWidget;
 
+class CustomProgressDialog;
+
 class AIAssistantPlugin : public QObject, public IPlugin {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID IPlugin_iid)

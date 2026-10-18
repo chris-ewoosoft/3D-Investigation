@@ -3,13 +3,14 @@
 
 #include "IAppContext.h"
 #include "ISceneService.h"
+#include "Global.h"
 #include <vtkSmartPointer.h>
 #include <vtkRenderer.h>
 #include <QVTKOpenGLNativeWidget.h>
 #include <vector>
 #include "CrosshairManager.h"
 
-class SceneService : public QObject, public ISceneService {
+class APP_EXPORT SceneService : public QObject, public ISceneService {
     Q_OBJECT
 public:
     SceneService(IAppContext* ctx, QVTKOpenGLNativeWidget* vtkWidget, QObject* parent = nullptr);
@@ -25,8 +26,13 @@ public:
     void clearPointCloud() override;
     void resetToSingleRenderer() override;
     void loadOBJwithMTL(const QString &objPath, const QString &mtlPath) override;
-    void onLoadDicom(const QString &path = "") override;
-    
+    bool onLoadDicom(const QString &path) override;
+
+    vtkSmartPointer<vtkActor> loadImageActor(const QString& imagePath) override;
+    vtkSmartPointer<vtkActor> loadImageActor(const cv::Mat& image) override;
+    void showImage(const QString& imagePath) override;
+    void showImage(const cv::Mat& image) override;
+
     bool isPointCloudVisible() const override { return m_pointCloudVisible; }
     void setPointCloudVisible(bool visible) override { m_pointCloudVisible = visible; }
     void applyViewSettings(const QString& username) override;

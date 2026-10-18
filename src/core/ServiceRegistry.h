@@ -3,21 +3,38 @@
 
 #include <QHash>
 #include <QString>
-#include <typeinfo>
+#include <QDebug>
+
+#include <concepts>
 #include <shared_mutex>
+#include <type_traits>
 
 /**
  * @brief Type-safe service registry (Service Locator pattern).
  *
- * Cho phép đăng ký và tìm kiếm service theo interface type mà không cần
- * biết concrete implementation.
+ * Every registrable interface declares a deterministic compile-time key:
  *
- * Cách dùng:
- *   // Đăng ký (trong AppShell::initializeServices):
+ *     class IReconstructionService {
+ *     public:
+ *         static constexpr const char *ServiceKey =
+ *             "com.3dreconstruction.service.IReconstructionService";
+ *         ...
+ *     };
+ *
+ * The key is an explicit part of the interface contract (not derived from
+ * RTTI), so lookups behave identically across compilers and across the
+ * exe ↔ AppCore.dll ↔ plugin DLL boundaries — unlike typeid().name(),
+ * whose mangling is implementation-defined and can differ per module.
+ *
+ * Usage:
+ *   // Register (AppShell::initializeServices — composition root only):
  *   registry->registerService<IReconstructionService>(m_reconService.get());
  *
- *   // Tìm kiếm (trong Plugin::initialize):
+ *   // Look up (Plugin::initialize):
  *   auto* svc = ctx->services()->get<IReconstructionService>();
+ *
+ * Lifetime: the registry does NOT own services; AppShell outlives all
+ * consumers and clears the registry before destroying implementations.
  */
 class ServiceRegistry {
 public:
@@ -30,27 +47,65 @@ public:
 
     /**
      * @brief Đăng ký một service implementation theo interface type.
-     * @tparam Interface  Interface class (e.g. IReconstructionService)
+     * @tparam Interface  Interface có ServiceKey (e.g. IReconstructionService)
      * @param impl        Pointer tới implementation (không own, caller quản lý lifetime)
+     *
+     * Duplicate registration of the same interface is a wiring bug: it is
+     * loudly reported and the new pointer replaces the old one.
      */
     template<typename Interface>
     void registerService(Interface* impl) {
+        static_assert(hasServiceKey<Interface>,
+                      "Interface must declare 'static constexpr const char* ServiceKey' "
+                      "for ServiceRegistry registration.");
+        static_assert(!std::is_const_v<Interface>,
+                      "Cannot register a const interface pointer.");
+        if (!impl) {
+            qWarning() << "ServiceRegistry: refusing to register null service"
+                       << keyOf<Interface>();
+            return;
+        }
+        const QString key = keyOf<Interface>();
         std::unique_lock lock(m_mutex);
-        m_services[QString(typeid(Interface).name())] =
-            static_cast<void*>(impl);
+        if (m_services.contains(key)) {
+            qWarning() << "ServiceRegistry: duplicate registration of"
+                       << key << "- replacing previous entry.";
+        }
+        m_services[key] = static_cast<void*>(impl);
     }
 
     /**
      * @brief Tìm kiếm service theo interface type.
-     * @tparam Interface  Interface class cần tìm
      * @return Pointer tới implementation, hoặc nullptr nếu chưa đăng ký.
+     *
+     * Prefer getRequired<T>() for services whose absence is a wiring bug
+     * rather than a runtime condition.
      */
     template<typename Interface>
     Interface* get() const {
+        static_assert(hasServiceKey<Interface>,
+                      "Interface must declare 'static constexpr const char* ServiceKey'.");
+        const QString key = keyOf<Interface>();
         std::shared_lock lock(m_mutex);
-        auto it = m_services.find(QString(typeid(Interface).name()));
+        auto it = m_services.find(key);
         if (it == m_services.end()) return nullptr;
         return static_cast<Interface*>(it.value());
+    }
+
+    /**
+     * @brief Like get<T>(), but a missing service is treated as a fatal
+     *        wiring bug (fail fast at the call site instead of deferring a
+     *        nullptr crash into widget code).
+     */
+    template<typename Interface>
+    Interface* getRequired() const {
+        Interface* svc = get<Interface>();
+        if (!svc) {
+            qFatal("ServiceRegistry: required service %s is not registered. "
+                   "It must be registered by the composition root (AppShell) "
+                   "before consumers run.", keyOf<Interface>().toLocal8Bit().constData());
+        }
+        return svc;
     }
 
     /**
@@ -58,8 +113,11 @@ public:
      */
     template<typename Interface>
     bool has() const {
+        static_assert(hasServiceKey<Interface>,
+                      "Interface must declare 'static constexpr const char* ServiceKey'.");
+        const QString key = keyOf<Interface>();
         std::shared_lock lock(m_mutex);
-        return m_services.contains(QString(typeid(Interface).name()));
+        return m_services.contains(key);
     }
 
     /**
@@ -67,8 +125,11 @@ public:
      */
     template<typename Interface>
     void unregister() {
+        static_assert(hasServiceKey<Interface>,
+                      "Interface must declare 'static constexpr const char* ServiceKey'.");
+        const QString key = keyOf<Interface>();
         std::unique_lock lock(m_mutex);
-        m_services.remove(QString(typeid(Interface).name()));
+        m_services.remove(key);
     }
 
     /** @brief Xóa toàn bộ registrations. */
@@ -78,6 +139,15 @@ public:
     }
 
 private:
+    template<typename T>
+    static constexpr bool hasServiceKey =
+        requires { { T::ServiceKey } -> std::convertible_to<const char*>; };
+
+    template<typename Interface>
+    static QString keyOf() {
+        return QString::fromLatin1(Interface::ServiceKey);
+    }
+
     mutable std::shared_mutex m_mutex;
     QHash<QString, void*> m_services;
 };

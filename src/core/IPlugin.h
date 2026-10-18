@@ -13,7 +13,6 @@ public:
     virtual void initialize(IAppContext* context) = 0;
     virtual void cleanup() = 0;
     virtual int  loadOrder() const { return 100; }
-    virtual void onAppReady() {}
 };
 
 #define IPlugin_iid "com.3dreconstruction.IPlugin"

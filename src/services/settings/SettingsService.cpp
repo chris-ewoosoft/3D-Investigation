@@ -2,10 +2,9 @@
 #include <QSettings>
 #include <QDir>
 #include <QFileInfo>
-#include "AppConfig.h"
 
-SettingsService::SettingsService() {
-    m_configPath = AppConfig::instance().configPath();
+SettingsService::SettingsService(const QString &configPath) {
+    m_configPath = configPath;
     QDir().mkpath(QFileInfo(m_configPath).absolutePath());
 }
 

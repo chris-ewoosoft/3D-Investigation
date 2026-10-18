@@ -5,8 +5,6 @@
 #include <QDebug>
 #include <QFile>
 #include <QFileInfo>
-#include <QHostAddress>
-#include <QHostInfo>
 #include <QMimeDatabase>
 #include <QRandomGenerator>
 #include <QSslSocket>
@@ -113,26 +111,24 @@ bool SmtpMailer::sendMail(const QString &from,
         return false;
     }
 
+    if (!QSslSocket::supportsSsl()) {
+        errorMsg = QString("TLS is not available. SSL library build: %1, runtime: %2. "
+                           "Please ensure OpenSSL DLLs (libssl, libcrypto) are in the "
+                           "application directory or PATH.")
+                       .arg(QSslSocket::sslLibraryBuildVersionString(),
+                            QSslSocket::sslLibraryVersionString());
+        return false;
+    }
+
     QSslSocket sock;
-    sock.setPeerVerifyMode(QSslSocket::VerifyNone);
+    // Verify server certificates against system CAs — never downgrade to
+    // VerifyNone: credentials leave the machine otherwise.
+    sock.setPeerVerifyMode(QSslSocket::VerifyPeer);
     QString response;
 
-    // Resolve host and prefer IPv4
-    const QHostInfo hostInfo = QHostInfo::fromName(m_host);
-    QHostAddress ipv4Address;
-    for (const QHostAddress &addr : hostInfo.addresses()) {
-        if (addr.protocol() == QAbstractSocket::IPv4Protocol) {
-            ipv4Address = addr;
-            break;
-        }
-    }
-
-    if (!ipv4Address.isNull()) {
-        sock.connectToHost(ipv4Address, m_port);
-    } else {
-        // Fallback to hostname if no IPv4 found
-        sock.connectToHost(m_host, m_port);
-    }
+    // Connect by hostname so SNI and certificate hostname verification both
+    // use the real server name (connecting raw IPs defeats both).
+    sock.connectToHost(m_host, m_port);
 
     if (!sock.waitForConnected(8000)) {
         errorMsg = QString("Cannot connect to %1:%2 - %3")

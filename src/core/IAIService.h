@@ -18,6 +18,10 @@ namespace cv { class Mat; }
  */
 class IAIService {
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IAIService";
+
     virtual ~IAIService() = default;
 
     // --- Model Loading ---

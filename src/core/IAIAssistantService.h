@@ -20,6 +20,10 @@ struct ChatSession {
 class APP_EXPORT IAIAssistantService : public QObject {
     Q_OBJECT
 public:
+    /// ServiceRegistry lookup key (see ServiceRegistry.h).
+    static constexpr const char *ServiceKey =
+        "com.3dreconstruction.service.IAIAssistantService";
+
     virtual ~IAIAssistantService() = default;
 
     virtual void startServer(int modelIndex) = 0;

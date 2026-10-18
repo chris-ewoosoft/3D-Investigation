@@ -1,4 +1,5 @@
-#pragma once
+#ifndef TRIANGULATOR_H
+#define TRIANGULATOR_H
 #include <opencv2/core.hpp>
 #include <vector>
 
@@ -10,3 +11,5 @@ public:
                             const std::vector<cv::Point2f> &pts1,
                             std::vector<cv::Point3f> &outPts);
 };
+
+#endif // TRIANGULATOR_H

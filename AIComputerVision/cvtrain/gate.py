@@ -24,12 +24,19 @@ import numbers
 
 from . import manifest as manifest_mod
 from .config import ModelSpec, TrainConfig
+from .dataset import dataset_content_fingerprint
 from .errors import QualityGateError
 from .fsio import sha256_file
 
 LOG = logging.getLogger("cvtrain.gate")
 
-__all__ = ["already_current", "dataset_digest", "enforce_quality_gate", "weights_digest"]
+__all__ = [
+    "already_current",
+    "dataset_content_digest",
+    "dataset_digest",
+    "enforce_quality_gate",
+    "weights_digest",
+]
 
 
 def _usable_metrics(metrics: object) -> dict[str, float]:
@@ -89,6 +96,17 @@ def dataset_digest(cfg: TrainConfig) -> str | None:
 
     path = cfg.data_yaml
     return sha256_file(path) if path.exists() else None
+
+
+def dataset_content_digest(cfg: TrainConfig) -> str | None:
+    """Digest of the dataset inventory (files and sizes), if data.yaml exists.
+
+    Complements :func:`dataset_digest` by inventorying the actual files
+    under ``train``/``val``, closing the blind spot where images are added or
+    replaced under an unchanged ``data.yaml``.
+    """
+
+    return dataset_content_fingerprint(cfg.data_yaml)
 
 
 def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Manifest, backend_version: str) -> bool:
@@ -156,6 +174,11 @@ def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Ma
     recorded_dataset = dataset_digest(cfg)
     if recorded_dataset is None or entry.get("dataset_sha256") != recorded_dataset:
         return False
+    entry_content = entry.get("dataset_content_sha256")
+    if entry_content is not None:
+        recorded_content = dataset_content_digest(cfg)
+        if recorded_content is None or entry_content != recorded_content:
+            return False
     if entry.get("sha256") != sha256_file(target):
         return False
     weights_sha = weights_digest(spec, cfg)

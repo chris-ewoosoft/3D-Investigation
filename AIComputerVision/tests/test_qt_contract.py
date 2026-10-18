@@ -22,7 +22,7 @@ from cvtrain.progress import PROGRESS_PREFIX, ProgressReporter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCK = REPO_ROOT / "src" / "modules" / "AIProcessorPlugin" / "AITrainDockWidget.cpp"
-HEADER = REPO_ROOT / "src" / "app" / "AppConstants.h"
+HEADER = REPO_ROOT / "src" / "core" / "AppConstants.h"
 ENTRY_POINT = Path(__file__).resolve().parents[1] / "TrainModel.py"
 
 _missing_dock = f"AITrainDockWidget.cpp not found at {DOCK}"
@@ -101,9 +101,24 @@ class DialogContractTests(unittest.TestCase):
 
     def test_dialog_checkbox_labels_match_the_model_specs_in_order(self) -> None:
         text = DOCK.read_text(encoding="utf-8")
-        labels = re.findall(r'new QCheckBox\("([^"]+)"', text)
+        # C++ uses m_ctx->translate() for i18n; extract literal or translate-key labels.
+        literal = re.findall(r'new QCheckBox\("([^"]+)"', text)
+        translated = re.findall(r'm_ctx->translate\("([^"]+)"\)', text)
+        # The 3 dialog checkboxes are translated; map keys back to MODEL_SPECS labels.
+        translate_map = {
+            "aiproc.train_model_det": "Detection (yolo11n)",
+            "aiproc.train_model_seg": "Segmentation (yolo11n-seg)",
+            "aiproc.train_model_track": "Tracking (yolo11x-tracking)",
+        }
+        # Preserve order: det, seg, track as they appear in source.
+        ordered_labels = []
+        for t in translated:
+            if t in translate_map:
+                ordered_labels.append(translate_map[t])
+        if not ordered_labels and literal:
+            ordered_labels = literal
         expected = [MODEL_SPECS[key].label for key in ALL_MODEL_KEYS]
-        self.assertEqual(labels, expected)
+        self.assertEqual(ordered_labels, expected)
 
 
 @unittest.skipUnless(DOCK.exists(), _missing_dock)

@@ -2,23 +2,30 @@
 #define IAPPCONTEXT_H
 
 #include <QString>
-#include <QStringList>
-#include <QMainWindow>
-#include <vtkSmartPointer.h>
 #include "ServiceRegistry.h"
 
-class vtkRenderer;
-class QVTKOpenGLNativeWidget;
-class vtkActor;
-class CustomProgressDialog;
-class QMenu;
-class QMenuBar;
+// Only forward declarations — the context interface must not drag concrete
+// UI/GUI types (QMainWindow, VTK, dialog widgets) into every consumer. Files
+// that dereference these types include their headers themselves.
+class QMainWindow;
 class SignalBus;
+class IShellService;
 
 class ISceneService;
 class IViewerService;
 class ISettingsService;
 
+/**
+ * @brief Kernel contract handed to plugins at initialize().
+ *
+ * Deliberately narrow: it exposes the application services (directly and via
+ * the ServiceRegistry), the main window handle and the SignalBus. UI-shell
+ * concerns (named menus, tab panels, the shared progress dialog) live in
+ * IShellService — resolve it via shell() or the registry.
+ *
+ * translate() stays as the single i18n convenience for UI code; it delegates
+ * to ILanguageService, which remains the canonical translation interface.
+ */
 class IAppContext {
 public:
     virtual ~IAppContext() = default;
@@ -26,8 +33,11 @@ public:
     virtual ISceneService*    scene()    = 0;
     virtual IViewerService*   viewer()   = 0;
     virtual ISettingsService* settings() = 0;
-    virtual QMainWindow*     mainWindow() = 0;
-    virtual SignalBus*       signalBus() = 0;
+    virtual QMainWindow*      mainWindow() = 0;
+    virtual SignalBus*        signalBus()  = 0;
+
+    /** UI-shell contract (menus, tab panels, shared progress dialog). */
+    virtual IShellService*    shell() = 0;
 
     /**
      * @brief Trả về ServiceRegistry để plugin tự look-up bất kỳ service nào.
@@ -37,19 +47,8 @@ public:
      */
     virtual ServiceRegistry* services() = 0;
 
-    virtual CustomProgressDialog*   getProgressDialog() = 0;
-    virtual QMenu*  getMenu(const QString& id) = 0;
-    virtual QMenuBar* menuBar() = 0;
-    virtual void    updateMenuStates()      = 0;
     virtual QString translate(const QString& key) = 0;
     virtual void    setLanguage(const QString& lang) = 0;
-
-    /**
-     * Trả về QWidget* panel của tab tương ứng trong Tab Bar.
-     * Plugin có thể dùng để thêm QToolButton vào tab.
-     * Trả về nullptr nếu tab không tồn tại.
-     */
-    virtual QWidget* getTabPanel(const QString& tabName) { Q_UNUSED(tabName); return nullptr; }
 };
 
 #endif // IAPPCONTEXT_H

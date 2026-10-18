@@ -33,7 +33,7 @@ from typing import Any
 from . import gate, generator_name, preflight
 from . import manifest as manifest_mod
 from .backend import EpochCallback, TrainedModel, TrainingBackend
-from .config import BASE_DIR, MODEL_SPECS, ModelSpec, TrainConfig
+from .config import BASE_DIR, MODEL_SPECS, PROJECT_ROOT, ModelSpec, TrainConfig
 from .errors import ExitCode
 from .fsio import atomic_replace_with_backup, directory_lock, file_size, sha256_file, touch_lock
 from .progress import ProgressReporter
@@ -89,6 +89,10 @@ def _run_preflight(cfg: TrainConfig, reporter: ProgressReporter, backend: Traini
         deps_fatal=not cfg.dry_run,
         modules=backend.required_modules(cfg),
     )
+    device_ok, device_msg = backend.check_device(cfg)
+    if not device_ok:
+        report.add(preflight.Check("runtime.device", False, device_msg, fatal=True))
+
     for line in report.lines():
         LOG.info("%s", line)
 
@@ -124,6 +128,7 @@ def _start_manifest(cfg: TrainConfig, backend_version: str) -> manifest_mod.Mani
         workers=cfg.workers,
         device=cfg.device_class,
         python=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        git_commit=manifest_mod.resolve_git_commit(PROJECT_ROOT),
         min_metrics=[[name, minimum] for name, minimum in cfg.min_metrics],
     )
     # ``updated_at`` is deliberately *not* stamped here: it marks provenance
@@ -220,6 +225,9 @@ def _record_entry(
     dataset_sha = gate.dataset_digest(cfg)
     if dataset_sha is not None:
         entry["dataset_sha256"] = dataset_sha
+    content_sha = gate.dataset_content_digest(cfg)
+    if content_sha is not None:
+        entry["dataset_content_sha256"] = content_sha
     manifest_mod.upsert_entry(manifest, spec.output, entry)
     # ``updated_at`` tracks the last provenance write: without this refresh a
     # training run leaves the header older than the entries it just published.

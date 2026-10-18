@@ -42,7 +42,14 @@ ViewerNavigatorUI::ViewerNavigatorUI(IAppContext* ctx, QObject* parent)
     nl->addWidget(m_btnNext); 
     nl->addStretch();
     
-    if (m_ctx->mainWindow()->centralWidget() && m_ctx->mainWindow()->centralWidget()->layout()) {
-        qobject_cast<QVBoxLayout*>(m_ctx->mainWindow()->centralWidget()->layout())->addWidget(m_widget);
+    if (auto *central = m_ctx->mainWindow()->centralWidget()) {
+        if (auto *box = qobject_cast<QVBoxLayout*>(central->layout())) {
+            box->addWidget(m_widget);
+        } else {
+            // Unexpected central layout — park the navigator as a floating
+            // dock-style child of the main window instead of crashing.
+            m_widget->setParent(m_ctx->mainWindow());
+            m_widget->show();
+        }
     }
 }

@@ -3,6 +3,7 @@
 add_library(UserAuthPlugin SHARED
     UserAuthPlugin.h
     UserAuthPlugin.cpp
+    UserAuthPlugin.qrc
     LoginDialog.h
     LoginDialog.cpp
     ForgotPasswordDialog.h
@@ -25,14 +26,8 @@ add_library(UserAuthPlugin SHARED
 
 target_include_directories(UserAuthPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/app
     ${PROJECT_SOURCE_DIR}/src/core
     ${PROJECT_SOURCE_DIR}/src/utils
-    ${PROJECT_SOURCE_DIR}/src/services/scene
-    ${PROJECT_SOURCE_DIR}/src/services/viewer
-    ${PROJECT_SOURCE_DIR}/src/services/settings
-    ${PROJECT_SOURCE_DIR}/src/services/reconstruction
-    ${PROJECT_SOURCE_DIR}/src/services/ai
     ${VTK_INCLUDE_DIRS}
 )
 
@@ -44,8 +39,9 @@ target_link_libraries(UserAuthPlugin
         Qt6::Core
         Qt6::Widgets
         Qt6::Network
+        Qt6::Concurrent
         ${VTK_LIBRARIES}
-        3D-Reconstruction
+        AppCore
 )
 
 set_target_properties(UserAuthPlugin PROPERTIES

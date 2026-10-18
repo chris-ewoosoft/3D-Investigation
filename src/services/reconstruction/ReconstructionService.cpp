@@ -1,9 +1,38 @@
 #include "ReconstructionService.h"
+#include "ReconstructionWorker.h"
 #include <QDir>
 
 ReconstructionService::ReconstructionService()
     : m_pipeline(std::make_unique<ReconstructionPipeline>())
 {
+}
+
+ReconstructionService::~ReconstructionService()
+{
+    // Ngừng nhận tín hiệu từ worker: queued invocation nhắm vào `this` sẽ bị
+    // QObject destructor gỡ khỏi event queue, nên không có callback sau hủy.
+    if (m_worker)
+        m_worker->disconnect(this);
+
+    if (m_thread) {
+        // Hủy cooperative tại checkpoint kế tiếp; quit() thread-safe từ mọi
+        // thread (không cần event loop của service xử lý).
+        m_cancelRequested = true;
+        m_thread->quit();
+        if (!m_thread->wait(15000)) {
+            // Fallback cuối: chỉ khi pipeline mắc kẹt trong thư viện ngoài
+            // (Poisson/PCL...) — app đang thoát nên rủi ro giới hạn.
+            m_thread->terminate();
+            m_thread->wait();
+        }
+    }
+
+    // Thread đã dừng hẳn (hoặc chưa từng chạy) → xóa worker/thread an toàn.
+    // Nếu finishRun() đã chạy trước destructor, hai con trỏ đã là nullptr.
+    delete m_worker;
+    delete m_thread;
+    m_worker = nullptr;
+    m_thread = nullptr;
 }
 
 void ReconstructionService::setImages(const QStringList& paths) {
@@ -52,13 +81,59 @@ void ReconstructionService::configure(int densityLevel, int maxFeatures, bool au
 
 bool ReconstructionService::reconstruct() {
     if (m_running.exchange(true)) return false; // Already running
-    
+    m_cancelRequested = false; // cờ hủy thuộc đúng một lần chạy
+
+    // Worker được move vào QThread nội bộ (service layer sở hữu thread,
+    // không bao giờ thuộc về plugin). Worker emit finished(bool) từ
+    // thread chạy pipeline → handler dưới đây chạy queued trên thread
+    // của service (receiver `this`). Thread chỉ thoát exec() khi worker
+    // báo xong (quit), và self-delete sau khi đã kết thúc.
+    m_thread = new QThread(); // ownership tường minh (finishRun/dtor xóa)
+    auto* worker = new ReconstructionWorker(this); // không parent → mới move được
+    m_worker = worker;
+    worker->moveToThread(m_thread);
+
+    // Worker tự quit event loop của chính nó ngay khi run() trả về
+    // (DirectConnection: quit() thread-safe, không phụ thuộc event loop của
+    // service). Teardown chạy queued trên thread của service.
+    connect(worker, &ReconstructionWorker::finished, m_thread,
+            &QThread::quit, Qt::DirectConnection);
+    connect(worker, &ReconstructionWorker::finished, this,
+            [this](bool ok) { finishRun(ok); }, Qt::QueuedConnection);
+
+    QMetaObject::invokeMethod(worker, "run", Qt::QueuedConnection);
+    m_thread->start();
+    return true;
+}
+
+void ReconstructionService::finishRun(bool ok) {
+    // Thread đã được quit() ngay trước tín hiệu; join để chắc chắn nó dừng
+    // hẳn rồi mới xóa worker (worker có affinity với thread đó).
+    if (m_thread) {
+        m_thread->wait();
+        delete m_thread;
+        m_thread = nullptr;
+    }
+    delete m_worker;
+    m_worker = nullptr;
+    m_running = false;
+
+    QString detail;
+    {
+        std::shared_lock lock(m_mutex);
+        detail = m_lastError;
+    }
+    emit reconstructFinished(ok, ok ? QString() : detail);
+}
+
+bool ReconstructionService::runPipeline() {
     bool ok;
     {
         std::unique_lock lock(m_mutex);
-        ok = m_pipeline->reconstruct();
+        ok = m_pipeline->reconstruct(
+            [this] { return m_cancelRequested.load(std::memory_order_relaxed); });
+        m_lastError = ok ? QString() : m_pipeline->errorString();
     }
-    m_running = false;
     return ok;
 }
 
@@ -67,9 +142,12 @@ bool ReconstructionService::isRunning() const {
 }
 
 void ReconstructionService::stopReconstruction() {
-    // ReconstructionPipeline doesn't have a stop API yet.
-    // This is a placeholder — thread termination handled by ReconstructThread.
-    m_running = false;
+    // Hủy cooperative: pipeline tự thoát tại checkpoint kế tiếp rồi worker
+    // emit finished(false) → quit() → dọn dẹp → reconstructFinished(false).
+    // Không block thread gọi (UI) và không terminate() giữa chừng — terminate
+    // có thể bỏ m_mutex ở trạng thái khóa vĩnh viễn (worker đang giữ khi chạy
+    // pipeline), khiến mọi lệnh sau đó deadlock.
+    m_cancelRequested = true;
 }
 
 QStringList ReconstructionService::getImageList() const {

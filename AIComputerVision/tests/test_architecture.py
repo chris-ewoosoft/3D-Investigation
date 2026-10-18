@@ -38,7 +38,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "dataset": frozenset({"checks"}),
     "errors": frozenset(),
     "fsio": frozenset({"errors"}),
-    "gate": frozenset({"config", "errors", "fsio", "manifest"}),
+    "gate": frozenset({"config", "dataset", "errors", "fsio", "manifest"}),
     "logging_setup": frozenset(),
     "manifest": frozenset({"config", "errors", "fsio"}),
     "preflight": frozenset({"checks", "config", "dataset"}),

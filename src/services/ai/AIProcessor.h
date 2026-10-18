@@ -6,7 +6,9 @@
 #include <onnxruntime_cxx_api.h>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <mutex>
+#include <shared_mutex>
 #include <map>
 
 #include "Global.h"
@@ -19,6 +21,18 @@ struct AIResult {
     std::vector<float> mask_coeffs;
 };
 
+/**
+ * @brief ONNX inference engine for detection / segmentation / tracking.
+ *
+ * Thread-safety contract: the instance is shared between the GUI thread
+ * (interactive inference + model loading via QtConcurrent) and the video
+ * tracking worker. Model load (session swap) takes the session mutex
+ * exclusively; inference takes it shared — Ort::Session::Run is thread-safe
+ * as long as the session is not being replaced/reset concurrently.
+ * Loaded flags and the confidence threshold are atomics so state queries
+ * never need the lock. Tracking state is guarded separately by
+ * m_trackingMutex.
+ */
 class APP_EXPORT AIProcessor {
 public:
     AIProcessor();
@@ -28,13 +42,13 @@ public:
     bool loadSegmentationModel(const QString& modelPath);
     bool loadTrackingModel(const QString& modelPath);
 
-    bool isDetectionModelLoaded() const { return isDetModelLoaded; }
-    bool isSegmentationModelLoaded() const { return isSegModelLoaded; }
-    bool isTrackingModelLoaded() const { return isTrackingLoaded; }
+    bool isDetectionModelLoaded() const { return isDetModelLoaded.load(); }
+    bool isSegmentationModelLoaded() const { return isSegModelLoaded.load(); }
+    bool isTrackingModelLoaded() const { return isTrackingLoaded.load(); }
 
     /** Set confidence threshold [0.0, 1.0] used in detection & segmentation. */
-    void setConfidenceThreshold(float threshold) { m_confidenceThreshold = threshold; }
-    float confidenceThreshold() const { return m_confidenceThreshold; }
+    void setConfidenceThreshold(float threshold) { m_confidenceThreshold.store(threshold); }
+    float confidenceThreshold() const { return m_confidenceThreshold.load(); }
 
     // Returns image with drawn bounding boxes
     cv::Mat runObjectDetection(const cv::Mat& inputImage);
@@ -59,10 +73,14 @@ private:
     std::unique_ptr<Ort::Session> segSession;
     std::unique_ptr<Ort::Session> trackingSession;
 
-    bool isDetModelLoaded;
-    bool isSegModelLoaded;
-    bool isTrackingLoaded;
-    float m_confidenceThreshold = 0.5f;
+    /// Guards the sessions + their input sizes. Load = unique lock
+    /// (session swap must not race a Run); inference = shared lock.
+    mutable std::shared_mutex m_sessionMutex;
+
+    std::atomic_bool isDetModelLoaded;
+    std::atomic_bool isSegModelLoaded;
+    std::atomic_bool isTrackingLoaded;
+    std::atomic<float> m_confidenceThreshold{0.5f};
 
     // Input size of each loaded model, read from the ONNX graph at load time.
     // A model exported with a non-default `--imgsz` is therefore driven with

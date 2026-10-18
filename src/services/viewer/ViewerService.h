@@ -4,9 +4,10 @@
 #include "IAppContext.h"
 #include "IViewerService.h"
 #include "SignalBus.h"
+#include "Global.h"
 #include <QTimer>
 
-class ViewerService : public QObject, public IViewerService {
+class APP_EXPORT ViewerService : public QObject, public IViewerService {
     Q_OBJECT
 public:
     ViewerService(IAppContext* ctx, QObject* parent = nullptr);

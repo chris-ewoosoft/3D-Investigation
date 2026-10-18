@@ -10,16 +10,14 @@ on:
     paths:
       - "AIAssistant/**"
       - "AIComputerVision/**"
-      - "src/app/AppConstants.h"
-      # Read by tests/test_qt_contract.py (launch argv, labels, pct= regex).
-      - "src/modules/AIProcessorPlugin/AITrainDockWidget.cpp"
+      # Contract header mirrored by AIComputerVision/tests/test_contract.py.
+      - "src/core/AppConstants.h"
   pull_request:
     branches: [main]
     paths:
       - "AIAssistant/**"
       - "AIComputerVision/**"
-      - "src/app/AppConstants.h"
-      - "src/modules/AIProcessorPlugin/AITrainDockWidget.cpp"
+      - "src/core/AppConstants.h"
   workflow_dispatch:
 
 concurrency:

@@ -1,15 +1,11 @@
 #ifndef AI_ASSISTANT_RIBBON_UI_H
 #define AI_ASSISTANT_RIBBON_UI_H
 
-#include <QObject>
-#include <QGroupBox>
-#include <QToolButton>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QLabel>
-#include "IAppContext.h"
+#include "AbstractRibbonPanel.h"
 
-class AIAssistantRibbonUI : public QObject {
+class QToolButton;
+
+class AIAssistantRibbonUI : public AbstractRibbonPanel {
     Q_OBJECT
 public:
     explicit AIAssistantRibbonUI(IAppContext* ctx, QWidget* parentPanel, QObject* parent = nullptr);
@@ -19,13 +15,9 @@ public:
     QToolButton* btnRestartRAG() const { return m_btnRestartRAG; }
     QToolButton* btnRestartAgent() const { return m_btnRestartAgent; }
     QToolButton* btnRestartServer() const { return m_btnRestartServer; }
-    QGroupBox* groupAI() const { return m_groupAI; }
+    QGroupBox* groupAI() const { return group(); }
 
 private:
-
-
-    IAppContext* m_ctx;
-    QGroupBox* m_groupAI = nullptr;
     QToolButton* m_btnToggleAssistant = nullptr;
     QToolButton* m_btnRestartModel = nullptr;
     QToolButton* m_btnRestartRAG = nullptr;

@@ -10,9 +10,10 @@
 #include <QScreen>
 #include <QEvent>
 
-#include "Global.h"
-
-class APP_EXPORT ChatImageViewer : public QDialog {
+// Plugin-local UI widget (AIAssistantPlugin). Previously lived in AppCore
+// services/viewer, which forced a concrete-class dependency from the plugin
+// onto the service layer; it is chat UI, so it belongs to the chat plugin.
+class ChatImageViewer : public QDialog {
     Q_OBJECT
 public:
     ChatImageViewer(const QString &imagePath, QWidget *parent = nullptr);

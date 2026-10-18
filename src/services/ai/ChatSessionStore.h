@@ -5,10 +5,14 @@
 
 namespace ChatSessionStore {
 
-void save(const QList<ChatSession> &sessions);
-QList<ChatSession> load();
+// The store is intentionally path-injected (configFilePath comes from
+// IAppPaths/AppConfig at the call site) so it never touches a global
+// singleton itself.
+void save(const QList<ChatSession> &sessions, const QString &username,
+          const QString &configFilePath);
+QList<ChatSession> load(const QString &username, const QString &configFilePath);
 QString generateSessionId();
-QString sessionsPath();
+QString sessionsPath(const QString &username, const QString &configFilePath);
 
 }
 

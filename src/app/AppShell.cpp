@@ -1,7 +1,9 @@
 #include "AppShell.h"
 #include "ISceneService.h"
+#include "IUserManager.h"
 #include "IViewerService.h"
 #include "ISettingsService.h"
+#include "IAppPaths.h"
 #include "SceneService.h"
 #include "ViewerService.h"
 #include "SettingsService.h"
@@ -12,9 +14,13 @@
 #include "IAIAssistantService.h"
 #include "IMailService.h"
 #include "MailService.h"
+#include "SmtpOutbox.h"
+#include "UserManager.h"
 #include "LanguageManager.h"
+#include "ILanguageService.h"
+#include "AppConfig.h"
 #include "CustomProgressDialog.h"
-#include "ReconstructionPipeline.h"
+#include "ShellService.h"
 #include "AIProcessor.h"
 #include "AIAssistant.h"
 #include <QMenuBar>
@@ -32,33 +38,79 @@ AppShell::AppShell(QMainWindow*           mainWindow,
     , m_registry(std::make_unique<ServiceRegistry>())
 {
     m_signalBus = new SignalBus(this);
+
+    // Widget-independent singletons register at CONSTRUCTION, not in
+    // initializeServices(): MainWindow's UI setup (title bar / tab labels)
+    // calls context()->translate() BEFORE initializeServices() runs, and
+    // translate() must never see an empty registry. UserManager::instance()
+    // is touched ONLY here (composition root).
+    m_registry->registerService<IUserManager>(UserManager::instance());
+    m_registry->registerService<ILanguageService>(&LanguageManager::instance());
+    // Path provider — AppConfig remains the process singleton for bootstrap
+    // (Main/Logger), but consumers resolve it through the registry so the
+    // path surface is mockable and the singleton stays at the composition root.
+    m_registry->registerService<IAppPaths>(&AppConfig::instance());
+    // UI-shell contract (menus/tabs/progress dialog) — implementation lives in
+    // AppCore (ShellService) so the contract is unit-testable; AppShell only
+    // wires it and delegates.
+    m_shellService = std::make_unique<ShellService>(
+        m_signalBus, m_registry->get<ILanguageService>());
+    m_shellService->setMenuParent(mainWindow);
+    m_registry->registerService<IShellService>(m_shellService.get());
+
+    // Outgoing-mail seam: UserManager (core) notifies users by email but must
+    // never link the SMTP transport in services/mail directly — the adapter is
+    // wired here, at the composition root.
+    m_outbox = std::make_unique<SmtpOutbox>(UserManager::instance());
+    UserManager::instance()->setOutgoingMail(m_outbox.get());
 }
 
-AppShell::~AppShell() = default;
+AppShell::~AppShell() {
+  // UserManager is a process-lifetime static singleton that outlives this
+  // shell. Detach the injected outbox BEFORE m_outbox is destroyed (it is the
+  // last member, hence the first destroyed), otherwise any later UserManager
+  // email path would dereference a dangling IOutgoingMail pointer.
+  UserManager::instance()->setOutgoingMail(nullptr);
+  // Registry không sở hữu services, nhưng phải ngừng expose chúng trước khi
+  // các unique_ptr dưới đây giải phóng impl — bất kỳ get() trễ nào trong
+  // teardown sẽ nhận nullptr thay vì dangling pointer.
+  m_registry->clear();
+}
 
 // ─── initializeServices ───────────────────────────────────────────────────────
 void AppShell::initializeServices() {
     // ── Phase 1: Critical services (needed for UI immediately) ────────────────
     m_sceneService    = std::make_unique<SceneService>(this, m_vtkWidget, this);
     m_viewerService   = std::make_unique<ViewerService>(this, this);
-    m_settingsService = std::make_unique<SettingsService>();
+    m_settingsService = std::make_unique<SettingsService>(
+        AppConfig::instance().configPath());
 
     m_registry->registerService<ISceneService>(m_sceneService.get());
     m_registry->registerService<IViewerService>(m_viewerService.get());
     m_registry->registerService<ISettingsService>(m_settingsService.get());
+    // IUserManager + ILanguageService + IShellService were registered in the
+    // constructor (widget-independent; UI setup translates before this runs).
+}
 
-    // ── Phase 2: Non-critical services (deferred — init after UI is shown) ────
-    QTimer::singleShot(0, this, [this]() {
-        m_reconService = std::make_unique<ReconstructionService>();
-        m_aiService    = std::make_unique<AIService>(this);
-        m_aiAssistant  = std::make_unique<AIAssistant>(this);
-        m_mailService  = std::make_unique<MailService>();
+void AppShell::initializeDeferredServices() {
+    // Phase 2: heavier, non-UI-critical services. Called EXPLICITLY by
+    // MainWindow right before plugin loading — never queued behind an
+    // implicit singleShot, so "services ready before plugins initialize"
+    // is guaranteed by construction, not by event-queue ordering.
+    if (m_reconService) return; // idempotent
 
-        m_registry->registerService<IReconstructionService>(m_reconService.get());
-        m_registry->registerService<IAIService>(m_aiService.get());
-        m_registry->registerService<IAIAssistantService>(m_aiAssistant.get());
-        m_registry->registerService<IMailService>(m_mailService.get());
-    });
+    m_reconService = std::make_unique<ReconstructionService>();
+    m_aiService    = std::make_unique<AIService>(this);
+    m_aiAssistant  = std::make_unique<AIAssistant>(m_registry->get<ILanguageService>(),
+                                                   m_registry->get<IUserManager>(),
+                                                   m_registry->get<IAppPaths>(),
+                                                   this);
+    m_mailService  = std::make_unique<MailService>(m_registry->get<IUserManager>());
+
+    m_registry->registerService<IReconstructionService>(m_reconService.get());
+    m_registry->registerService<IAIService>(m_aiService.get());
+    m_registry->registerService<IAIAssistantService>(m_aiAssistant.get());
+    m_registry->registerService<IMailService>(m_mailService.get());
 }
 
 // ─── IAppContext ──────────────────────────────────────────────────────────────
@@ -74,42 +126,26 @@ ISettingsService* AppShell::settings() {
     return m_settingsService.get();
 }
 
-// ─── Menu ────────────────────────────────────────────────────────────────────
-QMenu* AppShell::getMenu(const QString& id) {
-    if (!m_menus.contains(id)) {
-        m_menus[id] = new QMenu(m_mainWindow);
-    }
-    return m_menus[id];
+// ─── Shell wiring ────────────────────────────────────────────────────────────
+IShellService* AppShell::shell() {
+    return m_shellService.get();
 }
 
-QMenuBar* AppShell::menuBar() {
-    return m_menuBar;
+void AppShell::setMenuBar(QMenuBar* bar) {
+    m_shellService->setMenuBar(bar);
 }
 
-void AppShell::updateMenuStates() {
-    emit m_signalBus->stateChanged();
-}
-
-// ─── Tab Panels ──────────────────────────────────────────────────────────────
-void AppShell::registerTabPanel(const QString& key, QWidget* panel) {
-    m_tabPanels[key] = panel;
-}
-
-QWidget* AppShell::getTabPanel(const QString& tabName) {
-    // Direct key lookup
-    if (m_tabPanels.contains(tabName)) return m_tabPanels[tabName];
-    // Fallback: search by translated label
-    for (auto it = m_tabPanels.begin(); it != m_tabPanels.end(); ++it) {
-        if (LM_TR(it.key()) == tabName) return it.value();
-    }
-    return nullptr;
+void AppShell::setProgressDialog(CustomProgressDialog* dlg) {
+    m_shellService->setProgressDialog(dlg);
 }
 
 // ─── Language ────────────────────────────────────────────────────────────────
 QString AppShell::translate(const QString& key) {
-    return LM_TR(key);
+    auto* lang = m_registry->get<ILanguageService>();
+    return lang ? lang->translate(key) : key;
 }
 
 void AppShell::setLanguage(const QString& lang) {
-    LM.setLanguage(lang);
+    auto* service = m_registry->get<ILanguageService>();
+    if (service) service->setLanguage(lang);
 }

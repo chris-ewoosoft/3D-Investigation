@@ -1,8 +1,7 @@
 #include "ThemeSelectionDialog.h"
 #include "StyleManager.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 #include "UserAuthPlugin.h"
-#include "LanguageManager.h"
 #include <QLabel>
 #include <QPushButton>
 #include <QStyle>
@@ -27,13 +26,13 @@ ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *par
 {
 
     // Restore per-user theme on open
-    QString savedColor = UserManager::instance()->getUserPref(username, "theme", StyleManager::accentColor());
+    QString savedColor = UserAuthPlugin::users()->getUserPref(username, "theme", StyleManager::accentColor());
     if (!savedColor.isEmpty()) StyleManager::setAccentColor(savedColor);
 
     // Restore background prefs
-    m_useBgImage  = UserManager::instance()->getUserPref(username, "use_bg_image", "0") == "1";
-    m_bgImagePath = UserManager::instance()->getUserPref(username, "bg_image_path", "");
-    m_bgOpacity   = UserManager::instance()->getUserPref(username, "bg_opacity", "30").toInt();
+    m_useBgImage  = UserAuthPlugin::users()->getUserPref(username, "use_bg_image", "0") == "1";
+    m_bgImagePath = UserAuthPlugin::users()->getUserPref(username, "bg_image_path", "");
+    m_bgOpacity   = UserAuthPlugin::users()->getUserPref(username, "bg_opacity", "30").toInt();
 
     QVBoxLayout *layout = new QVBoxLayout();
     layout->setContentsMargins(16, 16, 16, 16);
@@ -206,15 +205,15 @@ ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *par
         // Apply accent color
         if (!m_selectedColor.isEmpty()) {
             StyleManager::setAccentColor(m_selectedColor);
-            UserManager::instance()->setUserPref(m_username, "theme", m_selectedColor);
+            UserAuthPlugin::users()->setUserPref(m_username, "theme", m_selectedColor);
         }
         bool useBg = m_useBgCheckbox->isChecked();
         // Toggle glassmorphism based on checkbox
         StyleManager::setGlassmorphismEnabled(useBg);
         // Save background prefs
-        UserManager::instance()->setUserPref(m_username, "use_bg_image",  useBg ? "1" : "0");
-        UserManager::instance()->setUserPref(m_username, "bg_image_path", m_bgImagePath);
-        UserManager::instance()->setUserPref(m_username, "bg_opacity",    QString::number(m_bgOpacity));
+        UserAuthPlugin::users()->setUserPref(m_username, "use_bg_image",  useBg ? "1" : "0");
+        UserAuthPlugin::users()->setUserPref(m_username, "bg_image_path", m_bgImagePath);
+        UserAuthPlugin::users()->setUserPref(m_username, "bg_opacity",    QString::number(m_bgOpacity));
         m_useBgImage = useBg;
         applyBackground();
     });

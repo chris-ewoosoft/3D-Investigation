@@ -4,8 +4,7 @@
 #include "Model3DLoader.h"
 #include "Image2DLoader.h"
 #include "PanStyle.h"
-#include "SignalBus.h"
-#include "UserManager.h"
+#include "IUserManager.h"
 
 #include <vtkRenderWindow.h>
 #include <vtkLight.h>
@@ -26,8 +25,6 @@
 #include <vtkActor.h>
 #include <algorithm>
 #include <limits>
-#include <QFileDialog>
-#include "../utils/ModernMessageBox.h"
 #include <vtkRenderWindow.h>
 #include <vtkLight.h>
 #include <vtkCornerAnnotation.h>
@@ -66,6 +63,22 @@ void SceneService::setTextureActor(vtkSmartPointer<vtkActor> actor) {
     if (m_texturePlaneActor) {
         m_renderer->AddActor(m_texturePlaneActor);
     }
+}
+
+vtkSmartPointer<vtkActor> SceneService::loadImageActor(const QString& imagePath) {
+    return Image2DLoader::load(imagePath);
+}
+
+vtkSmartPointer<vtkActor> SceneService::loadImageActor(const cv::Mat& image) {
+    return Image2DLoader::loadFromMat(image);
+}
+
+void SceneService::showImage(const QString& imagePath) {
+    setTextureActor(Image2DLoader::load(imagePath));
+}
+
+void SceneService::showImage(const cv::Mat& image) {
+    setTextureActor(Image2DLoader::loadFromMat(image));
 }
 
 void SceneService::setPointCloudActor(vtkSmartPointer<vtkActor> actor) {
@@ -145,18 +158,16 @@ void SceneService::loadOBJwithMTL(const QString &objPath, const QString &mtlPath
     m_vtkWidget->renderWindow()->Render();
 }
 
-void SceneService::onLoadDicom(const QString &path) {
-    QString fn = path;
-    if (fn.isEmpty()) {
-        fn = QFileDialog::getExistingDirectory(m_ctx->mainWindow(), m_ctx->translate("file.select_dicom"), m_ctx->settings()->getLastUsedPath("viewer_dicom"), QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+bool SceneService::onLoadDicom(const QString &path) {
+    if (path.isEmpty()) {
+        // No UI in the service layer — an empty path means the caller's file
+        // dialog was cancelled; report nothing.
+        return false;
     }
-    if (fn.isEmpty()) return;
 
-    m_ctx->settings()->setLastUsedPath("viewer_dicom", fn);
-    auto volume = DicomLoader::loadSeries(fn);
+    auto volume = DicomLoader::loadSeries(path);
     if (!volume || volume->GetNumberOfPoints() < 1) {
-        ModernMessageBox::warning(m_ctx->mainWindow(), m_ctx->translate("dicom.load_err_title"), m_ctx->translate("dicom.load_err_msg"));
-        return;
+        return false;
     }
 
     clear3DModel();
@@ -177,6 +188,7 @@ void SceneService::onLoadDicom(const QString &path) {
     m_renderer->ResetCamera();
     
     m_vtkWidget->renderWindow()->Render();
+    return true;
 }
 
 void SceneService::setupDicomRenderers(vtkSmartPointer<vtkImageData> volume) {
@@ -272,7 +284,7 @@ void SceneService::setupCrosshairInteractor() {
 void SceneService::applyViewSettings(const QString& username) {
     if (!m_renderer || !m_vtkWidget || !m_vtkWidget->renderWindow()) return;
 
-    auto* um = UserManager::instance();
+    auto* um = m_ctx->services()->get<IUserManager>();
     if (!um) return;
 
     // ── 1. Background color ─────────────────────────────────────────────────

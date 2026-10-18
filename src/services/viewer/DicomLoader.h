@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DICOMLOADER_H
+#define DICOMLOADER_H
 
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
@@ -19,3 +20,5 @@ public:
     // Tạo Volume hiển thị khối 3D
     static vtkSmartPointer<vtkVolume> createVolume(vtkImageData* data, double range[2]);
 };
+
+#endif // DICOMLOADER_H

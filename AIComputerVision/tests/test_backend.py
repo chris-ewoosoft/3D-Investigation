@@ -55,6 +55,9 @@ class ProtocolTests(unittest.TestCase):
             def train(self, spec: Any, cfg: TrainConfig, on_epoch: Any) -> TrainedModel[Any]:  # pragma: no cover
                 raise NotImplementedError
 
+            def check_device(self, cfg: TrainConfig) -> tuple[bool, str]:  # pragma: no cover
+                raise NotImplementedError
+
             def export(self, model: TrainedModel[Any], cfg: TrainConfig) -> Path:  # pragma: no cover
                 raise NotImplementedError
 
@@ -368,6 +371,40 @@ class ExportTests(_SandboxedTestCase):
         assert _FakeYOLO.last is not None
         self.assertEqual(_FakeYOLO.last.export_kwargs, {"format": "onnx", "opset": 17})
         self.assertEqual(produced, self.exported_onnx)
+
+
+class CheckDeviceTests(unittest.TestCase):
+    def test_default_or_cpu_always_succeeds(self) -> None:
+        backend = UltralyticsBackend()
+        self.assertEqual(backend.check_device(TrainConfig(device=None)), (True, "device ok"))
+        self.assertEqual(backend.check_device(TrainConfig(device="auto")), (True, "device ok"))
+        self.assertEqual(backend.check_device(TrainConfig(device="cpu")), (True, "device ok"))
+        self.assertEqual(backend.check_device(TrainConfig(device="mps")), (True, "device ok"))
+
+    def test_cuda_device_passes_when_torch_cuda_is_available(self) -> None:
+        backend = UltralyticsBackend()
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = SimpleNamespace(is_available=lambda: True)  # type: ignore[attr-defined]
+        with mock.patch.dict("sys.modules", {"torch": fake_torch}):
+            ok, msg = backend.check_device(TrainConfig(device="cuda"))
+            self.assertTrue(ok)
+            self.assertEqual(msg, "device ok")
+
+    def test_cuda_device_fails_when_torch_cuda_is_unavailable(self) -> None:
+        backend = UltralyticsBackend()
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = SimpleNamespace(is_available=lambda: False)  # type: ignore[attr-defined]
+        with mock.patch.dict("sys.modules", {"torch": fake_torch}):
+            ok, msg = backend.check_device(TrainConfig(device="0"))
+            self.assertFalse(ok)
+            self.assertIn("CUDA is not available", msg)
+
+    def test_cuda_device_passes_when_torch_is_not_installed(self) -> None:
+        backend = UltralyticsBackend()
+        with mock.patch.dict("sys.modules", {"torch": None}):
+            ok, _msg = backend.check_device(TrainConfig(device="0,1"))
+            self.assertTrue(ok)
+
 
 
 if __name__ == "__main__":
