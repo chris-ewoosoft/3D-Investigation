@@ -30,7 +30,7 @@ from cvtrain.backend import (
     metrics_from,
     train_kwargs,
 )
-from cvtrain.config import MODEL_SPECS, TrainConfig
+from cvtrain.config import MODEL_REGISTRY, TrainConfig
 from cvtrain.errors import BackendUnavailableError
 
 
@@ -204,7 +204,10 @@ class LazyImportTests(_SandboxedTestCase):
     def test_declares_the_modules_preflight_must_verify(self) -> None:
         # A method, not a constant: an optional feature can add an optional
         # dependency, and the adapter is the one module that knows which.
-        self.assertEqual(UltralyticsBackend().required_modules(self.cfg), ("ultralytics", "yaml", "onnx"))
+        self.assertEqual(
+            UltralyticsBackend().required_modules(self.cfg),
+            ("ultralytics", "yaml", "onnx", "onnxruntime"),
+        )
 
     def test_tensorboard_is_demanded_only_when_it_was_asked_for(self) -> None:
         backend = UltralyticsBackend()
@@ -286,7 +289,7 @@ class PrepareTests(_SandboxedTestCase):
 
 class TrainTests(_SandboxedTestCase):
     def test_loads_the_checkpoint_declared_by_the_model_spec(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         with _stub_ultralytics(export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
             backend.prepare(self.cfg)
@@ -295,7 +298,7 @@ class TrainTests(_SandboxedTestCase):
         self.assertEqual(Path(_FakeYOLO.last.weights), self.cfg.weights_path(spec))
 
     def test_forwards_hyperparameters_and_uses_the_run_subdirectory(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         with _stub_ultralytics(export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
             backend.prepare(self.cfg)
@@ -310,7 +313,7 @@ class TrainTests(_SandboxedTestCase):
         self.assertIs(kwargs["exist_ok"], False)
 
     def test_registers_the_epoch_callback_and_reports_progress(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         seen: list[tuple[int, int]] = []
         with _stub_ultralytics(export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
@@ -323,7 +326,7 @@ class TrainTests(_SandboxedTestCase):
         self.assertEqual(seen, [(1, 3)])
 
     def test_missing_epoch_attributes_fall_back_safely(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         seen: list[tuple[int, int]] = []
         with _stub_ultralytics(export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
@@ -334,7 +337,7 @@ class TrainTests(_SandboxedTestCase):
         self.assertEqual(seen, [(0, self.cfg.epochs)])
 
     def test_returns_metrics_and_the_framework_reported_run_dir(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         run_dir = self.root / "runs" / "detect" / "train-20260101-000000"
         with _stub_ultralytics(save_dir=str(run_dir), export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
@@ -345,7 +348,7 @@ class TrainTests(_SandboxedTestCase):
 
     def test_run_dir_falls_back_to_the_project_directory(self) -> None:
         # A trainer object without save_dir must not crash the pipeline.
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         with _stub_ultralytics(save_dir=None, export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
             backend.prepare(self.cfg)
@@ -365,7 +368,7 @@ class ExportTests(_SandboxedTestCase):
         with _stub_ultralytics(export_path=str(self.exported_onnx)):
             backend = UltralyticsBackend()
             backend.prepare(self.cfg)
-            trained = backend.train(MODEL_SPECS["det"], self.cfg, lambda epoch, total: None)
+            trained = backend.train(MODEL_REGISTRY["det"], self.cfg, lambda epoch, total: None)
             produced = backend.export(trained, self.cfg)
 
         assert _FakeYOLO.last is not None

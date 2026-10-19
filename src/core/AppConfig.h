@@ -10,20 +10,24 @@
 
 /**
  * @brief Process-wide path provider. Implements IAppPaths so plugins and
- * services can resolve it from the ServiceRegistry; the singleton accessor
- * remains for bootstrap code (Main.cpp / Logger) that runs before the
- * registry exists.
+ * services can resolve it from the ServiceRegistry; the bootstrap accessor
+ * serves code (Main.cpp / AppShell / Logger) that runs before the registry
+ * exists.
  */
-class AppShell;
-
 class APP_EXPORT AppConfig : public IAppPaths {
 public:
+    /**
+     * @brief Bootstrap / composition-root accessor.
+     *
+     * Allowed only in Main.cpp, AppShell.cpp and Logger.cpp — the code that
+     * runs before (or while wiring) the ServiceRegistry. Everywhere else,
+     * resolve IAppPaths from the registry.
+     */
+    static AppConfig& bootstrap();
+
     /** @deprecated Resolve IAppPaths from ServiceRegistry; direct access only for bootstrap. */
     [[deprecated("Use ctx->services()->get<IAppPaths>() instead")]]
     static AppConfig& instance();
-
-private:
-    friend class AppShell;
 
 public:
     void initialize(const QString& appDir);
@@ -41,6 +45,16 @@ public:
     QString uploadDir() const override;
     QString thumbnailsDir() const override;
     QString pluginsDir() const override;
+
+    // ── Runtime configuration (composition-root only) ─────────────────────────
+    // Not part of IAppPaths: plugins/services receive these values injected by
+    // AppShell, so this surface stays a bootstrap concern.
+    /// Python interpreter used to launch the AI assistant backend.
+    /// Config: [AI] python_interpreter=<path-or-command> (default "python").
+    QString pythonInterpreter() const;
+    /// Port the AI assistant backend listens on.
+    /// Config: [AI] server_port=<1024-65535> (default 8080).
+    int aiServerPort() const;
 
 private:
     AppConfig() = default;

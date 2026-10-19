@@ -21,6 +21,18 @@ namespace AIYoloPostProcessor {
 /// shape instead, so `--imgsz` at export time is honoured at inference time.
 constexpr int kDefaultModelInputSize = 640;
 
+/// Tensor schema the Qt loader relies on. Mirrored by
+/// ``AIComputerVision/cvtrain/onnx_contract.py``; ``tests/test_contract.py``
+/// cross-checks every value, so a Python export and this parser cannot drift
+/// apart without turning the suite red.
+constexpr int kExpectedInputRank = 4;
+constexpr int kExpectedInputChannels = 3;
+constexpr int kExpectedDetectionOutputRank = 3;
+constexpr int kExpectedSegmentationOutputCount = 2;
+constexpr int kExpectedSegmentationProtoRank = 4;
+constexpr int kExpectedBoxCoordinates = 4;
+constexpr int kExpectedMaskCoefficients = 32;
+
 /// Derive the ``(width, height)`` a session expects from its NCHW input shape.
 ///
 /// ``shape`` is the ONNX input shape as ONNX Runtime reports it — ``[N, C, H,

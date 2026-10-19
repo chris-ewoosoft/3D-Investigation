@@ -2,7 +2,9 @@
 #define RECONSTRUCTION_PLUGIN_H
 
 #include <QObject>
+#include <QStringList>
 #include "IPlugin.h"
+#include "AppConstants.h"
 #include "IAppContext.h"
 #include "IReconstructionService.h"
 #include <QAction>
@@ -19,6 +21,9 @@ class ReconstructionPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "Reconstruction Plugin"; }
+    QStringList dependencies() const override {
+        return {QString::fromLatin1(AppConstants::PluginNames::UserAuthentication)};
+    }
     bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 20; }

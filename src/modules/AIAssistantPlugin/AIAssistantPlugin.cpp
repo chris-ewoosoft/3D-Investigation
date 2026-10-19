@@ -75,7 +75,7 @@ bool AIAssistantPlugin::initialize(IAppContext* context) {
     }
     
     // Inject AI Assistant button into tab.ai_assistant panel
-    if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.ai_assistant")) {
+    if (QWidget* panel = m_ctx->shell()->getTabPanel(AppConstants::TabIds::AiAssistant)) {
         m_ribbonUI = new AIAssistantRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnToggleAssistant(), &QToolButton::clicked, this, &AIAssistantPlugin::onToggleChatbot);
         connect(m_ribbonUI->btnRestartModel(), &QToolButton::clicked, this, [this]() {
@@ -449,26 +449,9 @@ void AIAssistantPlugin::updateSessionListUI() {
     QString currentId = m_aiAssistant->currentSessionId();
     for (const auto &s : sessions) {
         QString displayTitle = s.title;
-        if (displayTitle.startsWith("Phiên mới ") || displayTitle.startsWith("New Session ")) {
-            QString dateTimeStr;
-            if (displayTitle.startsWith("Phiên mới ")) {
-                dateTimeStr = displayTitle.mid(10).trimmed();
-            } else {
-                dateTimeStr = displayTitle.mid(12).trimmed();
-            }
-            
-            // Recursively clean up any legacy artifacts from saved sessions (e.g. "mới " or "Session ")
-            if (dateTimeStr.startsWith("mới ")) {
-                dateTimeStr = dateTimeStr.mid(4).trimmed();
-            }
-            if (dateTimeStr.startsWith("Session ")) {
-                dateTimeStr = dateTimeStr.mid(8).trimmed();
-            }
-            if (dateTimeStr.startsWith("mới ")) {
-                dateTimeStr = dateTimeStr.mid(4).trimmed();
-            }
-            
-            displayTitle = m_ctx->translate("ai.new_session") + " " + dateTimeStr;
+        if (s.titleIsDefault) {
+            displayTitle = m_ctx->translate("ai.new_session") + " " +
+                           s.createdAt.toString(AppConstants::Format::sessionDateTime());
         }
         QListWidgetItem *item = new QListWidgetItem(displayTitle, m_dockUI->sessionListWidget());
         item->setData(Qt::UserRole, s.id);

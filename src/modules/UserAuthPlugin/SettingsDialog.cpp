@@ -136,7 +136,9 @@ void SettingsDialog::setupUi() {
     form->setVerticalSpacing(15);
 
     QComboBox *renderQuality = new QComboBox();
-    renderQuality->addItems({"Thấp (Nhanh)", "Trung bình", "Cao (Đẹp)"});
+    renderQuality->addItems({UserAuthPlugin::translate("settings.view.quality_low"),
+                             UserAuthPlugin::translate("settings.view.quality_medium"),
+                             UserAuthPlugin::translate("settings.view.quality_high")});
     renderQuality->setCurrentIndex(
         UserAuthPlugin::users()
             ->getUserPref(m_username, "view_render_quality", "2")
@@ -146,9 +148,10 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(
                   m_username, "view_render_quality", QString::number(index));
             });
-    form->addRow("Chất lượng Render:", renderQuality);
+    form->addRow(UserAuthPlugin::translate("settings.view.render_quality"), renderQuality);
 
-    QCheckBox *showGrid = new QCheckBox("Hiển thị lưới nền (Grid)");
+    QCheckBox *showGrid = new QCheckBox(
+        UserAuthPlugin::translate("settings.view.show_grid"));
     showGrid->setChecked(UserAuthPlugin::users()->getUserPref(
                              m_username, "view_show_grid", "true") == "true");
     connect(showGrid, &QCheckBox::toggled, this, [this](bool checked) {
@@ -157,7 +160,8 @@ void SettingsDialog::setupUi() {
     });
     form->addRow("", showGrid);
 
-    QCheckBox *showAxes = new QCheckBox("Hiển thị trục toạ độ (Axes)");
+    QCheckBox *showAxes = new QCheckBox(
+        UserAuthPlugin::translate("settings.view.show_axes"));
     showAxes->setChecked(UserAuthPlugin::users()->getUserPref(
                              m_username, "view_show_axes", "true") == "true");
     connect(showAxes, &QCheckBox::toggled, this, [this](bool checked) {
@@ -167,7 +171,9 @@ void SettingsDialog::setupUi() {
     form->addRow("", showAxes);
 
     QComboBox *bgColor = new QComboBox();
-    bgColor->addItems({"Tối (Dark)", "Sáng (Light)", "Xám (Gray)"});
+    bgColor->addItems({UserAuthPlugin::translate("settings.view.bg_dark"),
+                       UserAuthPlugin::translate("settings.view.bg_light"),
+                       UserAuthPlugin::translate("settings.view.bg_gray")});
     bgColor->setCurrentIndex(UserAuthPlugin::users()
                                  ->getUserPref(m_username, "view_bg_color", "0")
                                  .toInt());
@@ -176,7 +182,7 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "view_bg_color",
                                                    QString::number(index));
             });
-    form->addRow("Màu nền 3D:", bgColor);
+    form->addRow(UserAuthPlugin::translate("settings.view.bg_color"), bgColor);
 
     l->addLayout(form);
     l->addStretch();
@@ -193,9 +199,9 @@ void SettingsDialog::setupUi() {
     form->setVerticalSpacing(15);
 
     QComboBox *algorithm = new QComboBox();
-    algorithm->addItems({"Mặc định (SGBM)",
-                         "Nâng cao (Neural Radiance Fields - NeRF)",
-                         "Gaussian Splatting"});
+    algorithm->addItems({UserAuthPlugin::translate("settings.recon.algorithm_default"),
+                         UserAuthPlugin::translate("settings.recon.algorithm_nerf"),
+                         UserAuthPlugin::translate("settings.recon.algorithm_gaussian")});
     algorithm->setCurrentIndex(
         UserAuthPlugin::users()
             ->getUserPref(m_username, "recon_algorithm", "0")
@@ -205,10 +211,13 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(
                   m_username, "recon_algorithm", QString::number(index));
             });
-    form->addRow("Thuật toán tái tạo:", algorithm);
+    form->addRow(UserAuthPlugin::translate("settings.recon.algorithm"), algorithm);
 
     QComboBox *density = new QComboBox();
-    density->addItems({"Thấp", "Trung bình", "Cao", "Rất cao"});
+    density->addItems({UserAuthPlugin::translate("settings.recon.density_low"),
+                       UserAuthPlugin::translate("settings.recon.density_medium"),
+                       UserAuthPlugin::translate("settings.recon.density_high"),
+                       UserAuthPlugin::translate("settings.recon.density_very_high")});
     density->setCurrentIndex(UserAuthPlugin::users()
                                  ->getUserPref(m_username, "recon_density", "1")
                                  .toInt());
@@ -217,9 +226,10 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "recon_density",
                                                    QString::number(index));
             });
-    form->addRow("Mật độ điểm ảnh (Point Cloud):", density);
+    form->addRow(UserAuthPlugin::translate("settings.recon.density"), density);
 
-    QCheckBox *autoClean = new QCheckBox("Tự động lọc nhiễu (Noise filter)");
+    QCheckBox *autoClean = new QCheckBox(
+        UserAuthPlugin::translate("settings.recon.auto_clean"));
     autoClean->setChecked(
         UserAuthPlugin::users()->getUserPref(m_username, "recon_auto_clean",
                                              "true") == "true");
@@ -240,7 +250,7 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(
                   m_username, "recon_max_features", QString::number(value));
             });
-    form->addRow("Số đặc trưng tối đa (Features):", maxFeatures);
+    form->addRow(UserAuthPlugin::translate("settings.recon.max_features"), maxFeatures);
 
     l->addLayout(form);
     l->addStretch();
@@ -268,7 +278,7 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "aitool_model",
                                                    QString::number(index));
             });
-    form->addRow("Mô hình phát hiện/phân vùng:", modelSelection);
+    form->addRow(UserAuthPlugin::translate("settings.ai.model"), modelSelection);
 
     QSlider *confidence = new QSlider(Qt::Horizontal);
     confidence->setRange(0, 100);
@@ -280,9 +290,10 @@ void SettingsDialog::setupUi() {
       UserAuthPlugin::users()->setUserPref(m_username, "aitool_confidence",
                                            QString::number(value));
     });
-    form->addRow("Ngưỡng tự tin (Confidence):", confidence);
+    form->addRow(UserAuthPlugin::translate("settings.ai.confidence"), confidence);
 
-    QCheckBox *useGpu = new QCheckBox("Sử dụng phần cứng tăng tốc (GPU/CUDA)");
+    QCheckBox *useGpu = new QCheckBox(
+        UserAuthPlugin::translate("settings.ai.use_gpu"));
     useGpu->setChecked(UserAuthPlugin::users()->getUserPref(
                            m_username, "aitool_use_gpu", "true") == "true");
     connect(useGpu, &QCheckBox::toggled, this, [this](bool checked) {
@@ -317,17 +328,18 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "ai_provider",
                                                    QString::number(index));
             });
-    form->addRow("Nền tảng AI:", apiProvider);
+    form->addRow(UserAuthPlugin::translate("settings.ai.provider"), apiProvider);
 
     QLineEdit *apiKey = new QLineEdit();
     apiKey->setEchoMode(QLineEdit::Password);
-    apiKey->setPlaceholderText("Nhập API Key...");
+    apiKey->setPlaceholderText(
+        UserAuthPlugin::translate("settings.ai.api_key_placeholder"));
     apiKey->setText(
         UserAuthPlugin::users()->getUserPref(m_username, "ai_api_key", ""));
     connect(apiKey, &QLineEdit::textChanged, this, [this](const QString &text) {
       UserAuthPlugin::users()->setUserPref(m_username, "ai_api_key", text);
     });
-    form->addRow("API Key:", apiKey);
+    form->addRow(UserAuthPlugin::translate("settings.ai.api_key"), apiKey);
 
     QDoubleSpinBox *temperature = new QDoubleSpinBox();
     temperature->setRange(0.0, 2.0);
@@ -340,9 +352,10 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "ai_temperature",
                                                    QString::number(value));
             });
-    form->addRow("Độ sáng tạo (Temperature):", temperature);
+    form->addRow(UserAuthPlugin::translate("settings.ai.temperature"), temperature);
 
-    QCheckBox *saveHistory = new QCheckBox("Lưu lịch sử trò chuyện cục bộ");
+    QCheckBox *saveHistory = new QCheckBox(
+        UserAuthPlugin::translate("settings.ai.save_history"));
     saveHistory->setChecked(
         UserAuthPlugin::users()->getUserPref(m_username, "ai_save_history",
                                              "true") == "true");
@@ -374,7 +387,7 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username,
                                                    "mail_smtp_server", text);
             });
-    form->addRow("Máy chủ SMTP:", smtpServer);
+    form->addRow(UserAuthPlugin::translate("settings.mail.smtp_server"), smtpServer);
 
     QSpinBox *port = new QSpinBox();
     port->setRange(1, 65535);
@@ -386,7 +399,7 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserPref(m_username, "mail_port",
                                                    QString::number(value));
             });
-    form->addRow("Cổng (Port):", port);
+    form->addRow(UserAuthPlugin::translate("settings.mail.port"), port);
 
     QLineEdit *email = new QLineEdit();
     email->setPlaceholderText("example@gmail.com");
@@ -395,11 +408,12 @@ void SettingsDialog::setupUi() {
     connect(email, &QLineEdit::textChanged, this, [this](const QString &text) {
       UserAuthPlugin::users()->setUserPref(m_username, "mail_email", text);
     });
-    form->addRow("Địa chỉ Email:", email);
+    form->addRow(UserAuthPlugin::translate("settings.mail.email"), email);
 
     QLineEdit *password = new QLineEdit();
     password->setEchoMode(QLineEdit::Password);
-    password->setPlaceholderText("Mật khẩu ứng dụng");
+    password->setPlaceholderText(
+        UserAuthPlugin::translate("settings.mail.password_placeholder"));
     password->setText(
         UserAuthPlugin::users()->getUserSecret(m_username, "mail_password", ""));
     connect(password, &QLineEdit::textChanged, this,
@@ -407,9 +421,10 @@ void SettingsDialog::setupUi() {
               UserAuthPlugin::users()->setUserSecret(m_username, "mail_password",
                                                      text);
             });
-    form->addRow("Mật khẩu:", password);
+    form->addRow(UserAuthPlugin::translate("settings.mail.password"), password);
 
-    QPushButton *testBtn = new QPushButton("Kiểm tra kết nối");
+    QPushButton *testBtn = new QPushButton(
+        UserAuthPlugin::translate("settings.mail.test_title"));
     testBtn->setFixedWidth(160);
     connect(testBtn, &QPushButton::clicked, this,
             [this, smtpServer, port, email, password, testBtn]() {
@@ -441,13 +456,16 @@ void SettingsDialog::setupUi() {
                             testBtn->setEnabled(true);
                             if (result.first) {
                               QMessageBox::information(
-                                  this, "Kiểm tra kết nối",
-                                  "✅ Kết nối SMTP/IMAP thành công!\nEmail: " +
-                                      email->text());
+                                  this,
+                                  UserAuthPlugin::translate("settings.mail.test_title"),
+                                  UserAuthPlugin::translate("settings.mail.test_success") +
+                                      "\nEmail: " + email->text());
                             } else {
-                              QMessageBox::warning(this, "Kiểm tra kết nối",
-                                                   "❌ Kết nối thất bại:\n" +
-                                                       result.second);
+                              QMessageBox::warning(
+                                  this,
+                                  UserAuthPlugin::translate("settings.mail.test_title"),
+                                  UserAuthPlugin::translate("settings.mail.test_failure") +
+                                      "\n" + result.second);
                             }
                           });
                   watcher->setFuture(QtConcurrent::run([mailSvc]() {
@@ -458,8 +476,9 @@ void SettingsDialog::setupUi() {
                   return;
                 }
               }
-              QMessageBox::information(this, "Kiểm tra kết nối",
-                                       "Mail service chưa được khởi tạo.");
+              QMessageBox::information(
+                  this, UserAuthPlugin::translate("settings.mail.test_title"),
+                  UserAuthPlugin::translate("settings.mail.unavailable"));
             });
     form->addRow("", testBtn);
 

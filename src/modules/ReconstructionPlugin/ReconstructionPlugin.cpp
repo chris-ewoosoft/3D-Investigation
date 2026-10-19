@@ -22,6 +22,7 @@
 #include <QPointer>
 #include <QPainter>
 #include <QLinearGradient>
+#include <utility>
 #include <QMainWindow>
 
 #include <QGroupBox>
@@ -167,11 +168,11 @@ void ReconstructionPlugin::onLoadMultipleImages() {
 
     m_ctx->settings()->setLastUsedPath("recon", QFileInfo(fileNames.first()).absolutePath());
     QStringList stdFiles;
-    for (const QString& f : qAsConst(fileNames)) {
+    for (const QString& f : std::as_const(fileNames)) {
         stdFiles.push_back(QDir::toNativeSeparators(f));
     }
     std::vector<QString> paths;
-    for (const auto &f : qAsConst(stdFiles)) paths.push_back(f);
+    for (const auto &f : std::as_const(stdFiles)) paths.push_back(f);
 
     // Dùng IReconstructionService interface — không biết ReconstructionPipeline
     if (m_reconSvc) m_reconSvc->setImages(stdFiles);
@@ -184,7 +185,7 @@ void ReconstructionPlugin::onLoadMultipleImages() {
     
     // Push file list to viewer service. ViewerPlugin will automatically show the thumbnail list.
     QStringList filenamesOnly;
-    for (const QString& f : qAsConst(fileNames)) {
+    for (const QString& f : std::as_const(fileNames)) {
         filenamesOnly.append(QFileInfo(f).fileName());
     }
     m_ctx->viewer()->setCurrent2DImagePath(fileNames.first());

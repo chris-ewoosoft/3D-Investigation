@@ -57,11 +57,9 @@ if TYPE_CHECKING:
     from ai_assistant.adapters.http.security import TransportPolicy
     from ai_assistant.adapters.mcp import McpToolServer
     from ai_assistant.agents.service import AgentService
-    from ai_assistant.application.agent_runs import AgentRunService
     from ai_assistant.bootstrap.container import PlatformContainer
+    from ai_assistant.bootstrap.modules import RuntimeModules
     from ai_assistant.config import AppPaths, ModelRegistry, RAGSettings
-    from ai_assistant.domain.tasks import AgentTask
-    from ai_assistant.orchestration.specialists import ChatbotAgent
     from ai_assistant.tools import ToolRegistry
 
 # The composition root owns the process environment (ADR 0001): merge ``.env``
@@ -134,252 +132,16 @@ def _resolve_model_idx(argv: list[str], models: list[dict[str, Any]]) -> int:
     return idx
 
 
-# ── Compatibility wrappers (replaces legacy llm_module / rag_module shims) ──
-
-
-class _LLMModule:
-    llm: Any = None
-    llm_lock: Any = threading.RLock()
-    active_model_desc: str = ""
-    is_vision_model: bool = False
-
-    @staticmethod
-    def _adopt_backend(backend: Any) -> bool:
-        """Bind a freshly loaded backend to the module state.
-
-        Returns ``False`` (and logs) when the backend is missing, so a failed
-        load is visible instead of leaving the previous model advertised as
-        current with neither branch excluded from coverage.
-        """
-        compose()
-        if backend is None:
-            logger.error("No inference backend after load; keeping previous module state")
-            return False
-        _LLMModule.llm = backend
-        _LLMModule.is_vision_model = getattr(backend, "is_vision_supported", False)
-        _LLMModule.active_model_desc = getattr(backend, "model_description", "")
-        return True
-
-    @staticmethod
-    def load_model(model_idx: int | None = None) -> None:
-        compose()
-        from ai_assistant.llm import get_backend, load_model
-        from ai_assistant.llm.defaults import LLM_N_CTX
-
-        load_model(
-            registry=_registry,
-            models_dir=str(_paths.models_dir),
-            model_idx=model_idx or MODEL_IDX,
-            enable_vision=USE_VISION_LLM,
-            n_ctx=LLM_N_CTX,
-        )
-        _LLMModule._adopt_backend(get_backend())
-
-    @staticmethod
-    def reload_model() -> None:
-        compose()
-        from ai_assistant.llm import get_backend, reload_model
-        from ai_assistant.llm.defaults import LLM_N_CTX
-
-        reload_model(
-            registry=_registry,
-            models_dir=str(_paths.models_dir),
-            model_idx=MODEL_IDX,
-            enable_vision=USE_VISION_LLM,
-            n_ctx=LLM_N_CTX,
-        )
-        _LLMModule._adopt_backend(get_backend())
-
-    @staticmethod
-    def estimate_tokens(text: str) -> int:
-        from ai_assistant.llm.defaults import CHARS_PER_TOKEN
-
-        # Simple approximation; full logic stays in llm module
-        return max(1, int(len(text) / CHARS_PER_TOKEN))
-
-
-class _RAGModule:
-    rag_lock = threading.RLock()
-    knowledge_index = None
-    knowledge_chunks: list[Any] = []
-    bm25_index = None
-    embed_model_ref: Any = None
-    _reranker = None
-    _pipeline: Any = None     # the live retrieval handle (/health and admin reset it)
-    CHUNK_CHARS = 1200
-    MAX_CONTEXT_CHARS = 9000
-
-    @staticmethod
-    def _build_retrievers(index: Any = None, bm25: Any = None,
-                          chunks: list[dict[str, Any]] | None = None,
-                          encoder: Any = None, settings: Any = None) -> tuple[Any | None, Any | None]:
-        """Build the dense/sparse retriever pair for the current index state."""
-        from ai_assistant.rag.retrievers import build_retrievers
-        if index is None or chunks is None or settings is None:
-            return (None, None)
-        return build_retrievers(index, bm25, chunks, encoder, settings)
-
-    @staticmethod
-    def _reset_index_state() -> None:
-        """Drop every retrieval handle so an empty state is observable everywhere."""
-        rag_module.knowledge_index = None
-        rag_module.knowledge_chunks = []
-        rag_module.bm25_index = None
-        rag_module._pipeline = None
-
-    @staticmethod
-    def initialize_rag(enable_reranker: bool = True, force_rebuild: bool = False) -> int:
-        """Load (or rebuild) the RAG index and wire the retrieval pipeline.
-
-        ADR 0015 — the returned number is the count of chunks actually wired:
-        cache hit → load; cache miss → scan + build + persist; no documents or
-        any error → observable empty state (``/health`` reports
-        ``rag_chunks == 0`` and degrades) with the reason logged with traceback.
-        """
-        try:
-            count = _RAGModule._wire_index(enable_reranker, force_rebuild)
-        except Exception:
-            # Fail safe *and* visible: the traceback is logged, the state is
-            # cleared and /health degrades instead of pretending success.
-            logger.exception("RAG initialization failed; retrieval stays disabled")
-            _RAGModule._reset_index_state()
-            return 0
-        return count
-
-    @staticmethod
-    def _wire_index(enable_reranker: bool, force_rebuild: bool) -> int:
-        """Build/load the index and publish it on ``rag_module`` (may raise)."""
-        from ai_assistant.config.paths import get_paths
-        from ai_assistant.config.rag_config import RAGSettings
-        from ai_assistant.rag.embeddings import lazy_embedding_encoder
-        from ai_assistant.rag.index import (
-            is_cache_valid,
-            load_cache,
-            load_or_build_index,
-            scan_documents,
-        )
-        from ai_assistant.rag.loaders import DocumentLoaderRegistry
-        from ai_assistant.rag.retrieval import RetrievalPipeline
-
-        settings = RAGSettings.from_env_and_dict({})
-        if not settings.enabled:
-            logger.info("RAG disabled by AI_ENABLE_RAG")
-            _RAGModule._reset_index_state()
-            return 0
-        paths = get_paths()
-        encoder = lazy_embedding_encoder(settings)
-
-        index = chunks = bm25 = None
-        if not force_rebuild and is_cache_valid(paths, settings):
-            index, chunks, bm25 = load_cache(paths, settings)
-
-        if index is None:
-            registry = DocumentLoaderRegistry.create_default(
-                settings.chunk_chars, settings.overlap_chars)
-            scanned = scan_documents(paths, registry)
-            if not scanned:
-                logger.warning("RAG: no documents found under %s — index not built",
-                               paths.project_root)
-                _RAGModule._reset_index_state()
-                return 0
-            # Cache is missing/stale: force the build path so the fs hash is
-            # computed once (scan already happened above).
-            index, chunks, bm25 = load_or_build_index(
-                scanned, encoder, paths, settings, force_rebuild=True)
-
-        if index is None or not chunks:
-            logger.warning("RAG: index unavailable after load/build")
-            _RAGModule._reset_index_state()
-            return 0
-
-        from typing import cast
-        vector_retriever, bm25_retriever = _RAGModule._build_retrievers(
-            index, bm25, cast("list[dict[str, Any]]", chunks), encoder, settings)
-        pipeline = RetrievalPipeline(
-            vector_retriever=vector_retriever,
-            bm25_retriever=bm25_retriever,
-            # The cross-encoder is an optional quality boost; it stays None
-            # until a loader exists (pipeline treats None as a no-op).
-            reranker=getattr(rag_module, "_reranker", None),
-            knowledge_chunks=chunks,
-            max_context_chars=settings.max_context_chars,
-            similarity_threshold=settings.similarity_threshold,
-            use_reranker=bool(enable_reranker and settings.use_reranker),
-            reranker_top_k=settings.reranker_top_k,
-        )
-        with rag_module.rag_lock:
-            rag_module.knowledge_index = index
-            rag_module.knowledge_chunks = list(chunks)
-            rag_module.bm25_index = bm25
-            rag_module._pipeline = pipeline
-            rag_module.embed_model_ref = encoder
-        count = len(chunks)
-        logger.info("RAG ready: %d chunks (vector=%s bm25=%s)",
-                    count, vector_retriever is not None, bm25_retriever is not None)
-        return count
-
-    @staticmethod
-    def get_context(query: str, query_image_b64: str | None = None, result_k: int | None = None) -> tuple[str, str, list[Any]]:
-        pipeline = getattr(rag_module, "_pipeline", None)
-        if pipeline is None:
-            return ("", "", [])
-        try:
-            doc_ctx, code_ctx, image_chunks = pipeline.get_context(query, query_image_b64, result_k)
-        except Exception:
-            logger.exception("RAG retrieval failed")
-            return ("", "", [])
-        return doc_ctx, code_ctx, image_chunks
-
-    @staticmethod
-    def _release_ml_memory() -> None:
-        # Protocol compliance for RAGModuleLike; delegates to vision release
-        _RAGModule.release_embedding_for_vision()
-
-    @staticmethod
-    def release_embedding_for_vision() -> None:
-        from ai_assistant.llm.hardware import release_ml_memory
-        release_ml_memory()
-
-
 # The inference defaults live in ``ai_assistant.llm.defaults`` and load with
-# the backend inside :func:`compose()` and the helpers below — never at import.
+# the backend inside :func:`compose()` — never at import.
 
 
-# ── Global mutable chatbot agent (recreated on model/RAG reload) ─────────────
-# Wrapped in a getter so the HTTP router captures the getter reference, not the
-# agent instance — this allows hot-reload without re-registering the router.
-_chatbot_agent_holder: list[ChatbotAgent] = []
-
-
-def _get_chatbot_agent() -> ChatbotAgent:
-    compose()
-    from ai_assistant.orchestration.specialists import ChatbotAgent
-
-    if not _chatbot_agent_holder:
-        _chatbot_agent_holder.append(ChatbotAgent(llm_module, rag_module))
-    return _chatbot_agent_holder[0]
-
-
-def _rebuild_chatbot_agent() -> None:
-    compose()
-    from ai_assistant.orchestration.specialists import ChatbotAgent
-
-    _chatbot_agent_holder.clear()
-    _chatbot_agent_holder.append(ChatbotAgent(llm_module, rag_module))
-
-
-# ── Bootstrap services ────────────────────────────────────────────────────────
-def _execute_a2a_task(task: AgentTask) -> dict[str, Any]:
-    """Run the shared LangGraph agent engine inside the durable A2A lifecycle."""
-    compose()
-    if llm_module.llm is None:
-        msg = "LLM is not initialized"
-        raise RuntimeError(msg)
-    return _agent_run_service.run(task)
-
-
-# _chatbot_agent_holder stays import-time (a plain list): only the graph it
-# feeds — tool catalog, container, services, app, routers — lives in compose().
+# ── Runtime module graph ──────────────────────────────────────────────────────
+# The LLM/RAG handles and the chatbot-agent holder live on the single
+# ``RuntimeModules`` instance compose() builds and injects into the tool
+# catalog, the services and the routers (bootstrap.modules). No class-level or
+# module-level mutable state remains here: the composition root owns every
+# object and passes it to whoever needs it.
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -485,13 +247,11 @@ active_model_desc: str
 _rag_settings: RAGSettings
 EMBED_MODEL_NAME: str
 USE_VISION_LLM: bool
-llm_module: _LLMModule
-rag_module: _RAGModule
+runtime_modules: RuntimeModules
 _tool_registry: ToolRegistry
 platform: PlatformContainer
 agent_service: AgentService
 mcp_server: McpToolServer
-_agent_run_service: AgentRunService
 app: FastAPI
 transport_policy: TransportPolicy
 
@@ -504,9 +264,9 @@ _COMPOSE_LOCK = threading.RLock()
 _COMPOSED_NAMES = frozenset({
     "logger", "LOG_FILE_PATH", "_paths", "_registry", "MODELS",
     "FALLBACK_TEXT_MODEL", "MODEL_IDX", "active_model_desc", "_rag_settings",
-    "EMBED_MODEL_NAME", "USE_VISION_LLM", "llm_module", "rag_module",
+    "EMBED_MODEL_NAME", "USE_VISION_LLM", "runtime_modules",
     "_tool_registry", "platform", "agent_service", "mcp_server",
-    "_agent_run_service", "app", "transport_policy",
+    "app", "transport_policy",
 })
 
 
@@ -536,9 +296,9 @@ def compose() -> None:
     """
     global _COMPOSED, logger, LOG_FILE_PATH, _paths, _registry, MODELS
     global FALLBACK_TEXT_MODEL, MODEL_IDX, active_model_desc, _rag_settings
-    global EMBED_MODEL_NAME, USE_VISION_LLM, llm_module, rag_module
+    global EMBED_MODEL_NAME, USE_VISION_LLM
     global _tool_registry, platform, agent_service, mcp_server
-    global _agent_run_service, app, transport_policy
+    global runtime_modules, app, transport_policy
     with _COMPOSE_LOCK:
         if _COMPOSED:
             return
@@ -564,6 +324,11 @@ def compose() -> None:
         from ai_assistant.application.agent_runs import AgentRunService
         from ai_assistant.bootstrap.app_factory import create_app
         from ai_assistant.bootstrap.container import build_container
+        from ai_assistant.bootstrap.modules import (
+            LlmModule,
+            RagModule,
+            RuntimeModules,
+        )
         from ai_assistant.config import (
             RAGSettings,
             load_model_registry,
@@ -607,24 +372,34 @@ def compose() -> None:
         # ``vision_llm_enabled()`` reported the operator's choice.
         USE_VISION_LLM = vision_llm_enabled()
 
-        # Compatibility wrappers as single instances (module state owner).
-        llm_module = _LLMModule()
-        rag_module = _RAGModule()
+        # Runtime module graph: instance-based handles owned here and injected
+        # into the tool catalog, the services and the routers. The model wiring
+        # context is captured on the LLM instance, so nothing has to read a
+        # module global later (admin reload included).
+        runtime_modules = RuntimeModules(
+            llm=LlmModule(
+                registry=_registry,
+                paths=_paths,
+                model_idx=MODEL_IDX,
+                use_vision_llm=USE_VISION_LLM,
+            ),
+            rag=RagModule(),
+        )
 
         # The composition root owns the single tool catalog, coordinator and
         # agent service. The shared tool gateway, LangGraph checkpointer and
         # A2A transport are injected explicitly, so no module-level service
         # locator remains.
-        _tool_registry = create_tool_registry(rag_context=rag_module)
+        _tool_registry = create_tool_registry(rag_context=runtime_modules.rag)
         platform = build_container(
             Path(BASE_DIR),
             list(_tool_registry.get_all()),
             platform_executors(_tool_registry),
-            _execute_a2a_task,
+            runtime_modules.execute_a2a_task,
         )
         agent_service = AgentService(
             tool_gateway=platform.gateway,
-            llm_runtime=llm_module,
+            llm_runtime=runtime_modules.llm,
             tool_registry=_tool_registry,
             checkpointer=build_checkpointer(),
             a2a_router=A2ARouter(),
@@ -636,7 +411,11 @@ def compose() -> None:
         # ``mcp_server`` is what the admin routes import (the old
         # ``legacy.mcp_server`` re-export shim was deleted with legacy).
         mcp_server = McpToolServer(platform.gateway)
-        _agent_run_service = AgentRunService(
+        # Bound late on the graph: the A2A executor (already handed to the
+        # container above) reads ``agent_run_service`` per call, which closes
+        # the container ↔ agent-service construction cycle without a
+        # module-global service.
+        runtime_modules.agent_run_service = AgentRunService(
             capability_scopes=platform.settings.capability_scopes,
             orchestrator=LangGraphAgentOrchestrator(
                 execute=agent_service.execute,
@@ -654,8 +433,8 @@ def compose() -> None:
             allow_remote_a2a=platform.settings.allow_remote_a2a,
         )
         app.include_router(build_health_router(
-            llm_module=llm_module,
-            rag_module=rag_module,
+            llm_module=runtime_modules.llm,
+            rag_module=runtime_modules.rag,
             platform=platform,
             server_start_time=_SERVER_START_TIME,
             embed_model_name=EMBED_MODEL_NAME,
@@ -664,22 +443,22 @@ def compose() -> None:
             app=app,
         ))
         app.include_router(build_chat_router(
-            llm_module=llm_module,
-            rag_module=rag_module,
-            get_chatbot_agent=_get_chatbot_agent,
+            llm_module=runtime_modules.llm,
+            rag_module=runtime_modules.rag,
+            get_chatbot_agent=runtime_modules.chatbot_agent.get,
             llm_n_ctx=LLM_N_CTX,
             logger=logger,
             policy=transport_policy,
         ))
         app.include_router(build_admin_router(
-            llm_module=llm_module,
-            rag_module=rag_module,
+            llm_module=runtime_modules.llm,
+            rag_module=runtime_modules.rag,
             action_manifest_module=action_manifest,
             reset_agent_state_fn=agent_service.reset_state,
             models=MODELS,
             model_idx=MODEL_IDX,
             refresh_agent_routes_fn=_refresh_agent_routes,
-            rebuild_chatbot_agent_fn=_rebuild_chatbot_agent,
+            rebuild_chatbot_agent_fn=runtime_modules.chatbot_agent.rebuild,
             logger=logger,
             policy=transport_policy,
         ))
@@ -711,12 +490,12 @@ def bootstrap_runtime() -> None:
         "Starting runtime | model index=%d | log=%s",
         MODEL_IDX, safe_relpath(LOG_FILE_PATH, BASE_DIR),
     )
-    rag_module.initialize_rag(
+    runtime_modules.rag.initialize_rag(
         enable_reranker=not MODELS[MODEL_IDX].get("is_vision", False),
     )
-    llm_module.load_model()
-    if llm_module.is_vision_model:
-        rag_module.release_embedding_for_vision()
+    runtime_modules.llm.load_model()
+    if runtime_modules.llm.is_vision_model:
+        runtime_modules.rag.release_embedding_for_vision()
 
 
 def main() -> None:

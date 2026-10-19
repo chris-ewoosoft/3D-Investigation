@@ -2,8 +2,10 @@
 #define SEND_MAIL_PLUGIN_H
 
 #include "IPlugin.h"
+#include "AppConstants.h"
 
 #include <QObject>
+#include <QStringList>
 
 class IAppContext;
 class MailDockWidget;
@@ -16,6 +18,9 @@ class SendMailPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "Send Mail Plugin"; }
+    QStringList dependencies() const override {
+        return {QString::fromLatin1(AppConstants::PluginNames::UserAuthentication)};
+    }
     bool initialize(IAppContext *context) override;
     void cleanup() override;
     int loadOrder() const override { return 45; }

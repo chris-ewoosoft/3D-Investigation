@@ -24,11 +24,11 @@ namespace AppConstants { namespace AIAssistant {
     constexpr int    TEXT_INFERENCE_TIMEOUT_MS  = 1800000;
     constexpr int    VISION_INFERENCE_TIMEOUT_MS = 1800000;
     constexpr int    INFERENCE_TIMEOUT_MS       = TEXT_INFERENCE_TIMEOUT_MS;
-    inline QString baseUrl() {
-        return QStringLiteral("http://127.0.0.1:%1").arg(SERVER_PORT);
+    inline QString baseUrl(int port = SERVER_PORT) {
+        return QStringLiteral("http://127.0.0.1:%1").arg(port);
     }
-    inline QString adminEndpoint(const QString &path) {
-        return QStringLiteral("http://127.0.0.1:%1/admin/%2").arg(SERVER_PORT).arg(path);
+    inline QString adminEndpoint(const QString &path, int port = SERVER_PORT) {
+        return QStringLiteral("http://127.0.0.1:%1/admin/%2").arg(port).arg(path);
     }
     inline QString chatbotScript() {
         return QStringLiteral("src/ai_assistant/bootstrap/server_manager.py");

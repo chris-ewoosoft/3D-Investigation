@@ -121,6 +121,13 @@ concrete singletons or exe classes. Conventions:
   AppShell registration (composition root). Everything else — plugins,
   dialogs, AppCore services — resolves `IUserManager` from the registry
   (ctor-injected where the component has no context).
+- `LanguageManager` is owned by AppShell (no singleton). `AppConfig::bootstrap()`
+  is the bootstrap/composition-root accessor (Main, AppShell, Logger only);
+  every other component resolves `IAppPaths` from the registry. The
+  architecture guard enforces both confinement rules.
+- Tab ids and build order live in `AppConstants::TabIds` (`UIConstants.h`);
+  plugins look panels up by id only — there is no translated-label fallback,
+  so renaming a language can never change panel routing.
 - License keys are stored DPAPI-encrypted (`SecretVault`, `enc1:`) with
   SHA-256-hashed INI path buckets; legacy plaintext entries migrate on load.
 
@@ -147,7 +154,10 @@ concrete singletons or exe classes. Conventions:
 - Chat sessions are owned by `ChatSessionManager` (session list, current
   pointer, attachment/thumbnail cleanup on `deleteSession`); persistence stays
   in `ChatSessionStore` (username + config path injected — no singleton).
-  `AIAssistant` keeps network/process/queue concerns only.
+  `AIAssistant` keeps network/process/queue concerns only, takes an optional
+  injected `QNetworkAccessManager`, and exposes the protected
+  `markServerReady()` transition so `TestAIAssistant` can drive the request
+  state machine without sockets or a Python child process.
 - Password hashes never leave `UserManager` (`m_passwordHashes`); `UserInfo`
   is profile-only, so `updateUser()` cannot clobber credentials. Tests observe
   the hash through the INI (`User_<name>/password_hash`).
@@ -160,7 +170,9 @@ concrete singletons or exe classes. Conventions:
   tests when dependencies are available. `tests/CMakeLists.txt` forces
   `QT_ASSUME_STDERR_HAS_CONSOLE=1` for every test so QtTest output (which goes
   to stderr) survives `ctest --output-on-failure`; without it Windows drops
-  the report and failures look empty.
+  the report and failures look empty. First-party targets compile with
+  `/W4 /WX` (`/external:anglebrackets /external:W0` keeps SDK headers out of
+  the stream): a new warning fails the build instead of accumulating.
 - Guard-layer C++ changes (`src/core/Plugin*`, `SecretVault`, `UserManager`,
   `AppShell`, chat-session/settings/shell services): run
   `python tests/coverage_gate.py` (measured floors; Release must ship PDBs —

@@ -19,6 +19,7 @@ __all__ = [
     "ConcurrentRunError",
     "CvTrainError",
     "ExitCode",
+    "ExportContractError",
     "ManifestIntegrityError",
     "QualityGateError",
     "StorageError",
@@ -45,6 +46,15 @@ class ExitCode(IntEnum):
     enough" — the operator's fix is different (more epochs, a better dataset,
     a lower bar), so the codes must not be conflated. The Qt dock only tests
     ``exitCode != 0``, so a new code is a compatible addition."""
+
+    EXPORT_CONTRACT = 4
+    """The exported ONNX does not satisfy the Qt runtime's tensor contract.
+
+    A distinct code because nothing the operator configured is wrong: training
+    succeeded and the file is a valid ONNX graph, but it cannot be consumed by
+    the C++ loader (wrong input rank/dtype, missing segmentation output, an
+    opset the bundled runtime cannot load, ...). The fix is an export/backend
+    change, not more epochs or a smaller quality bar."""
 
     ABORTED = 130
     """Interrupted by the user (Ctrl+C / SIGINT)."""
@@ -112,6 +122,21 @@ class QualityGateError(CvTrainError):
     """
 
     exit_code: ExitCode = ExitCode.QUALITY
+
+
+class ExportContractError(CvTrainError):
+    """The exported ONNX cannot be consumed by the Qt runtime.
+
+    Raised by :func:`cvtrain.onnx_contract.validate_export` immediately after
+    the backend exports and *before* the artifact is published. A graph that is
+    syntactically valid can still violate the contract ``AIProcessor.cpp``
+    relies on (one NCHW float32 input, a channels-first detection output, two
+    outputs for segmentation). Those failures used to surface only when the
+    desktop app loaded the file; here they stop the run while the previous
+    published artifact is still intact.
+    """
+
+    exit_code: ExitCode = ExitCode.EXPORT_CONTRACT
 
 
 class StorageError(CvTrainError):

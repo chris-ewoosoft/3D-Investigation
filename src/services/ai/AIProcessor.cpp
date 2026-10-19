@@ -221,7 +221,6 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
   const float MASK_THRESHOLD = 0.5f;
   const int INPUT_WIDTH = m_segInputSize.width;
   const int INPUT_HEIGHT = m_segInputSize.height;
-  const int CHANNELS = 3;
 
   std::vector<float> inputTensorValues;
   Ort::Value inputTensor = prepareInputTensor(inputImage, INPUT_WIDTH, INPUT_HEIGHT, inputTensorValues);
@@ -235,7 +234,9 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
   const char *outputNames[] = {outNamePtr0.get(), outNamePtr1.get()};
 
   auto outputTensors = segSession->Run(Ort::RunOptions{nullptr}, inputNames,
-                                       &inputTensor, 1, outputNames, 2);
+                                       &inputTensor, 1, outputNames,
+                                       static_cast<std::size_t>(
+                                           AIYoloPostProcessor::kExpectedSegmentationOutputCount));
 
   float *outData0 = outputTensors[0].GetTensorMutableData<float>();
   auto dims0 = outputTensors[0].GetTensorTypeAndShapeInfo().GetShape();
@@ -244,13 +245,13 @@ cv::Mat AIProcessor::runSegmentation(const cv::Mat &inputImage) {
   auto dims1 = outputTensors[1].GetTensorTypeAndShapeInfo().GetShape();
 
   cv::Mat boxes_mat, proto_mat;
-  if (dims0.size() == 4) {
+  if (dims0.size() == static_cast<std::size_t>(AIYoloPostProcessor::kExpectedSegmentationProtoRank)) {
     int sizes0[] = {(int)dims0[0], (int)dims0[1], (int)dims0[2], (int)dims0[3]};
-    proto_mat = cv::Mat(4, sizes0, CV_32F, outData0);
+    proto_mat = cv::Mat(AIYoloPostProcessor::kExpectedSegmentationProtoRank, sizes0, CV_32F, outData0);
     boxes_mat = cv::Mat(dims1[1], dims1[2], CV_32F, outData1);
   } else {
     int sizes1[] = {(int)dims1[0], (int)dims1[1], (int)dims1[2], (int)dims1[3]};
-    proto_mat = cv::Mat(4, sizes1, CV_32F, outData1);
+    proto_mat = cv::Mat(AIYoloPostProcessor::kExpectedSegmentationProtoRank, sizes1, CV_32F, outData1);
     boxes_mat = cv::Mat(dims0[1], dims0[2], CV_32F, outData0);
   }
 
@@ -326,7 +327,6 @@ cv::Mat AIProcessor::runTracking(const cv::Mat &inputImage) {
   const float NMS_THRESHOLD = 0.45f;
   const int INPUT_WIDTH = m_trackingInputSize.width;
   const int INPUT_HEIGHT = m_trackingInputSize.height;
-  const int CHANNELS = 3;
 
   std::vector<float> inputTensorValues;
   Ort::Value inputTensor = prepareInputTensor(inputImage, INPUT_WIDTH, INPUT_HEIGHT, inputTensorValues);

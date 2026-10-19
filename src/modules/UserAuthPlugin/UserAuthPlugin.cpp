@@ -1,4 +1,5 @@
 #include "UserAuthPlugin.h"
+#include "AppConstants.h"
 #include "IAppContext.h"
 #include "IShellService.h"
 #include "ISettingsService.h"
@@ -208,10 +209,9 @@ void UserAuthPlugin::setupMenus() {
     QMenuBar* menuBar = m_context->shell()->menuBar();
 
     UserInfo u = UserAuthPlugin::users()->userInfo(m_currentUser);
-    bool isAdmin = (u.role == UserRole::Admin);
 
     // ── Inject Help Buttons into tab.help panel ──────────────────────────────
-    if (QWidget* panel = m_context->shell()->getTabPanel("tab.help")) {
+    if (QWidget* panel = m_context->shell()->getTabPanel(AppConstants::TabIds::Help)) {
         auto *layout = qobject_cast<QHBoxLayout*>(panel->layout());
         if (layout) {
             if (!m_groupHelp) {

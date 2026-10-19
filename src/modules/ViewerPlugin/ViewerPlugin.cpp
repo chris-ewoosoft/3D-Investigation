@@ -79,7 +79,7 @@ bool ViewerPlugin::initialize(IAppContext* context) {
     connect(m_navUI->btnAutoNext(), &QPushButton::clicked, this, &ViewerPlugin::onAutoNext);
 
     // Inject Load/Data tools into tab.view panel
-    if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.view")) {
+    if (QWidget* panel = m_ctx->shell()->getTabPanel(AppConstants::TabIds::View)) {
         m_ribbonUI = new ViewerRibbonUI(m_ctx, panel, this);
         connect(m_ribbonUI->btnLoad2D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad2DImages);
         connect(m_ribbonUI->btnLoad3D(), &QToolButton::clicked, this, &ViewerPlugin::onLoad3DImages);

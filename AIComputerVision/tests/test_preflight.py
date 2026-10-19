@@ -9,7 +9,7 @@ from typing import Any
 from unittest import mock
 
 from cvtrain.checks import Check, PreflightReport, module_available
-from cvtrain.config import MODEL_SPECS, TrainConfig
+from cvtrain.config import MODEL_REGISTRY, TrainConfig
 from cvtrain.preflight import (
     MAX_EPOCHS,
     MAX_IMGSZ,
@@ -204,7 +204,7 @@ class WeightsResolutionTests(unittest.TestCase):
     def test_weights_checks_resolve_through_the_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / MODEL_SPECS["det"].ckpt).write_bytes(b"checkpoint")
+            (root / MODEL_REGISTRY["det"].ckpt).write_bytes(b"checkpoint")
             cfg = TrainConfig(models=("det",), weights_dir=root)
 
             [check] = check_weights(cfg)

@@ -6,11 +6,6 @@
 #include <QCoreApplication>
 
 // ─────────────────────────────────────────────────────────────────────────────
-LanguageManager& LanguageManager::instance() {
-    static LanguageManager inst;
-    return inst;
-}
-
 LanguageManager::LanguageManager() {
     loadTranslations();
 }

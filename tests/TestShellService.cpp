@@ -66,23 +66,24 @@ private slots:
         QVERIFY(shell.getMenu(QStringLiteral("menu.edit")) != first);
 
         // Menu bị hủy ngoài service → QPointer reset, lần get sau tạo lại
-        // thay vì trả dangling pointer.
+        // thay vì trả dangling pointer. Không so sánh địa chỉ với `first`:
+        // allocator hoàn toàn có thể cấp lại đúng vùng nhớ vừa giải phóng.
         delete first;
         QMenu* recreated = shell.getMenu(QStringLiteral("menu.file"));
         QVERIFY(recreated != nullptr);
-        QVERIFY(recreated != first);
+        QCOMPARE(shell.getMenu(QStringLiteral("menu.file")), recreated);
     }
 
-    void tabPanelLookupByKeyAndTranslatedLabel() {
+    void tabPanelLookupIsKeyOnly() {
         SignalBus bus;
-        FakeLanguageService language;
-        language.setTranslation(QStringLiteral("tab.help"), QStringLiteral("Trợ giúp"));
-        ShellService shell(&bus, &language);
+        ShellService shell(&bus);
 
         QWidget panel;
         shell.registerTabPanel(QStringLiteral("tab.help"), &panel);
         QCOMPARE(shell.getTabPanel(QStringLiteral("tab.help")), &panel);
-        QCOMPARE(shell.getTabPanel(QStringLiteral("Trợ giúp")), &panel);
+        // A translated label is not a routing key: renaming the language must
+        // never change which panel a plugin receives.
+        QVERIFY(shell.getTabPanel(QStringLiteral("Trợ giúp")) == nullptr);
         QVERIFY(shell.getTabPanel(QStringLiteral("tab.unknown")) == nullptr);
     }
 
@@ -108,7 +109,7 @@ private slots:
     void progressDialogRoundTrip() {
         SignalBus bus;
         FakeLanguageService language;
-        ShellService shell(&bus, &language);
+        ShellService shell(&bus);
         QVERIFY(shell.getProgressDialog() == nullptr);
 
         CustomProgressDialog dialog(&language);

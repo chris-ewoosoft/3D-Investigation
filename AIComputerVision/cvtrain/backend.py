@@ -154,10 +154,11 @@ class UltralyticsBackend:
     """Adapter over ``ultralytics``. Imports happen on first real use only."""
 
     #: Modules preflight must see before this backend can train or export.
-    #: ``yaml`` parses ``data.yaml`` and ``onnx`` is required by the export step.
-    #: ``tensorboard`` joins them only under ``--tensorboard`` (see
+    #: ``yaml`` parses ``data.yaml``, ``onnx`` validates the exported graph and
+    #: ``onnxruntime`` runs the post-export smoke inference that mirrors the
+    #: Qt loader. ``tensorboard`` joins them only under ``--tensorboard`` (see
     #: :meth:`required_modules`): an optional feature still has to fail fast.
-    BASE_MODULES: tuple[str, ...] = ("ultralytics", "yaml", "onnx")
+    BASE_MODULES: tuple[str, ...] = ("ultralytics", "yaml", "onnx", "onnxruntime")
 
     def __init__(self) -> None:
         self.version = ""

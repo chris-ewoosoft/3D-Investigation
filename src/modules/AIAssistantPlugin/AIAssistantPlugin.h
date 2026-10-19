@@ -10,6 +10,7 @@
 #include <QSet>
 #include "IPlugin.h"
 
+#include "AppConstants.h"
 #include "IAppContext.h"
 class IAIAssistantService;
 class AIAssistantRibbonUI;
@@ -26,6 +27,9 @@ class AIAssistantPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "AI Assistant Plugin"; }
+    QStringList dependencies() const override {
+        return {QString::fromLatin1(AppConstants::PluginNames::UserAuthentication)};
+    }
     bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 40; }

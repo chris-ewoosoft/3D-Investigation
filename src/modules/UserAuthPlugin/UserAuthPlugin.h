@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include "IPlugin.h"
+#include "AppConstants.h"
 
 class IAppContext;
 class ILanguageService;
@@ -24,7 +25,10 @@ public:
      *  initialize(), cleared on cleanup(); valid for every UI code path. */
     static IUserManager* users();
 
-    QString pluginName() const override { return "User Authentication Plugin"; }
+    QString pluginName() const override
+    {
+        return QString::fromLatin1(AppConstants::PluginNames::UserAuthentication);
+    }
     bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 5; } // Load rất sớm, trước các module khác

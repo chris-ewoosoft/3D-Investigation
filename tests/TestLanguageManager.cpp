@@ -7,14 +7,8 @@ class TestLanguageManager : public QObject {
   Q_OBJECT
 
 private slots:
-  void testSingletonInstance() {
-    LanguageManager &lm1 = LanguageManager::instance();
-    LanguageManager &lm2 = LanguageManager::instance();
-    QCOMPARE(&lm1, &lm2);
-  }
-
   void testSetLanguage() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
 
     QSignalSpy spy(&lm, &LanguageManager::languageChanged);
 
@@ -28,7 +22,7 @@ private slots:
   }
 
   void testTranslateFallback() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
 
     // When key doesn't exist, translate should fallback to key
     QString fallback = lm.translate("non.existent.key");
@@ -36,7 +30,7 @@ private slots:
   }
 
   void testTranslateKnownKeyPerLanguage() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
     lm.setLanguage("en");
     const QString en = lm.translate("app.title");
     QVERIFY(!en.isEmpty());
@@ -50,14 +44,14 @@ private slots:
   }
 
   void testCharPointerTranslate() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
     // A null key must not crash and must not produce a fake translation.
     QCOMPARE(lm.translate(static_cast<const char *>(nullptr)), QString());
     QCOMPARE(lm.translate("char.translate.missing"), QStringLiteral("char.translate.missing"));
   }
 
   void testDisplayNameAndFlagFollowLanguage() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
     lm.setLanguage("en");
     QCOMPARE(lm.displayName(), QString("English"));
     QCOMPARE(lm.flagEmoji(), QString::fromUtf8("🇬🇧"));
@@ -67,7 +61,7 @@ private slots:
   }
 
   void testUnknownLanguageIsIgnored() {
-    LanguageManager &lm = LanguageManager::instance();
+    LanguageManager lm;
     lm.setLanguage("en");
     QTest::ignoreMessage(QtWarningMsg, QRegularExpression("Unknown language"));
     lm.setLanguage("fr");

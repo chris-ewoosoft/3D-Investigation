@@ -12,8 +12,8 @@
  * (mockable / swappable) instead of the LanguageManager singleton:
  *   auto* lang = ctx->services()->get<ILanguageService>();
  *
- * The concrete implementation remains a QApplication-lifetime singleton;
- * legacy code may still call LanguageManager::instance().
+ * The concrete implementation is owned by the composition root (AppShell);
+ * consumers always resolve this interface from the ServiceRegistry.
  */
 class APP_EXPORT ILanguageService : public QObject {
     Q_OBJECT

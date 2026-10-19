@@ -38,6 +38,7 @@ AppShell::AppShell(QMainWindow*           mainWindow,
     : QObject(parent)
     , m_vtkWidget(vtkWidget)
     , m_registry(std::make_unique<ServiceRegistry>())
+    , m_languageManager(std::make_unique<LanguageManager>())
 {
     m_signalBus = new SignalBus(this);
 
@@ -49,17 +50,16 @@ AppShell::AppShell(QMainWindow*           mainWindow,
     m_registry->registerService<IUserManager>(UserManager::instance());
     m_registry->registerService<IUserPreferences>(UserManager::instance());
     m_registry->registerService<ILicenseService>(UserManager::instance());
-    m_registry->registerService<ILanguageService>(&LanguageManager::instance());
+    m_registry->registerService<ILanguageService>(m_languageManager.get());
     // Path provider — AppConfig remains the process singleton for bootstrap
     // (Main/Logger), but consumers resolve it through the registry so the
     // path surface is mockable and the singleton stays at the composition root.
-    m_registry->registerService<IAppPaths>(&AppConfig::instance());
-    Logger::setLogsDir(AppConfig::instance().logsDir());
+    m_registry->registerService<IAppPaths>(&AppConfig::bootstrap());
+    Logger::setLogsDir(AppConfig::bootstrap().logsDir());
     // UI-shell contract (menus/tabs/progress dialog) — implementation lives in
     // AppCore (ShellService) so the contract is unit-testable; AppShell only
     // wires it and delegates.
-    m_shellService = std::make_unique<ShellService>(
-        m_signalBus, m_registry->get<ILanguageService>());
+    m_shellService = std::make_unique<ShellService>(m_signalBus);
     m_shellService->setMenuParent(mainWindow);
     m_registry->registerService<IShellService>(m_shellService.get());
 
@@ -89,7 +89,7 @@ void AppShell::initializeServices() {
         m_registry->get<IUserPreferences>(), m_vtkWidget, this);
     m_viewerService = std::make_unique<ViewerService>(m_sceneService.get(), m_signalBus, this);
     m_settingsService = std::make_unique<SettingsService>(
-        AppConfig::instance().configPath());
+        AppConfig::bootstrap().configPath());
 
     m_registry->registerService<ISceneService>(m_sceneService.get());
     m_registry->registerService<IViewerService>(m_viewerService.get());
@@ -117,7 +117,10 @@ void AppShell::initializeDeferredServices() {
     m_aiAssistant  = std::make_unique<AIAssistant>(
         m_registry->get<ILanguageService>(),
         m_registry->get<IUserManager>(),
-        m_registry->get<IAppPaths>(), this);
+        m_registry->get<IAppPaths>(),
+        AppConfig::bootstrap().pythonInterpreter(),
+        AppConfig::bootstrap().aiServerPort(),
+        this);
     m_registry->registerService<IAIAssistantService>(m_aiAssistant.get());
 
     // Mail module

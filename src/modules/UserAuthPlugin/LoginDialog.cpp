@@ -46,13 +46,15 @@ void LoginDialog::setupUi() {
 
     addLabel(UserAuthPlugin::translate("login.username_label"));
     m_userEdit = new QLineEdit(content);
-    m_userEdit->setPlaceholderText("Username / Email");
+    m_userEdit->setPlaceholderText(
+        UserAuthPlugin::translate("common.username_or_email"));
     m_userEdit->setFixedHeight(42);
     vl->addWidget(m_userEdit);
 
     addLabel(UserAuthPlugin::translate("login.password_label"));
     m_passEdit = new QLineEdit(content);
-    m_passEdit->setPlaceholderText("Password");
+    m_passEdit->setPlaceholderText(
+        UserAuthPlugin::translate("common.password"));
     m_passEdit->setEchoMode(QLineEdit::Password);
     m_passEdit->setFixedHeight(42);
     vl->addWidget(m_passEdit);

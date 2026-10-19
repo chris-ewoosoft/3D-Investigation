@@ -57,7 +57,7 @@ void AdminUserManagerDialog::setupUi() {
     uvl->addLayout(userBtnLayout);  // Buttons ABOVE table
 
     m_userTable = new QTableWidget(0, 6, usersTab);
-    m_userTable->setHorizontalHeaderLabels({UserAuthPlugin::translate("admin.col_username"), "Email", UserAuthPlugin::translate("admin.col_role"),
+    m_userTable->setHorizontalHeaderLabels({UserAuthPlugin::translate("admin.col_username"), UserAuthPlugin::translate("admin.col_email"), UserAuthPlugin::translate("admin.col_role"),
                                              UserAuthPlugin::translate("admin.col_status"), "License Key", UserAuthPlugin::translate("admin.col_expiry")});
     m_userTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_userTable->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -78,7 +78,7 @@ void AdminUserManagerDialog::setupUi() {
     auto *kvl = new QVBoxLayout(keysTab);
 
     m_keyTable = new QTableWidget(0, 4, keysTab);
-    m_keyTable->setHorizontalHeaderLabels({"License Key", UserAuthPlugin::translate("admin.col_status"), UserAuthPlugin::translate("admin.tab_users"), ""});
+    m_keyTable->setHorizontalHeaderLabels({UserAuthPlugin::translate("admin.col_license"), UserAuthPlugin::translate("admin.col_status"), UserAuthPlugin::translate("admin.tab_users"), ""});
     m_keyTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_keyTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_keyTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -211,7 +211,7 @@ void AdminUserManagerDialog::onAddUser() {
     roleCombo->addItems({"User", "Admin"});
 
     fl->addRow(UserAuthPlugin::translate("admin.lbl_username"), usernameEdit);
-    fl->addRow("Email:", emailEdit);
+    fl->addRow(UserAuthPlugin::translate("common.email"), emailEdit);
     fl->addRow(UserAuthPlugin::translate("admin.lbl_password"), passwordEdit);
     fl->addRow(UserAuthPlugin::translate("admin.lbl_role"), roleCombo);
 
@@ -259,7 +259,7 @@ void AdminUserManagerDialog::onEditUser() {
     roleCombo->addItems({"User", "Admin"});
     roleCombo->setCurrentText(u.role == UserRole::Admin ? "Admin" : "User");
 
-    fl->addRow("Email:", emailEdit);
+    fl->addRow(UserAuthPlugin::translate("common.email"), emailEdit);
     fl->addRow(UserAuthPlugin::translate("admin.lbl_role"), roleCombo);
 
     auto *hl = new QHBoxLayout;

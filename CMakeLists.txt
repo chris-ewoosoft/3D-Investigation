@@ -314,7 +314,11 @@ target_compile_definitions(SharedPCH PUBLIC
     PCL_SILENCE_MALLOC_WARNING=1
 )
 if(MSVC)
-    target_compile_options(SharedPCH PUBLIC /utf-8 /MP /FS)
+    # /W4: first-party warnings; /external:anglebrackets + /external:W0 keeps
+    # third-party SDK headers (VTK/OpenCV/PCL/Qt) out of the warning stream.
+    # /WX: first-party warnings are build failures; the codebase is clean at /W4
+    # and the flag documents the gate for future code.
+    target_compile_options(SharedPCH PUBLIC /utf-8 /MP /FS /W4 /WX /external:anglebrackets /external:W0)
 endif()
 target_precompile_headers(SharedPCH PUBLIC src/pch.h)
 # Heavy PCH — consumers self-select: only the exe/AppCore and the plugins whose
@@ -345,7 +349,7 @@ target_link_libraries(SharedPCH
 # tests/CheckArchitectureBoundaries.cmake (derived from their sources).
 add_library(SharedPCHLight STATIC src/pch_light_dummy.cpp)
 if(MSVC)
-    target_compile_options(SharedPCHLight PUBLIC /utf-8 /MP /FS)
+    target_compile_options(SharedPCHLight PUBLIC /utf-8 /MP /FS /W4 /WX /external:anglebrackets /external:W0)
 endif()
 target_precompile_headers(SharedPCHLight PUBLIC src/pch_light.h)
 target_link_libraries(SharedPCHLight
@@ -467,6 +471,9 @@ target_compile_definitions(AppCore PRIVATE
     ${PCL_DEFINITIONS}
     PCL_SILENCE_MALLOC_WARNING=1
 )
+if(MSVC)
+    target_compile_options(AppCore PRIVATE /utf-8 /MP /FS /W4 /WX /external:anglebrackets /external:W0)
+endif()
 # PUBLIC = Qt only (the ABI is made of Qt types). The heavy SDKs are PRIVATE:
 # a plugin that does not itself use VTK/OpenCV/PCL/ONNX must not link (nor
 # load) them. Targets that do use the heavy SDK declare it themselves — the
@@ -532,7 +539,7 @@ target_compile_definitions(3D-Reconstruction PUBLIC
 if(MSVC)
     # /MP enables multi-core compilation. Since heavy PCL/VTK headers are now in PCH,
     # cl.exe uses much less memory per file, avoiding the previous heap exhaustion issues.
-    target_compile_options(3D-Reconstruction PRIVATE /utf-8 /MP /FS)
+    target_compile_options(3D-Reconstruction PRIVATE /utf-8 /MP /FS /W4 /WX /external:anglebrackets /external:W0)
 endif()
 
 # ─── 10. Link libraries ───────────────────────────────────────────────────────

@@ -37,7 +37,8 @@ void ChangePasswordDialog::setupUi() {
     if (m_isExternal) {
         addLabel(UserAuthPlugin::translate("login.username_label"));
         m_userEdit = new QLineEdit(content);
-        m_userEdit->setPlaceholderText("Username / Email");
+        m_userEdit->setPlaceholderText(
+            UserAuthPlugin::translate("common.username_or_email"));
         m_userEdit->setText(m_username);
         m_userEdit->setFixedHeight(40);
         vl->addWidget(m_userEdit);

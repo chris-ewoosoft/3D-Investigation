@@ -12,13 +12,19 @@
 #include <QDateTime>
 
 AIAssistant::AIAssistant(ILanguageService* lang, IUserManager* users,
-                         IAppPaths* paths, QObject *parent)
+                         IAppPaths* paths, QString pythonInterpreter,
+                         int serverPort, QObject *parent,
+                         QNetworkAccessManager* injectedNetwork)
     : IAIAssistantService(parent),
       m_lang(lang),
       m_users(users),
       m_paths(paths),
+      m_pythonInterpreter(pythonInterpreter.isEmpty() ? QStringLiteral("python")
+                                                      : pythonInterpreter),
+      m_serverPort(serverPort),
       aiServerProcess(new QProcess(this)),
-      networkManager(new QNetworkAccessManager(this)) {
+      networkManager(injectedNetwork ? injectedNetwork
+                                     : new QNetworkAccessManager(this)) {
 
     connect(aiServerProcess, &QProcess::readyReadStandardOutput, this, &AIAssistant::onProcessReadyRead);
     connect(aiServerProcess, &QProcess::readyReadStandardError, this, &AIAssistant::onProcessError);
@@ -69,7 +75,7 @@ void AIAssistant::startServerProcess(int modelIndex) {
         aiServerProcess->setProcessEnvironment(env);
         
         aiServerProcess->setWorkingDirectory(m_paths->aiAssistantDir());
-        aiServerProcess->start("python", QStringList() << "-u" << sp << QString::number(modelIndex));
+        aiServerProcess->start(m_pythonInterpreter, QStringList() << "-u" << sp << QString::number(modelIndex));
     } else {
         emit errorOccurred(m_lang->translate("ai.missing_script"));
     }
@@ -122,8 +128,8 @@ void AIAssistant::restartModel() {
         return;
     }
     qDebug() << "[AI Server] Reloading current model";
-    emit serverStatusChanged(tr("Đang tải lại Model..."));
-    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-model"))};
+    emit serverStatusChanged(m_lang->translate("ai.restarting_model"));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-model", m_serverPort))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setTransferTimeout(600000); // 10 min (model load có thể lâu)
     QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
@@ -132,9 +138,9 @@ void AIAssistant::restartModel() {
         if (reply->error() == QNetworkReply::NoError) {
             const auto doc = QJsonDocument::fromJson(reply->readAll());
             const QString msg = doc.object().value("message").toString("Model reloaded");
-            emit serverStatusChanged(tr("✅ ") + msg);
+            emit serverStatusChanged(QStringLiteral("✅ ") + msg);
         } else {
-            emit errorOccurred(tr("Restart Model thất bại: ") + reply->errorString());
+            emit errorOccurred(m_lang->translate("ai.restart_model_failed") + " " + reply->errorString());
         }
     });
 }
@@ -144,8 +150,8 @@ void AIAssistant::restartRAG() {
         emit errorOccurred(m_lang->translate("ai.server_not_running"));
         return;
     }
-    emit serverStatusChanged(tr("Đang tải lại RAG index..."));
-    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-rag"))};
+    emit serverStatusChanged(m_lang->translate("ai.restarting_rag"));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-rag", m_serverPort))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setTransferTimeout(600000); // RAG rebuild can take several minutes on a large project.
     QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
@@ -154,9 +160,9 @@ void AIAssistant::restartRAG() {
         if (reply->error() == QNetworkReply::NoError) {
             const auto doc = QJsonDocument::fromJson(reply->readAll());
             const QString msg = doc.object().value("message").toString("RAG reloaded");
-            emit serverStatusChanged(tr("✅ ") + msg);
+            emit serverStatusChanged(QStringLiteral("✅ ") + msg);
         } else {
-            emit errorOccurred(tr("Restart RAG thất bại: ") + reply->errorString());
+            emit errorOccurred(m_lang->translate("ai.restart_rag_failed") + " " + reply->errorString());
         }
     });
 }
@@ -166,8 +172,8 @@ void AIAssistant::restartAgent() {
         emit errorOccurred(m_lang->translate("ai.server_not_running"));
         return;
     }
-    emit serverStatusChanged(tr("Đang reset Agent..."));
-    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-agent"))};
+    emit serverStatusChanged(m_lang->translate("ai.restarting_agent"));
+    QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("reload-agent", m_serverPort))};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     req.setTransferTimeout(15000);
     QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
@@ -176,15 +182,15 @@ void AIAssistant::restartAgent() {
         if (reply->error() == QNetworkReply::NoError) {
             const auto doc = QJsonDocument::fromJson(reply->readAll());
             const QString msg = doc.object().value("message").toString("Agent reset");
-            emit serverStatusChanged(tr("✅ ") + msg);
+            emit serverStatusChanged(QStringLiteral("✅ ") + msg);
         } else {
-            emit errorOccurred(tr("Restart Agent thất bại: ") + reply->errorString());
+            emit errorOccurred(m_lang->translate("ai.restart_agent_failed") + " " + reply->errorString());
         }
     });
 }
 
 void AIAssistant::restartServer() {
-    emit serverStatusChanged(tr("Đang khởi động lại AI Server..."));
+    emit serverStatusChanged(m_lang->translate("ai.restarting_server"));
 
     auto killManagerAndRestart = [this]() {
         // Discard anything in flight — the backend behind it is gone/going.
@@ -210,7 +216,7 @@ void AIAssistant::restartServer() {
     if (isServerRunning()) {
         // Ask the AI Server that ServerManager spawned (detached, so we
         // don't otherwise hold a handle to it) to terminate itself first.
-        QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("shutdown"))};
+        QNetworkRequest req{QUrl(AppConstants::AIServer::adminEndpoint("shutdown", m_serverPort))};
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
         req.setTransferTimeout(5000);
         QNetworkReply *reply = networkManager->post(req, QByteArray("{}"));
@@ -228,7 +234,8 @@ void AIAssistant::restartServer() {
 void AIAssistant::newChat() {
     const QString title = m_lang->translate("ai.new_session") + " " +
                           QDateTime::currentDateTime().toString(AppConstants::Format::sessionDateTime());
-    m_sessions.create(title);
+    auto& session = m_sessions.create(title);
+    session.titleIsDefault = true;
     saveAllSessions();
     emit sessionsChanged();
     emit historyChanged();
@@ -410,7 +417,7 @@ void AIAssistant::processNextQueuedRequest() {
 
     const QueuedCompletionRequest request = m_queuedRequests.takeFirst();
 
-    QString baseUrl = AppConstants::AIServer::baseUrl();
+    QString baseUrl = AppConstants::AIServer::baseUrl(m_serverPort);
     QString urlStr;
     if (request.isAgent) {
         if (request.isUiActionAck) {
@@ -690,12 +697,17 @@ void AIAssistant::onProcessReadyRead() {
     }
 
     if (!m_serverReadyEmitted && (out.contains("[SUCCESS] AI Server") || out.contains("Uvicorn running on") || out.contains("Application startup complete"))) {
-        m_serverReadyEmitted = true;
-        m_serverRecoveryAttempts = 0;
-        emit serverStatusChanged(m_lang->translate("ai.server_ready"));
-        processNextQueuedRequest();
-        emit historyChanged();
+        markServerReady();
     }
+}
+
+void AIAssistant::markServerReady() {
+    if (m_serverReadyEmitted) return;
+    m_serverReadyEmitted = true;
+    m_serverRecoveryAttempts = 0;
+    emit serverStatusChanged(m_lang->translate("ai.server_ready"));
+    processNextQueuedRequest();
+    emit historyChanged();
 }
 
 void AIAssistant::onProcessError() {
@@ -713,11 +725,7 @@ void AIAssistant::onProcessError() {
     }
 
     if (!m_serverReadyEmitted && (err.contains("[SUCCESS] AI Server") || err.contains("Uvicorn running on") || err.contains("Application startup complete"))) {
-        m_serverReadyEmitted = true;
-        m_serverRecoveryAttempts = 0;
-        emit serverStatusChanged(m_lang->translate("ai.server_ready"));
-        processNextQueuedRequest();
-        emit historyChanged();
+        markServerReady();
     }
 }
 
@@ -816,7 +824,7 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
                     }
                     QString manifestError;
                     QVariantMap actionParams = params.toVariantMap();
-                    if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError)) {
+                    if (!AgentActionManifest::canonicalize(action, actionParams, &manifestError, m_paths)) {
                         reportUiActionResult(requestId, false, QVariantMap{{"error", manifestError}});
                         continue;
                     }
@@ -903,12 +911,12 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
 // ── Persistence ───────────────────────────────────────────────────────────────
 
 void AIAssistant::saveAllSessions() {
-    m_sessions.save(m_users->currentUsername(),
+    m_sessions.save(m_users ? m_users->currentUsername() : QString(),
                     m_paths ? m_paths->configPath() : QString());
 }
 
 void AIAssistant::loadAllSessions() {
-    m_sessions.load(m_users->currentUsername(),
+    m_sessions.load(m_users ? m_users->currentUsername() : QString(),
                     m_paths ? m_paths->configPath() : QString());
 }
 

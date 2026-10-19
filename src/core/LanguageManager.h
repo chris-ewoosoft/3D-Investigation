@@ -9,13 +9,11 @@
 #include "ILanguageService.h"
 
 /**
- * @brief Singleton quản lý ngôn ngữ ứng dụng (Tiếng Việt / English).
+ * @brief Quản lý ngôn ngữ ứng dụng (Tiếng Việt / English).
  *
- * Concrete implementation of ILanguageService, resolvable through
- * ServiceRegistry:
+ * Concrete implementation of ILanguageService, owned by the composition root
+ * (AppShell) and resolved through ServiceRegistry:
  *   ctx->services()->get<ILanguageService>()->translate("key")
- *
- * LanguageManager::instance() is kept as a deprecated alias for legacy code.
  *
  * Ngôn ngữ được lưu per-user vào Config_User.ini:
  *   [User_<username>]
@@ -24,7 +22,10 @@
 class APP_EXPORT LanguageManager : public ILanguageService {
     Q_OBJECT
 public:
-    static LanguageManager& instance();
+    LanguageManager();
+    ~LanguageManager() override = default;
+    LanguageManager(const LanguageManager&) = delete;
+    LanguageManager& operator=(const LanguageManager&) = delete;
 
     // ILanguageService
     QString currentLanguage() const override;
@@ -35,11 +36,6 @@ public:
     QString flagEmoji() const override;
 
 private:
-    LanguageManager();
-    ~LanguageManager() override = default;
-    LanguageManager(const LanguageManager&) = delete;
-    LanguageManager& operator=(const LanguageManager&) = delete;
-
     void loadTranslations();
 
     mutable std::shared_mutex m_mutex;

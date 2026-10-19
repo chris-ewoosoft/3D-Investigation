@@ -6,11 +6,9 @@ import unittest
 from pathlib import Path
 
 from cvtrain.config import (
-    ALL_MODEL_KEYS,
     DEFAULT_MODELS,
     MANIFEST_NAME,
     MODEL_REGISTRY,
-    MODEL_SPECS,
     PACKAGE_DIR,
     ModelRegistry,
     ModelSpec,
@@ -22,19 +20,24 @@ from cvtrain.config import (
 
 class ModelSpecTests(unittest.TestCase):
     def test_keys_match_spec_map(self) -> None:
-        self.assertEqual(ALL_MODEL_KEYS, ("det", "seg", "track"))
-        for key, spec in MODEL_SPECS.items():
+        self.assertEqual(MODEL_REGISTRY.keys(), ("det", "seg", "track"))
+        for key, spec in MODEL_REGISTRY.items():
             self.assertEqual(key, spec.key)
 
     def test_exported_names_are_unique(self) -> None:
-        outputs = [spec.output for spec in MODEL_SPECS.values()]
+        outputs = [spec.output for spec in MODEL_REGISTRY.values()]
         self.assertEqual(len(outputs), len(set(outputs)))
 
     def test_expected_contract_names(self) -> None:
-        # These names are asserted against AppConstants.h in test_contract.py.
-        self.assertEqual(MODEL_SPECS["det"].output, "yolo11n.onnx")
-        self.assertEqual(MODEL_SPECS["seg"].output, "yolo11n-seg.onnx")
-        self.assertEqual(MODEL_SPECS["track"].output, "yolo11x-tracking.onnx")
+        # These names are asserted against AIConstants.h in test_contract.py.
+        self.assertEqual(MODEL_REGISTRY["det"].output, "yolo11n.onnx")
+        self.assertEqual(MODEL_REGISTRY["seg"].output, "yolo11n-seg.onnx")
+        self.assertEqual(MODEL_REGISTRY["track"].output, "yolo11x-tracking.onnx")
+
+    def test_the_tracking_artifact_is_named_as_a_detector(self) -> None:
+        # The ONNX graph contains detection weights; association is Qt code.
+        # The label must not promise tracking the model does not implement.
+        self.assertEqual(MODEL_REGISTRY["track"].label, "Tracking detector (yolo11x)")
 
 
 class ResolveModelsTests(unittest.TestCase):
@@ -75,7 +78,7 @@ class PathResolutionTests(unittest.TestCase):
         # preflight, the backend and the provenance digest must agree on where
         # checkpoints live, so all three resolve the path through TrainConfig.
         cfg = TrainConfig()
-        for key, spec in MODEL_SPECS.items():
+        for key, spec in MODEL_REGISTRY.items():
             with self.subTest(key=key):
                 self.assertEqual(cfg.weights_path(spec), PACKAGE_DIR.parent / spec.ckpt)
                 self.assertTrue(str(cfg.weights_path(spec)).endswith(spec.ckpt))
@@ -83,12 +86,12 @@ class PathResolutionTests(unittest.TestCase):
     def test_weights_dir_override_moves_the_checkpoint_lookup(self) -> None:
         # Inputs move like outputs: a caller that redirects models_dir/runs_dir
         # can redirect the checkpoints the run starts from too.
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         cfg = TrainConfig(weights_dir=Path("C:/elsewhere/weights"))
         self.assertEqual(cfg.weights_path(spec), Path("C:/elsewhere/weights") / spec.ckpt)
 
     def test_output_path_honours_a_models_dir_override(self) -> None:
-        spec = MODEL_SPECS["det"]
+        spec = MODEL_REGISTRY["det"]
         cfg = TrainConfig(models_dir=Path("C:/elsewhere/Models"))
         self.assertEqual(cfg.output_path(spec), Path("C:/elsewhere/Models") / spec.output)
 
@@ -146,16 +149,32 @@ class ModelRegistryTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             reg.get("nonexistent")
 
-    def test_register_model_spec_updates_globals(self) -> None:
+    def test_register_model_spec_updates_registry(self) -> None:
         spec = ModelSpec("pose_test", "pose.pt", "pose.onnx", "pose", "pose", "Pose")
         try:
             register_model_spec(spec)
             self.assertIn("pose_test", MODEL_REGISTRY)
-            self.assertIn("pose_test", MODEL_SPECS)
-            self.assertEqual(MODEL_SPECS["pose_test"], spec)
+            self.assertEqual(MODEL_REGISTRY.get("pose_test"), spec)
+            self.assertIn("pose_test", MODEL_REGISTRY.keys())
         finally:
             MODEL_REGISTRY._specs.pop("pose_test", None)
-            MODEL_SPECS.pop("pose_test", None)
+
+    def test_registered_model_is_selectable_end_to_end(self) -> None:
+        # The point of a *live* registry: a model registered before the pipeline
+        # runs is accepted everywhere a built-in model is — here through
+        # preflight, the check that used to reject it against a static snapshot.
+        from cvtrain.config import TrainConfig
+        from cvtrain.preflight import run as preflight_run
+
+        spec = ModelSpec("demo", "demo.pt", "demo.onnx", "demo", "detection", "Demo")
+        try:
+            register_model_spec(spec)
+            cfg = TrainConfig(models=("demo",), weights_dir=Path("."))
+            report = preflight_run(cfg, deps_fatal=False, modules=())
+            failures = [check.line() for check in report.failures if check.name == "param.models"]
+            self.assertEqual(failures, [], f"preflight rejected the registered model: {failures}")
+        finally:
+            MODEL_REGISTRY._specs.pop("demo", None)
 
     def test_resolve_models_with_custom_registry(self) -> None:
         spec = ModelSpec("custom", "c.pt", "c.onnx", "c", "role", "label")

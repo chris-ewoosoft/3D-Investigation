@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from . import generator_name
-from .config import MANIFEST_NAME, MODEL_SPECS
+from .config import MANIFEST_NAME, MODEL_REGISTRY, TRACKER_INFO
 from .errors import ManifestIntegrityError
 from .fsio import atomic_write_text, file_size, sha256_file
 
@@ -108,7 +108,7 @@ class ManifestEntry(TypedDict, total=False):
     which makes ``--skip-unchanged`` retrain rather than assume it matches."""
 
     dataset_content_sha256: str
-    """Digest of the dataset inventory (files and sizes) when recorded."""
+    """Digest of the dataset contents (relative paths and file bytes) when recorded."""
 
     source_weights_sha256: str
     """Digest of the base checkpoint the model was actually trained from.
@@ -127,6 +127,15 @@ class ManifestEntry(TypedDict, total=False):
     dataset: str
     run_dir: str
     metrics: dict[str, float]
+
+    tracker: dict[str, object]
+    """Association metadata for a ``tracking`` artifact.
+
+    The ONNX graph is a detector; the tracker (algorithm, IoU threshold,
+    runtime owner) lives in C++. Recording it here makes the entry's ``role``
+    honest and lets an auditor reproduce the association behaviour without
+    inspecting the Qt sources. Absent for detection/segmentation entries.
+    """
 
 
 class LastRun(TypedDict, total=False):
@@ -420,11 +429,11 @@ def build_from_scan(models_dir: Path) -> Manifest:
 
     Used by ``--write-manifest`` to adopt models that were produced elsewhere
     (for example the pre-existing artifacts shipped with the repository). Only
-    the files :data:`cvtrain.config.MODEL_SPECS` names are adopted: vouching
-    for an unknown ONNX would hand it a clean verification with no provenance
-    behind it, so ``verify_manifest`` reports a stray instead. Any training
-    metadata already recorded in the manifest is preserved as long as the file
-    content is unchanged.
+    the files named by a spec in :data:`cvtrain.config.MODEL_REGISTRY` are
+    adopted: vouching for an unknown ONNX would hand it a clean verification
+    with no provenance behind it, so ``verify_manifest`` reports a stray
+    instead. Any training metadata already recorded in the manifest is
+    preserved as long as the file content is unchanged.
     """
 
     manifest = load_manifest(models_dir)
@@ -432,7 +441,7 @@ def build_from_scan(models_dir: Path) -> Manifest:
     entries = manifest["entries"]
 
     scanned = now_utc_iso()
-    for spec in MODEL_SPECS.values():
+    for spec in MODEL_REGISTRY.values():
         path = models_dir / spec.output
         if not path.exists():
             continue
@@ -458,6 +467,11 @@ def build_from_scan(models_dir: Path) -> Manifest:
 
         entry.setdefault("role", spec.role)
         entry.setdefault("source_weights", spec.ckpt)
+        if spec.role == "tracking":
+            # Association lives in the Qt runtime, not in the graph, so this
+            # stays true for an artifact adopted from disk without a training
+            # run behind it. ``setdefault`` preserves a richer recorded block.
+            entry.setdefault("tracker", dict(TRACKER_INFO))
         entry["sha256"] = new_sha
         entry["size_bytes"] = file_size(path)
         if "trained_at" not in entry:

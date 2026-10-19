@@ -166,7 +166,7 @@ class LLMRuntime(Protocol):
     The agent layer only needs the loaded backend and the lock that guards it;
     it never imports the model loader, so the inference technology stays
     replaceable and the composition root owns the concrete runtime
-    (ADR 0001). ``bootstrap.server.llm_module`` satisfies this protocol.
+    (ADR 0001). ``bootstrap.modules.LlmModule`` satisfies this protocol.
 
     The lock is typed structurally (:class:`LockLike`) so both
     ``threading.Lock`` and ``threading.RLock`` satisfy it.

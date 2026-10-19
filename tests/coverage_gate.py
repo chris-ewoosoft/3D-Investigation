@@ -66,18 +66,18 @@ TESTS: tuple[tuple[str, str, dict[str, str]], ...] = (
 # reaches the next integer — never lower one to make a change pass.
 FLOORS: dict[str, float] = {
     # Kernel + guard layer: the files every plugin transitively depends on.
-    "src/core/pluginhost.cpp": 90,               # measured 91.8
-    "src/core/plugindependencyresolver.cpp": 92,  # measured 93.3
+    "src/core/pluginhost.cpp": 91,               # measured 91.8
+    "src/core/plugindependencyresolver.cpp": 93,  # measured 93.3
     "src/core/secretvault.cpp": 92,               # measured 92.9
     "src/core/usermanager.cpp": 57,               # measured 57.5
-    "src/core/languagemanager.cpp": 90,           # measured 91.8
-    "src/core/appconfig.cpp": 36,                 # measured 37.1 (path matrix)
+    "src/core/languagemanager.cpp": 96,           # measured 96.5
+    "src/core/appconfig.cpp": 43,                 # measured 43.9 (path matrix)
     # Composition root + service layer the wiring test owns end-to-end.
     "src/app/appshell.cpp": 100,                  # measured 100
     "src/services/ai/chatsessionmanager.cpp": 100,  # measured 100
     "src/services/ai/chatsessionstore.cpp": 100,    # measured 100
     "src/services/settings/settingsservice.cpp": 100,  # measured 100
-    "src/services/shell/shellservice.cpp": 95,    # measured 96.3
+    "src/services/shell/shellservice.cpp": 96,    # measured 96.1
 }
 
 _TOOL_CANDIDATES = (

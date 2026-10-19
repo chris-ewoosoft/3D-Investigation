@@ -47,8 +47,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff
           # PyYAML so AIComputerVision's preflight dataset tests can actually
-          # parse data.yaml; the cvtrain job below also pins it.
-          pip install "PyYAML==6.0.2"
+          # parse data.yaml; the cvtrain job below pins it too. The ONNX
+          # contract tests build synthetic graphs and run an eager inference,
+          # so they need the same two packages the export path validates with.
+          pip install "PyYAML==6.0.2" "onnx==1.21.0" "onnxruntime>=1.20.1"
 
       - name: Ruff lint
         working-directory: AIAssistant
@@ -132,10 +134,12 @@ jobs:
 
   cvtrain:
     # Offline lint + type check + unit tests for the AIComputerVision training
-    # pipeline. No ML dependencies are installed: ultralytics is imported
-    # lazily (only through cvtrain.backend), and the suite only needs PyYAML to
-    # validate dataset YAML files. Coverage is gated at 100% (statements and
-    # branches) because cvtrain holds two contracts with the Qt application.
+    # pipeline. The training stack (ultralytics/torch) is not installed:
+    # ultralytics is imported lazily (only through cvtrain.backend). The suite
+    # does need PyYAML (data.yaml), onnx (graph validation) and onnxruntime
+    # (the post-export smoke inference the Qt app relies on). Coverage is gated
+    # at 100% (statements and branches) because cvtrain holds two contracts with
+    # the Qt application.
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -151,7 +155,7 @@ jobs:
       - name: Install lint/test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy coverage PyYAML==6.0.2
+          pip install ruff mypy coverage PyYAML==6.0.2 onnx==1.21.0 "onnxruntime>=1.20.1"
 
       - name: Ruff lint
         run: ruff check AIComputerVision --output-format=github

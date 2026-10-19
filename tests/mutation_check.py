@@ -174,7 +174,9 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant(
         "src/services/mail/MailThreadGuard.h",
         "if (app != nullptr && QThread::currentThread() == app->thread()) {",
-        "if (false) {",
+        # /WX: the mutant must stay warning-clean — keep `app` referenced with
+        # a runtime condition that can never be true (thread() is never null).
+        "if (app != nullptr && app->thread() == nullptr) {",
         "TestMailCredentialLifecycle",
         "TestMailCredentialLifecycle",
         "GUI-thread mail I/O no longer warns (contract guard disabled)",

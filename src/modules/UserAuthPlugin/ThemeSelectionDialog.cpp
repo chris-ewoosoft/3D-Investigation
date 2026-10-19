@@ -114,7 +114,7 @@ ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *par
         m_bgPathEdit->clear();
         if (m_bgPreview) {
             m_bgPreview->clear();
-            m_bgPreview->setText("No image");
+            m_bgPreview->setText(UserAuthPlugin::translate("theme.no_image"));
         }
     });
 
@@ -132,7 +132,7 @@ ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *par
     m_bgPreview->setFixedSize(80, 55);
     m_bgPreview->setAlignment(Qt::AlignCenter);
     m_bgPreview->setStyleSheet("background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; color: #475569; font-size: 10px;");
-    m_bgPreview->setText("No image");
+    m_bgPreview->setText(UserAuthPlugin::translate("theme.no_image"));
     if (!m_bgImagePath.isEmpty()) {
         QPixmap pm(m_bgImagePath);
         if (!pm.isNull())

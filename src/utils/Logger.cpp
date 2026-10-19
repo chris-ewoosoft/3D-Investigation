@@ -32,7 +32,7 @@ static void ensureFileOpenUnderLock() {
     s_logFile.close();
   }
 
-  if (s_logsDir.isEmpty()) s_logsDir = AppConfig::instance().logsDir();
+  if (s_logsDir.isEmpty()) s_logsDir = AppConfig::bootstrap().logsDir();
   const QString logsDir = s_logsDir;
   QDir().mkpath(logsDir);
   const QString filePath = logsDir + "/" + currentDate + ".txt";
@@ -46,6 +46,7 @@ static void ensureFileOpenUnderLock() {
 
 void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
                           const QString &msg) {
+  Q_UNUSED(context);
   if (type == QtWarningMsg && msg.contains("Unable to open monitor interface")) {
     return;
   }

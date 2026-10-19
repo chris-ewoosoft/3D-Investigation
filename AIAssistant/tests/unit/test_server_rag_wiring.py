@@ -1,6 +1,6 @@
 """Coverage for the RAG wiring the composition root actually performs.
 
-``_RAGModule._wire_index`` is the one path that goes from an on-disk corpus to
+``RagModule._wire_index`` is the one path that goes from an on-disk corpus to
 a serving ``RetrievalPipeline``: scan → build → persist → wire, then the
 cache-hit variant that only loads. The surrounding tests stub it out (they are
 about the *observable* empty state), so this file runs it for real against a
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ai_assistant.bootstrap.server import _RAGModule, rag_module
+from ai_assistant.bootstrap.modules import RagModule
 from ai_assistant.config.paths import AppPaths
 from ai_assistant.config.rag_config import RAGSettings
 from ai_assistant.rag.embeddings import HashingEmbeddingEncoder
@@ -51,8 +51,8 @@ class WireIndexTests(unittest.TestCase):
         ]
         for patcher in self._patches:
             patcher.start()
-        _RAGModule._reset_index_state()
-        self.addCleanup(lambda: [_RAGModule._reset_index_state()])
+        self.rag = RagModule()
+        self.addCleanup(self.rag._reset_index_state)
 
     def tearDown(self) -> None:
         for patcher in self._patches:
@@ -60,27 +60,27 @@ class WireIndexTests(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_building_from_scratch_wires_a_serving_pipeline(self) -> None:
-        count = _RAGModule.initialize_rag(enable_reranker=False, force_rebuild=True)
+        count = self.rag.initialize_rag(enable_reranker=False, force_rebuild=True)
 
         self.assertGreater(count, 0)
-        self.assertEqual(len(rag_module.knowledge_chunks), count)
-        self.assertIsNotNone(rag_module.knowledge_index)
-        self.assertIsNotNone(rag_module._pipeline)
+        self.assertEqual(len(self.rag.knowledge_chunks), count)
+        self.assertIsNotNone(self.rag.knowledge_index)
+        self.assertIsNotNone(self.rag._pipeline)
         # The retriever pair lives on the pipeline that actually serves
-        # queries (the write-only ``_RAGModule.vector_retriever`` field went
+        # queries (the write-only ``RagModule.vector_retriever`` field went
         # with the ADR 0015 dead-surface sweep).
-        self.assertIsNotNone(rag_module._pipeline.vector_retriever)
-        self.assertIsNotNone(rag_module._pipeline.bm25_retriever)
+        self.assertIsNotNone(self.rag._pipeline.vector_retriever)
+        self.assertIsNotNone(self.rag._pipeline.bm25_retriever)
 
-        doc_ctx, code_ctx, _images = rag_module.get_context("DevManager vai tro du an")
+        doc_ctx, code_ctx, _images = self.rag.get_context("DevManager vai tro du an")
         self.assertTrue(doc_ctx or code_ctx)
 
     def test_a_second_run_loads_the_cache_instead_of_rebuilding(self) -> None:
-        _RAGModule.initialize_rag(enable_reranker=False, force_rebuild=True)
-        loaded = _RAGModule.initialize_rag(enable_reranker=False, force_rebuild=False)
+        self.rag.initialize_rag(enable_reranker=False, force_rebuild=True)
+        loaded = self.rag.initialize_rag(enable_reranker=False, force_rebuild=False)
 
         self.assertGreater(loaded, 0)
-        self.assertIsNotNone(rag_module._pipeline)
+        self.assertIsNotNone(self.rag._pipeline)
 
     def test_an_unusable_index_is_reported_as_empty_not_as_a_success(self) -> None:
         """ADR 0015: a build that yields nothing degrades, it does not claim."""
@@ -88,22 +88,22 @@ class WireIndexTests(unittest.TestCase):
             "ai_assistant.rag.index.load_or_build_index",
             return_value=(None, [], None),
         ):
-            self.assertEqual(_RAGModule.initialize_rag(force_rebuild=True), 0)
-        self.assertEqual(rag_module.knowledge_chunks, [])
-        self.assertIsNone(rag_module._pipeline)
+            self.assertEqual(self.rag.initialize_rag(force_rebuild=True), 0)
+        self.assertEqual(self.rag.knowledge_chunks, [])
+        self.assertIsNone(self.rag._pipeline)
 
     def test_retrievers_refuse_a_bare_state(self) -> None:
-        self.assertEqual(_RAGModule._build_retrievers(None, None, None, None, None), (None, None))
+        self.assertEqual(self.rag._build_retrievers(None, None, None, None, None), (None, None))
 
     def test_releasing_for_vision_delegates_to_the_hardware_helper(self) -> None:
         with mock.patch("ai_assistant.llm.hardware.release_ml_memory") as release:
-            _RAGModule._release_ml_memory()
+            self.rag._release_ml_memory()
         release.assert_called_once_with()
 
     def test_a_disabled_rag_reports_zero_without_touching_the_corpus(self) -> None:
         with mock.patch.dict("os.environ", {"AI_ENABLE_RAG": "0"}):
-            self.assertEqual(_RAGModule.initialize_rag(force_rebuild=False), 0)
-        self.assertEqual(rag_module.knowledge_chunks, [])
+            self.assertEqual(self.rag.initialize_rag(force_rebuild=False), 0)
+        self.assertEqual(self.rag.knowledge_chunks, [])
 
 
 if __name__ == "__main__":

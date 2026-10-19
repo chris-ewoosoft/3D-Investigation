@@ -10,17 +10,21 @@ import re
 import unittest
 from pathlib import Path
 
-from cvtrain.config import MODEL_SPECS
+from cvtrain import onnx_contract
+from cvtrain.config import MODEL_REGISTRY, TRACKER_INFO
 from cvtrain.preflight import MAX_OPSET
 
-HEADER = Path(__file__).resolve().parents[2] / "src" / "core" / "AIConstants.h"
-MANIFEST = Path(__file__).resolve().parents[2] / "src" / "core" / "AppManifest.json"
-CMAKE = Path(__file__).resolve().parents[2] / "CMakeLists.txt"
+ROOT = Path(__file__).resolve().parents[2]
+HEADER = ROOT / "src" / "core" / "AIConstants.h"
+MANIFEST = ROOT / "src" / "core" / "AppManifest.json"
+CMAKE = ROOT / "CMakeLists.txt"
+POST_PROCESSOR = ROOT / "src" / "services" / "ai" / "AIYoloPostProcessor.h"
+AI_PROCESSOR = ROOT / "src" / "services" / "ai" / "AIProcessor.cpp"
 
 EXPECTED = {
-    "detectionModelFile": MODEL_SPECS["det"].output,
-    "segmentationModelFile": MODEL_SPECS["seg"].output,
-    "trackingModelFile": MODEL_SPECS["track"].output,
+    "detectionModelFile": MODEL_REGISTRY["det"].output,
+    "segmentationModelFile": MODEL_REGISTRY["seg"].output,
+    "trackingModelFile": MODEL_REGISTRY["track"].output,
 }
 
 
@@ -71,6 +75,14 @@ class ContractSourcePresenceTests(unittest.TestCase):
             self.skipTest("Python-only checkout: there is no contract to compare against")
         self.assertTrue(HEADER.exists(), f"{HEADER} moved or was renamed; ContractTests now skips silently")
         self.assertTrue(CMAKE.exists(), f"{CMAKE} missing; the opset ceiling tripwire is inactive")
+        self.assertTrue(
+            POST_PROCESSOR.exists(),
+            f"{POST_PROCESSOR} moved; the ONNX schema cross-check now skips silently",
+        )
+        self.assertTrue(
+            AI_PROCESSOR.exists(),
+            f"{AI_PROCESSOR} moved; the tracker threshold cross-check now skips silently",
+        )
 
 
 ORT_OPSET_CEILING = {"1.20": 21}
@@ -102,6 +114,53 @@ class OpsetCeilingTests(unittest.TestCase):
             ORT_OPSET_CEILING[short],
             f"preflight MAX_OPSET must be the opset ONNX Runtime {version} implements",
         )
+
+
+@unittest.skipUnless(POST_PROCESSOR.exists(), f"AIYoloPostProcessor.h not found at {POST_PROCESSOR}")
+class OnnxSchemaContractTests(unittest.TestCase):
+    """Python exports and the C++ parser must agree on the tensor schema.
+
+    ``onnx_contract.validate_export`` encodes the same ranks/counts the C++
+    loader assumes. If one side changes a constant without the other, exports
+    either get rejected for a compatible model or accepted for one the app
+    cannot parse — so both sides are compared here.
+    """
+
+    text: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = POST_PROCESSOR.read_text(encoding="utf-8")
+
+    def _constant(self, name: str) -> int:
+        match = re.search(rf"{name}\s*=\s*(\d+)", self.text)
+        self.assertIsNotNone(match, f"{name} not found in AIYoloPostProcessor.h")
+        assert match is not None
+        return int(match.group(1))
+
+    def test_cpp_constants_match_the_python_contract(self) -> None:
+        expected = {
+            "kExpectedInputRank": onnx_contract.INPUT_RANK,
+            "kExpectedInputChannels": onnx_contract.INPUT_CHANNELS,
+            "kExpectedDetectionOutputRank": onnx_contract.DETECTION_OUTPUT_RANK,
+            "kExpectedSegmentationOutputCount": onnx_contract.SEGMENTATION_OUTPUT_COUNT,
+            "kExpectedSegmentationProtoRank": onnx_contract.SEGMENTATION_PROTO_RANK,
+            "kExpectedBoxCoordinates": onnx_contract.BOX_COORDINATES,
+            "kExpectedMaskCoefficients": onnx_contract.MASK_COEFFICIENTS,
+        }
+        for name, python_value in expected.items():
+            with self.subTest(constant=name):
+                self.assertEqual(self._constant(name), python_value)
+
+    def test_the_tracker_threshold_matches_the_manifest_info(self) -> None:
+        # The artifact records the IoU threshold under which it was published;
+        # if C++ changes its matcher the manifest would otherwise keep claiming
+        # a value the runtime no longer uses.
+        text = AI_PROCESSOR.read_text(encoding="utf-8")
+        match = re.search(r"IOU_THRESHOLD\s*=\s*([0-9.]+)f", text)
+        self.assertIsNotNone(match, "IOU_THRESHOLD not found in AIProcessor.cpp")
+        assert match is not None
+        self.assertEqual(float(match.group(1)), TRACKER_INFO["iou_threshold"])
 
 
 if __name__ == "__main__":

@@ -2,11 +2,16 @@
 #include <QDir>
 #include <QApplication>
 #include <QDebug>
+#include <QSettings>
 #include <QStandardPaths>
 
-AppConfig& AppConfig::instance() {
+AppConfig& AppConfig::bootstrap() {
     static AppConfig instance;
     return instance;
+}
+
+AppConfig& AppConfig::instance() {
+    return bootstrap();
 }
 
 void AppConfig::initialize(const QString& appDir) {
@@ -96,4 +101,16 @@ QString AppConfig::thumbnailsDir() const {
 QString AppConfig::pluginsDir() const {
     std::shared_lock lock(m_mutex);
     return QDir::cleanPath(m_appDir + "/plugins");
+}
+
+QString AppConfig::pythonInterpreter() const {
+    QSettings settings(configPath(), QSettings::IniFormat);
+    const QString value = settings.value("AI/python_interpreter", "python").toString().trimmed();
+    return value.isEmpty() ? QStringLiteral("python") : value;
+}
+
+int AppConfig::aiServerPort() const {
+    QSettings settings(configPath(), QSettings::IniFormat);
+    const int value = settings.value("AI/server_port", 8080).toInt();
+    return (value > 0 && value <= 65535) ? value : 8080;
 }

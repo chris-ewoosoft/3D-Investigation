@@ -1,9 +1,9 @@
 #include "MainWindow.h"
+#include "AppConstants.h"
 #include "AppShell.h"
 #include "CustomProgressDialog.h"
 #include "ILanguageService.h"
 #include "PluginHost.h"
-#include "StyleManager.h"
 #include "ui_MainWindow.h"
 
 #include <QBoxLayout>
@@ -68,8 +68,7 @@ MainWindow::MainWindow(QWidget *parent)
       context()->services()->get<ILanguageService>(), this);
   m_shell->setProgressDialog(dlg);
 
-  // 8. Apply theme
-  StyleManager::applyTheme(qApp);
+  // 8. Language service (theme was applied once in main() before the shell was built)
 
   // 9. Connect language service (interface from the registry)
   auto *langSvc = context()->services()->get<ILanguageService>();
@@ -94,13 +93,8 @@ MainWindow::~MainWindow() {
 // ──────────────────────────────────────────────────────────
 void MainWindow::setupTitleBar(QWidget * /*root*/,
                                QVBoxLayout * /*rootLayout*/) {
-  // Tab definitions
-  QStringList tabKeys = {"tab.view", "tab.reconstruction", "tab.ai",
-                         "tab.ai_assistant", "tab.mail", "tab.help"};
-  // QStringList tabKeys = {
-  //     "tab.view"
-  // };
-
+  // Tab definitions: AppConstants::TabIds is the single source of truth for
+  // ids and display order (the id doubles as the translation key).
   QWidget *titleBar = new QWidget(this);
   titleBar->setObjectName("modernTitleBar");
   titleBar->setFixedHeight(44);
@@ -116,7 +110,8 @@ void MainWindow::setupTitleBar(QWidget * /*root*/,
   m_tabBarLayout->setContentsMargins(4, 0, 4, 0);
   m_tabBarLayout->setSpacing(2);
 
-  for (const QString &key : tabKeys) {
+  for (const char *tabId : AppConstants::TabIds::BuildOrder) {
+    const QString key = QString::fromLatin1(tabId);
     auto *btn = new QPushButton(context()->translate(key), m_tabBarWidget);
     btn->setObjectName("tabHeaderBtn");
     btn->setCheckable(true);
@@ -195,9 +190,8 @@ void MainWindow::setupTitleBar(QWidget * /*root*/,
   });
   connect(closeBtn, &QPushButton::clicked, this, &QMainWindow::close);
 
-  // Activate first tab
-  if (!tabKeys.isEmpty())
-    activateTab(tabKeys.first());
+  // Activate first tab (TabIds::BuildOrder is never empty)
+  activateTab(QString::fromLatin1(AppConstants::TabIds::BuildOrder[0]));
 }
 
 void MainWindow::setupTabContent(QWidget *root, QVBoxLayout *rootLayout) {
@@ -205,8 +199,9 @@ void MainWindow::setupTabContent(QWidget *root, QVBoxLayout *rootLayout) {
   m_tabContent->setObjectName("tabContentStrip");
   m_tabContent->setFixedHeight(66);
 
-  for (auto it = m_tabPanels.begin(); it != m_tabPanels.end(); ++it)
-    m_tabContent->addWidget(it.value());
+  for (const char *tabId : AppConstants::TabIds::BuildOrder)
+    m_tabContent->addWidget(
+        m_tabPanels.value(QString::fromLatin1(tabId)));
 
   if (!m_activeTab.isEmpty())
     activateTab(m_activeTab);

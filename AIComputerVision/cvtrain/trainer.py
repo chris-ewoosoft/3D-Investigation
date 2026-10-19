@@ -30,10 +30,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import gate, generator_name, preflight
+from . import gate, generator_name, onnx_contract, preflight
 from . import manifest as manifest_mod
 from .backend import EpochCallback, TrainedModel, TrainingBackend
-from .config import BASE_DIR, MODEL_SPECS, PROJECT_ROOT, ModelSpec, TrainConfig
+from .config import BASE_DIR, MODEL_REGISTRY, PROJECT_ROOT, TRACKER_INFO, ModelSpec, TrainConfig
 from .errors import ExitCode
 from .fsio import atomic_replace_with_backup, directory_lock, file_size, sha256_file, touch_lock
 from .progress import ProgressReporter
@@ -67,7 +67,7 @@ def confirm_retrain(cfg: TrainConfig) -> bool:
 
     if cfg.auto_confirm or cfg.check_only or cfg.dry_run:
         return True
-    existing = [MODEL_SPECS[key].output for key in cfg.models if cfg.output_path(MODEL_SPECS[key]).exists()]
+    existing = [MODEL_REGISTRY[key].output for key in cfg.models if cfg.output_path(MODEL_REGISTRY[key]).exists()]
     if not existing:
         return True
     if not sys.stdin.isatty():
@@ -171,6 +171,11 @@ def _export_one(
 
     reporter.exporting(index, spec.key)
     generated = backend.export(model, cfg)
+    # The Qt loader's tensor contract is checked *before* publishing: an
+    # artifact the desktop app cannot consume must never replace a model that
+    # already works, and the run must say so (exit code 4) instead of reporting
+    # a clean export the user discovers only when inference fails.
+    onnx_contract.validate_export(generated, spec, cfg)
     # Publish atomically, keeping the artifact we are about to replace at
     # ``<name>.onnx.bak``: a bad export must be recoverable without retraining.
     target = atomic_replace_with_backup(generated, cfg.output_path(spec))
@@ -228,6 +233,11 @@ def _record_entry(
     content_sha = gate.dataset_content_digest(cfg)
     if content_sha is not None:
         entry["dataset_content_sha256"] = content_sha
+    if spec.role == "tracking":
+        # The artifact is a detector; association lives in the Qt runtime.
+        # Recording the parameters here keeps "tracking" from implying that the
+        # ONNX graph itself contains the tracker.
+        entry["tracker"] = dict(TRACKER_INFO)
     manifest_mod.upsert_entry(manifest, spec.output, entry)
     # ``updated_at`` tracks the last provenance write: without this refresh a
     # training run leaves the header older than the entries it just published.
@@ -252,7 +262,7 @@ def _train_all(
 
     total = len(cfg.models)
     for index, key in enumerate(cfg.models):
-        spec = MODEL_SPECS[key]
+        spec = MODEL_REGISTRY[key]
         if cfg.skip_unchanged and gate.already_current(spec, cfg, manifest, backend.version):
             LOG.info("[%d/%d] %s already matches this invocation; skipping", index + 1, total, spec.output)
             kept = (manifest.get("entries") or {}).get(spec.output) or {}
@@ -267,7 +277,7 @@ def _train_all(
         gate.enforce_quality_gate(cfg, spec, model.metrics)
         target = _export_one(spec, cfg, reporter, index, model, backend)
         _record_entry(manifest, spec, cfg, target, model, backend.version)
-    return [MODEL_SPECS[key].output for key in cfg.models]
+    return [MODEL_REGISTRY[key].output for key in cfg.models]
 
 
 def _execute(cfg: TrainConfig, reporter: ProgressReporter, backend: TrainingBackend[Any]) -> ExitCode:

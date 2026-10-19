@@ -30,5 +30,23 @@ namespace MenuIds {
     inline constexpr const char* AiProcessor    = "ai_menu";
 } // namespace MenuIds
 
+/** Stable identifiers + build order for the shell tab bar.
+ *
+ * MainWindow builds the tab bar from BuildOrder; plugins address their panel
+ * through these ids instead of repeating "tab.…" literals. The id is also the
+ * translation key, so adding a tab means one entry here + one JSON key. */
+namespace TabIds {
+    inline constexpr const char* View           = "tab.view";
+    inline constexpr const char* Reconstruction = "tab.reconstruction";
+    inline constexpr const char* AiProcessor    = "tab.ai";
+    inline constexpr const char* AiAssistant    = "tab.ai_assistant";
+    inline constexpr const char* Mail           = "tab.mail";
+    inline constexpr const char* Help           = "tab.help";
+
+    inline constexpr const char* BuildOrder[] = {
+        View, Reconstruction, AiProcessor, AiAssistant, Mail, Help
+    };
+} // namespace TabIds
+
 } // namespace AppConstants
 #endif

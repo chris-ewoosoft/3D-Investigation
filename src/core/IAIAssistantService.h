@@ -15,6 +15,7 @@ struct ChatSession {
     QString title;        // Auto-generated from first message
     QDateTime createdAt;
     QList<QJsonObject> messages;
+    bool titleIsDefault = false; // true when title is auto-generated (e.g. "New Session <date>")
 };
 
 class APP_EXPORT IAIAssistantService : public QObject {

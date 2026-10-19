@@ -109,17 +109,21 @@ class ProactorShimTests(unittest.TestCase):
 
 
 class ChatbotAgentHolderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server.runtime_modules.chatbot_agent._agent = None
+
     def tearDown(self) -> None:
-        server._chatbot_agent_holder.clear()
+        server.runtime_modules.chatbot_agent._agent = None
 
     def test_get_chatbot_agent_creates_once_and_rebuild_replaces(self) -> None:
+        holder = server.runtime_modules.chatbot_agent
         first, second = MagicMock(), MagicMock()
         with patch("ai_assistant.orchestration.specialists.ChatbotAgent", side_effect=[first, second]) as mock_cls:
-            got_a = server._get_chatbot_agent()
-            got_b = server._get_chatbot_agent()
-            server._rebuild_chatbot_agent()
-            got_c = server._get_chatbot_agent()
-            mock_cls.assert_called_with(server.llm_module, server.rag_module)
+            got_a = holder.get()
+            got_b = holder.get()
+            holder.rebuild()
+            got_c = holder.get()
+            mock_cls.assert_called_with(server.runtime_modules.llm, server.runtime_modules.rag)
         self.assertIs(got_a, first)
         self.assertIs(got_b, first)
         self.assertIs(got_c, second)
@@ -128,15 +132,22 @@ class ChatbotAgentHolderTests(unittest.TestCase):
 
 class A2ATaskExecutorTests(unittest.TestCase):
     def test_execute_a2a_task_requires_loaded_llm(self) -> None:
-        with patch.object(server.llm_module, "llm", None):
+        with patch.object(server.runtime_modules.llm, "llm", None):
             with self.assertRaisesRegex(RuntimeError, "LLM is not initialized"):
-                server._execute_a2a_task(MagicMock())
+                server.runtime_modules.execute_a2a_task(MagicMock())
+
+    def test_execute_a2a_task_requires_the_run_service(self) -> None:
+        with patch.object(server.runtime_modules.llm, "llm", object()), \
+                patch.object(server.runtime_modules, "agent_run_service", None):
+            with self.assertRaisesRegex(RuntimeError, "Agent run service is not initialized"):
+                server.runtime_modules.execute_a2a_task(MagicMock())
 
     def test_execute_a2a_task_delegates_to_agent_run_service(self) -> None:
         task = MagicMock()
-        with patch.object(server.llm_module, "llm", object()), \
-                patch.object(server, "_agent_run_service") as mock_service:
-            server._execute_a2a_task(task)
+        mock_service = MagicMock()
+        with patch.object(server.runtime_modules.llm, "llm", object()), \
+                patch.object(server.runtime_modules, "agent_run_service", mock_service):
+            server.runtime_modules.execute_a2a_task(task)
         mock_service.run.assert_called_once_with(task)
 
 

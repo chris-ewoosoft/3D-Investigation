@@ -3,7 +3,6 @@
 
 #include "IAIService.h"
 #include "AIProcessor.h"
-#include "AIAssistant.h"
 #include "Global.h"
 #include <memory>
 #include <QObject>

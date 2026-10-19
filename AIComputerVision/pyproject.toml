@@ -77,6 +77,13 @@ ignore_missing_imports = true
 module = ["tensorboard"]
 ignore_missing_imports = true
 
+# ``onnxruntime`` ships native binaries without type information. It is
+# imported lazily by ``onnx_contract`` for the post-export smoke inference, so
+# the type-checker runs on machines that only lint without the ML stack.
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*"]
+ignore_missing_imports = true
+
 # Every statement *and* branch of cvtrain is exercised. The package carries two
 # contracts — the ONNX file names the Qt app hard-codes, and the stdout protocol
 # it parses — so an untested line is an unverified contract. `fail_under` is

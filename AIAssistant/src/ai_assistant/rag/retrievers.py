@@ -3,7 +3,7 @@
 ``RetrievalPipeline`` (``rag/retrieval.py``) is transport-agnostic: it consumes
 objects that expose ``.node.metadata["chunk_index"]`` and ``.score``. This
 module provides the two concrete retrievers the composition root wires in
-``bootstrap.server._RAGModule.initialize_rag`` — before this module existed the
+``bootstrap.modules.RagModule._wire_index`` — before this module existed the
 pipeline was never constructed, so ``get_context`` always returned an empty
 context and ``rag_search`` always reported ``found=False``.
 """

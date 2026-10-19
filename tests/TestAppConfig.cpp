@@ -10,17 +10,17 @@ private slots:
     // AppConfig::appDir() only reflects whatever was passed to initialize();
     // production code calls this from main() before anything reads paths,
     // so the test needs to do the same before asserting on them.
-    AppConfig::instance().initialize(QCoreApplication::applicationDirPath());
+    AppConfig::bootstrap().initialize(QCoreApplication::applicationDirPath());
   }
 
   void testSingletonInstance() {
-    AppConfig &instance1 = AppConfig::instance();
-    AppConfig &instance2 = AppConfig::instance();
+    AppConfig &instance1 = AppConfig::bootstrap();
+    AppConfig &instance2 = AppConfig::bootstrap();
     QCOMPARE(&instance1, &instance2);
   }
 
   void testDirectoryPaths() {
-    AppConfig &config = AppConfig::instance();
+    AppConfig &config = AppConfig::bootstrap();
 
     // This will verify that the paths are not empty
     QVERIFY(!config.appDir().isEmpty());

@@ -17,7 +17,7 @@ from unittest import mock
 from cvtrain import manifest as manifest_mod
 from cvtrain.backend import UltralyticsBackend
 from cvtrain.cli import build_parser, config_from_args, main, parse_metric_threshold
-from cvtrain.config import DEFAULT_MODELS, DEFAULT_OPSET, MANIFEST_NAME, MODEL_SPECS, TrainConfig
+from cvtrain.config import DEFAULT_MODELS, DEFAULT_OPSET, MANIFEST_NAME, MODEL_REGISTRY, TrainConfig
 from cvtrain.errors import BackendUnavailableError, ExitCode, QualityGateError
 from cvtrain.fsio import LOCK_NAME
 
@@ -236,17 +236,17 @@ class CompositionRootTests(_CliTestCase):
 class ManifestCommandTests(_CliTestCase):
     def test_write_manifest_scans_and_returns_ok(self) -> None:
         models_dir = self._models_dir()
-        (models_dir / MODEL_SPECS["det"].output).write_bytes(b"det-bytes")
+        (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"det-bytes")
 
         code = main(["--write-manifest", "--models-dir", str(models_dir)])
 
         self.assertEqual(code, ExitCode.OK)
         manifest = manifest_mod.load_manifest(models_dir)
-        self.assertIn(MODEL_SPECS["det"].output, manifest["entries"])
+        self.assertIn(MODEL_REGISTRY["det"].output, manifest["entries"])
 
     def test_verify_detects_a_tampered_artifact(self) -> None:
         models_dir = self._models_dir()
-        target = models_dir / MODEL_SPECS["det"].output
+        target = models_dir / MODEL_REGISTRY["det"].output
         target.write_bytes(b"original")
         main(["--write-manifest", "--models-dir", str(models_dir)])
 
@@ -288,7 +288,7 @@ class ManifestCommandTests(_CliTestCase):
 
     def test_verify_of_a_consistent_manifest_returns_ok(self) -> None:
         models_dir = self._models_dir()
-        (models_dir / MODEL_SPECS["det"].output).write_bytes(b"original")
+        (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"original")
         main(["--write-manifest", "--models-dir", str(models_dir)])
 
         with mock.patch("cvtrain.cli.LOG") as fake_log:
@@ -316,7 +316,7 @@ class ManifestCommandTests(_CliTestCase):
         # reports a mismatch that exists only as a race. The same lock turns
         # that into "wait for the run to finish".
         models_dir = self._models_dir()
-        (models_dir / MODEL_SPECS["det"].output).write_bytes(b"original")
+        (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"original")
         main(["--write-manifest", "--models-dir", str(models_dir)])
         (models_dir / LOCK_NAME).write_text("held", encoding="utf-8")
 

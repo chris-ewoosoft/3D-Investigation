@@ -10,7 +10,6 @@
 // by the Python AI server.  This prevents Qt from dispatching stale aliases.
 class APP_EXPORT AgentActionManifest final {
 public:
-    static bool canonicalize(QString &action, QVariantMap &parameters, QString *error = nullptr);
     static bool canonicalize(QString &action, QVariantMap &parameters, QString *error, IAppPaths* paths);
 
     /// Demo fixtures ("sample_data" block) from the manifest; empty map when

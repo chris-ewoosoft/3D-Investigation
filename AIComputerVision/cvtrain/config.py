@@ -154,22 +154,53 @@ DEFAULT_SPECS: tuple[ModelSpec, ...] = (
         output="yolo11x-tracking.onnx",
         runs_subdir="tracking",
         role="tracking",
-        label="Tracking (yolo11x-tracking)",
+        # The artifact is a *detector*: association (IoU matching, track IDs)
+        # lives in the Qt runtime, not in the ONNX graph. The historical file
+        # name stays for the AIConstants.h contract; the label must not imply
+        # that the model itself tracks.
+        label="Tracking detector (yolo11x)",
     ),
 )
 
+TRACKER_INFO: dict[str, object] = {
+    "algorithm": "iou",
+    "iou_threshold": 0.3,
+    "scope": "qt-runtime",
+    "implementation": "src/services/ai/AIProcessor.cpp",
+}
+"""Association metadata for the ``tracking`` role.
+
+The exported ONNX contains detection weights only; ``AIProcessor::runTracking``
+matches consecutive-frame boxes and assigns IDs. Recording this in the manifest
+keeps provenance honest: an auditor reading "tracking" knows the tracker is app
+code, and ``tests/test_contract.py`` checks the threshold against the C++
+source so the two cannot drift.
+"""
+
 MODEL_REGISTRY = ModelRegistry(DEFAULT_SPECS)
-MODEL_SPECS: dict[str, ModelSpec] = MODEL_REGISTRY.as_dict()
-ALL_MODEL_KEYS: tuple[str, ...] = MODEL_REGISTRY.keys()
+"""The single source of truth for trainable models.
+
+Every consumer — preflight, the CLI, the trainer, the manifest — resolves
+models through this object at runtime, never through a module-level snapshot.
+That is what makes :func:`register_model_spec` a real extension point rather
+than an API whose additions the pipeline immediately forgets: a spec
+registered before the pipeline runs is visible to every ``keys()``/``get()``
+call, because they all read the same live registry.
+"""
 
 # Backwards compatible default: the legacy script always trained det + seg.
 DEFAULT_MODELS: tuple[str, ...] = ("det", "seg")
 
 
 def register_model_spec(spec: ModelSpec) -> None:
-    """Register a new ModelSpec into the default registry and update global views."""
+    """Register a new ModelSpec into the live registry.
+
+    The registry is the only bookkeeping a registration needs: every reader
+    (CLI listing, preflight, trainer, manifest adoption) goes through it, so a
+    newly registered model is immediately selectable everywhere. Raises
+    ``ValueError`` if the key or the output file name is already taken.
+    """
     MODEL_REGISTRY.register(spec)
-    MODEL_SPECS[spec.key] = spec
 
 
 def resolve_models(

@@ -18,7 +18,6 @@ from . import __version__, trainer
 from . import manifest as manifest_mod
 from .backend import UltralyticsBackend
 from .config import (
-    ALL_MODEL_KEYS,
     DEFAULT_BATCH,
     DEFAULT_DATA_YAML,
     DEFAULT_EPOCHS,
@@ -31,7 +30,7 @@ from .config import (
     DEFAULT_WEIGHTS_DIR,
     DEFAULT_WORKERS,
     MANIFEST_NAME,
-    MODEL_SPECS,
+    MODEL_REGISTRY,
     TrainConfig,
     resolve_models,
 )
@@ -116,8 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
         "model selection",
         f"select one or more; with no flag the default set is trained ({', '.join(DEFAULT_MODELS)})",
     )
-    for key in ALL_MODEL_KEYS:
-        spec = MODEL_SPECS[key]
+    for key in MODEL_REGISTRY.keys():
+        spec = MODEL_REGISTRY[key]
         selection.add_argument(
             f"--{key}",
             dest="models",

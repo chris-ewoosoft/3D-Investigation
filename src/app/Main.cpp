@@ -53,7 +53,7 @@ int main(int argc, char* argv[])
     StyleManager::applyTheme(&app);
     
     // Initialize AppConfig
-    AppConfig::instance().initialize(QApplication::applicationDirPath());
+    AppConfig::bootstrap().initialize(QApplication::applicationDirPath());
     
     // ── Fix UTF-8 output cho Qt Creator Application Output ────────────────
     // stdout mặc định trên Windows dùng hệ thống codepage (CP1252/CP1258)

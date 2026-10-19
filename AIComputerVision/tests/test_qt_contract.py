@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 
 from cvtrain.cli import build_parser, config_from_args
-from cvtrain.config import ALL_MODEL_KEYS, MODEL_SPECS
+from cvtrain.config import MODEL_REGISTRY
 from cvtrain.logging_setup import setup_logging
 from cvtrain.progress import PROGRESS_PREFIX, ProgressReporter
 
@@ -83,7 +83,7 @@ class LaunchContractTests(unittest.TestCase):
     def test_the_full_selection_resolves_to_every_model(self) -> None:
         cfg = config_from_args(build_parser().parse_args(self._app_flags()))
         self.assertTrue(cfg.auto_confirm, "without --yes the app would hang on our Y/N prompt")
-        self.assertEqual(set(cfg.models), set(ALL_MODEL_KEYS))
+        self.assertEqual(set(cfg.models), set(MODEL_REGISTRY.keys()))
 
     def test_train_script_constant_points_at_the_existing_entry_point(self) -> None:
         if not HEADER.exists():  # pragma: no cover - checkout without C++ sources
@@ -104,11 +104,11 @@ class DialogContractTests(unittest.TestCase):
         # C++ uses m_ctx->translate() for i18n; extract literal or translate-key labels.
         literal = re.findall(r'new QCheckBox\("([^"]+)"', text)
         translated = re.findall(r'm_ctx->translate\("([^"]+)"\)', text)
-        # The 3 dialog checkboxes are translated; map keys back to MODEL_SPECS labels.
+        # The 3 dialog checkboxes are translated; map keys back to MODEL_REGISTRY labels.
         translate_map = {
             "aiproc.train_model_det": "Detection (yolo11n)",
             "aiproc.train_model_seg": "Segmentation (yolo11n-seg)",
-            "aiproc.train_model_track": "Tracking (yolo11x-tracking)",
+            "aiproc.train_model_track": "Tracking detector (yolo11x)",
         }
         # Preserve order: det, seg, track as they appear in source.
         ordered_labels = []
@@ -117,7 +117,7 @@ class DialogContractTests(unittest.TestCase):
                 ordered_labels.append(translate_map[t])
         if not ordered_labels and literal:
             ordered_labels = literal
-        expected = [MODEL_SPECS[key].label for key in ALL_MODEL_KEYS]
+        expected = [MODEL_REGISTRY[key].label for key in MODEL_REGISTRY.keys()]
         self.assertEqual(ordered_labels, expected)
 
 

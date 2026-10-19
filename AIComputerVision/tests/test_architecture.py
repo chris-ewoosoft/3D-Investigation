@@ -41,10 +41,11 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "gate": frozenset({"config", "dataset", "errors", "fsio", "manifest"}),
     "logging_setup": frozenset(),
     "manifest": frozenset({"config", "errors", "fsio"}),
+    "onnx_contract": frozenset({"checks", "config", "dataset", "errors", "preflight"}),
     "preflight": frozenset({"checks", "config", "dataset"}),
     "progress": frozenset(),
     "trainer": frozenset(
-        {"backend", "config", "errors", "fsio", "gate", "manifest", "preflight", "progress"}
+        {"backend", "config", "errors", "fsio", "gate", "manifest", "onnx_contract", "preflight", "progress"}
     ),
 }
 """The dependency graph of the package: module -> the modules it may import.
@@ -62,6 +63,9 @@ HEAVY_DEPENDENCIES: dict[str, frozenset[str]] = {
     "ultralytics": frozenset({"backend"}),
     "tensorboard": frozenset({"backend"}),
     "yaml": frozenset({"dataset"}),
+    "onnx": frozenset({"onnx_contract"}),
+    "onnxruntime": frozenset({"onnx_contract"}),
+    "numpy": frozenset({"onnx_contract"}),
 }
 """Third-party modules that may only be imported by the listed files.
 
@@ -70,7 +74,9 @@ the package so that ``--help``, ``--check``, ``--dry-run`` and the whole unit
 suite run without it installed. ``ultralytics`` belongs to the one adapter;
 ``yaml`` belongs to the one module that parses ``data.yaml``; ``tensorboard``
 is the optional sink behind ``--tensorboard``, probed by the same adapter so
-that feature fails fast rather than logging a success it did not have.
+that feature fails fast rather than logging a success it did not have. The
+ONNX stack (``onnx``/``onnxruntime``/``numpy``) belongs to the post-export
+contract module, which imports each one inside the check that needs it.
 """
 
 
@@ -99,10 +105,19 @@ def _internal_imports(tree: ast.Module) -> set[str]:
     return found
 
 
+def _is_type_checking(test: ast.expr) -> bool:
+    """``TYPE_CHECKING`` (bare or ``typing.``-qualified) guards non-runtime imports."""
+
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
 def _heavy_imports(tree: ast.Module) -> dict[str, list[bool]]:
     """``{heavy module: [was each import lazy, ...]}`` for one file.
 
-    An import is *lazy* when it sits inside a function body: that is what keeps
+    An import is *lazy* when it sits inside a function body or a
+    ``TYPE_CHECKING`` guard: neither runs at import time, which is what keeps
     the heavy stack out of ``--help``/``--check`` and out of the unit suite.
     """
 
@@ -111,6 +126,8 @@ def _heavy_imports(tree: ast.Module) -> dict[str, list[bool]]:
     def visit(node: ast.AST, inside_function: bool) -> None:
         for child in ast.iter_child_nodes(node):
             nested = inside_function or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            if isinstance(child, ast.If) and _is_type_checking(child.test):
+                nested = True
             if isinstance(child, ast.Import):
                 names = [alias.name.partition(".")[0] for alias in child.names]
             elif isinstance(child, ast.ImportFrom) and child.level == 0 and child.module:

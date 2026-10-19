@@ -193,7 +193,7 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
                         .arg(pi + 1)
                         .arg(planSteps[pi].toString().toHtmlEscaped());
                 }
-                html += ChatTemplates::AGENT_THINKING.arg("📌 Kế hoạch", planHtml);
+                html += ChatTemplates::AGENT_THINKING.arg(ctx->translate("ai.plan"), planHtml);
             } else if (type == "plan_reflection") {
                 if (i != lastReflectionIndex) continue; // superseded draft
                 const QJsonObject review = step["result"].toObject();

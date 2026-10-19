@@ -1,5 +1,6 @@
 #include "SendMailPlugin.h"
 
+#include "AppConstants.h"
 #include "IAppContext.h"
 #include "IShellService.h"
 #include "MailDockWidget.h"
@@ -18,7 +19,7 @@ bool SendMailPlugin::initialize(IAppContext *context)
     m_ctx = context;
     m_dockUI = new MailDockWidget(m_ctx, this);
 
-    if (QWidget *panel = m_ctx->shell()->getTabPanel("tab.mail")) {
+    if (QWidget *panel = m_ctx->shell()->getTabPanel(AppConstants::TabIds::Mail)) {
         m_ribbonUI = new SendMailRibbonUI(m_ctx, panel, this);
         
         // Initialize button text

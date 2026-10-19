@@ -8,7 +8,7 @@ namespace AIYoloPostProcessor {
 cv::Size modelInputSize(const std::vector<int64_t> &shape)
 {
     // NCHW: dimensions 2/3 are the spatial extent the network actually sees.
-    if (shape.size() == 4 && shape[2] > 0 && shape[3] > 0) {
+    if (shape.size() == static_cast<std::size_t>(kExpectedInputRank) && shape[2] > 0 && shape[3] > 0) {
         return cv::Size(static_cast<int>(shape[3]), static_cast<int>(shape[2]));
     }
     return cv::Size(kDefaultModelInputSize, kDefaultModelInputSize);
@@ -21,7 +21,7 @@ YoloDetections parsePredictions(const cv::Mat &predictions,
                                 int maskCoefficientCount)
 {
     YoloDetections detections;
-    const int numClasses = predictions.cols - 4 - maskCoefficientCount;
+    const int numClasses = predictions.cols - kExpectedBoxCoordinates - maskCoefficientCount;
     const float xFactor = imageSize.width / static_cast<float>(modelSize.width);
     const float yFactor = imageSize.height / static_cast<float>(modelSize.height);
 
@@ -31,8 +31,8 @@ YoloDetections parsePredictions(const cv::Mat &predictions,
         float maxScore = -1.0f;
         int classId = -1;
         for (int classIndex = 0; classIndex < numClasses; ++classIndex) {
-            if (data[4 + classIndex] > maxScore) {
-                maxScore = data[4 + classIndex];
+            if (data[kExpectedBoxCoordinates + classIndex] > maxScore) {
+                maxScore = data[kExpectedBoxCoordinates + classIndex];
                 classId = classIndex;
             }
         }
@@ -54,8 +54,8 @@ YoloDetections parsePredictions(const cv::Mat &predictions,
 
         if (maskCoefficientCount > 0) {
             detections.maskCoefficients.emplace_back(
-                data + 4 + numClasses,
-                data + 4 + numClasses + maskCoefficientCount);
+                data + kExpectedBoxCoordinates + numClasses,
+                data + kExpectedBoxCoordinates + numClasses + maskCoefficientCount);
         }
     }
 

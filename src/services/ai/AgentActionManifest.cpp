@@ -6,7 +6,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include "AppConfig.h"
 
 bool AgentActionManifest::canonicalize(QString &action, QVariantMap &parameters, QString *error, IAppPaths* paths) {
     const QString root = paths ? paths->projectRootDir() : QString();
@@ -54,11 +53,6 @@ bool AgentActionManifest::canonicalize(QString &action, QVariantMap &parameters,
     }
     parameters["action"] = action;
     return true;
-}
-
-// Legacy overload for bootstrap / pre-registry usage (deprecated, prefer IAppPaths overload).
-bool AgentActionManifest::canonicalize(QString &action, QVariantMap &parameters, QString *error) {
-    return canonicalize(action, parameters, error, &AppConfig::instance());
 }
 
 namespace {

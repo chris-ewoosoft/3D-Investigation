@@ -84,7 +84,6 @@ class BodySizeLimitMiddleware:
             await self._app(scope, receive, send)
             return
         headers = scope.get("headers", ())
-        headers = scope.get("headers", ())
         for name, value in headers:  # type: ignore[attr-defined]
             if name.lower() == b"content-length":
                 try:
@@ -111,7 +110,6 @@ class BodySizeLimitMiddleware:
 
 
 def _register_domain_error_handlers(app: FastAPI) -> None:
-    """Register domain-specific error handlers."""
     """Translate transport-agnostic domain errors into HTTP responses."""
 
     def handler_for(status_code: int) -> ExceptionHandler:

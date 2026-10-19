@@ -7,12 +7,19 @@
 # to (re)train models via TrainModel.py.
 #
 # Versions below match the environment the current models were produced with.
-# ``torch`` is intentionally unpinned: pick the build that matches your
-# CUDA/CPU setup (see https://pytorch.org/get-started/locally/).
+# ``torch`` is a range, not an exact pin, because the CUDA and CPU builds share
+# the same version number and are selected by the index used to install them:
+# https://pytorch.org/get-started/locally/ . The range keeps a run on a
+# supported ABI without silently accepting a major framework jump.
+torch>=2.7,<3
 ultralytics==8.4.41
 PyYAML==6.0.2
 onnx==1.21.0
 onnxslim==0.1.91
+# Post-export compatibility validation (the same engine the Qt runtime uses).
+# >= 1.20.1 mirrors ONNXRUNTIME_VERSION in CMakeLists.txt, the version the
+# exported models are guaranteed to load under.
+onnxruntime>=1.20.1
 
 # Optional - only required when training with ``--tensorboard``.
 tensorboard==2.15.2

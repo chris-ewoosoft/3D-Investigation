@@ -13,10 +13,12 @@
 #   2. Services must not reach up into the app shell (src/app/**).
 #   3. UserManager::instance() chỉ được gọi ở composition root (AppShell.cpp)
 #      và trong chính UserManager.{h,cpp}; mọi nơi khác phải resolve
-#      IUserManager từ ServiceRegistry.
+#      IUserManager từ ServiceRegistry. AppConfig::bootstrap() tương tự: chỉ
+#      Main.cpp / AppShell.cpp / Logger.cpp (bootstrap) và chính AppConfig.
 #   4. Plugins must not call process singletons (AppConfig::instance /
-#      LanguageManager::instance) — resolve IAppPaths / ILanguageService from
-#      the ServiceRegistry instead.
+#      AppConfig::bootstrap) — resolve IAppPaths from the ServiceRegistry
+#      instead. LanguageManager không còn singleton; ILanguageService được
+#      resolve từ registry.
 #   5. Plugin nặng/nhẹ phải khớp với source của chính nó: plugin có include
 #      VTK/OpenCV/PCL phải dùng SharedPCH + tự khai báo heavy libs; plugin
 #      còn lại phải dùng SharedPCHLight và không được tham chiếu heavy SDK —
@@ -156,13 +158,32 @@ foreach(source IN LISTS ALL_SOURCES)
     endif()
 endforeach()
 
+# ── 3b. AppConfig::bootstrap() chỉ ở bootstrap/composition root ───────────────
+foreach(source IN LISTS ALL_SOURCES)
+    get_filename_component(name "${source}" NAME)
+    if(name STREQUAL "AppConfig.cpp"
+       OR name STREQUAL "AppConfig.h"
+       OR name STREQUAL "Main.cpp"
+       OR name STREQUAL "AppShell.cpp"
+       OR name STREQUAL "Logger.cpp")
+        continue()
+    endif()
+
+    file(READ "${source}" content)
+    if(content MATCHES "AppConfig::(bootstrap|instance)[ \t]*\\(\\)")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
+        list(APPEND VIOLATIONS
+            "${rel}: gọi AppConfig::bootstrap()/instance() ngoài bootstrap — resolve IAppPaths")
+    endif()
+endforeach()
+
 # ── 4. Plugins must not call process singletons ───────────────────────────────
 foreach(source IN LISTS PLUGIN_SOURCES)
     file(READ "${source}" content)
-    if(content MATCHES "(AppConfig|LanguageManager)::instance[ \t]*\\(\\)")
+    if(content MATCHES "(AppConfig|LanguageManager)::(instance|bootstrap)[ \t]*\\(\\)")
         file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
         list(APPEND VIOLATIONS
-            "${rel}: gọi singleton ::instance() — plugin phải resolve service qua ServiceRegistry")
+            "${rel}: gọi singleton ::instance()/::bootstrap() — plugin phải resolve service qua ServiceRegistry")
     endif()
 endforeach()
 

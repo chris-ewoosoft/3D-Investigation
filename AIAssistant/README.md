@@ -195,6 +195,7 @@ AIAssistant/
 │     ├─ server.py                    # Entry point: compose() lười (ADR 0020/0022), main(), uvicorn
 │     ├─ server_manager.py            # Supervisor mà Qt khởi chạy (in `[SUCCESS]`, tail log)
 │     ├─ app_factory.py               # Biên FastAPI: middleware, lifespan, trace header
+│     ├─ modules.py                   # LlmModule/RagModule/RuntimeModules — instance state, root tiêm
 │     ├─ container.py                 # PlatformContainer + build_container (DI container)
 │     └─ runtime.py                   # PlatformToolGateway — adapter thực thi do root tiêm
 │
@@ -278,7 +279,10 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   ai import. `compose()` chạy đúng một lần theo thứ tự phụ thuộc; import module
   này **chỉ định nghĩa nó** (không mở file log, không đọc config, không import
   framework — FastAPI/LangGraph/llama.cpp/MCP tải bên trong `compose()`, ADR 0020
-  và ADR 0022).
+  và ADR 0022). Các handle runtime (`LlmModule`, `RagModule`, `ChatbotAgentHolder`
+  trong `bootstrap/modules.py`) là **instance state** do `compose()` dựng một lần
+  và tiêm vào router/service — không còn class-level hay module-global mutable
+  state.
 * **`internal/`** chứa wrapper framework: `LangGraphEngine` là nơi duy nhất
   chạm LangGraph, và nó nhận `AgentState` như một đối số constructor nên không
   tạo thành vòng lặp import với `orchestration`.

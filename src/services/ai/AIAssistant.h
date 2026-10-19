@@ -23,7 +23,9 @@ class APP_EXPORT AIAssistant : public IAIAssistantService {
     Q_OBJECT
 public:
     explicit AIAssistant(ILanguageService* lang, IUserManager* users,
-                         IAppPaths* paths, QObject *parent = nullptr);
+                         IAppPaths* paths, QString pythonInterpreter,
+                         int serverPort, QObject *parent = nullptr,
+                         QNetworkAccessManager* networkManager = nullptr);
     ~AIAssistant();
 
     void startServer(int modelIndex) override;
@@ -64,6 +66,12 @@ public:
 
 // Signals are declared in IAIAssistantService
 
+protected:
+    /// Transition to "backend ready" and drain queued work. Called by the
+    /// QProcess stdout/stderr handlers; protected so the request state machine
+    /// can be driven deterministically in tests without a real server process.
+    void markServerReady();
+
 private slots:
     void onProcessReadyRead();
     void onProcessError();
@@ -74,6 +82,8 @@ private:
     ILanguageService* m_lang = nullptr;  ///< injected, never null in practice
     IUserManager* m_users = nullptr;     ///< injected, never null in practice
     IAppPaths* m_paths = nullptr;        ///< injected by AppShell (composition root)
+    QString m_pythonInterpreter;         ///< injected by AppShell (config, default "python")
+    int m_serverPort = 8080;             ///< injected by AppShell (config, default 8080)
     struct QueuedCompletionRequest {
         QString sessionId;
         QJsonObject payload;
@@ -85,6 +95,7 @@ private:
     };
 
     QProcess *aiServerProcess;
+    /// Injected transport (test seam) or owned by this object when null.
     QNetworkAccessManager *networkManager;
     ChatSessionManager m_sessions; ///< session collection + current pointer
     QMap<QNetworkReply*, QueuedCompletionRequest> m_pendingRequests;

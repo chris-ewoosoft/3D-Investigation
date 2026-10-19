@@ -24,12 +24,11 @@ from collections.abc import Sequence
 
 from .checks import Check, PreflightReport, module_available
 from .config import (
-    ALL_MODEL_KEYS,
     BASE_DIR,
     MAX_EPOCHS,
     MAX_IMGSZ,
     MAX_WORKERS,
-    MODEL_SPECS,
+    MODEL_REGISTRY,
     TrainConfig,
 )
 from .dataset import check_data_yaml
@@ -114,14 +113,15 @@ def check_hyperparameters(cfg: TrainConfig) -> list[Check]:
     operator used, so a ``FAIL`` line says what to change.
     """
 
-    unknown = [key for key in cfg.models if key not in ALL_MODEL_KEYS]
+    available = ", ".join(MODEL_REGISTRY.keys())
+    unknown = [key for key in cfg.models if key not in MODEL_REGISTRY]
     checks = [
         Check(
             "param.models",
             bool(cfg.models) and not unknown,
-            f"{', '.join(cfg.models) or 'none'} (at least one of {', '.join(ALL_MODEL_KEYS)} must be selected)"
+            f"{', '.join(cfg.models) or 'none'} (at least one of {available} must be selected)"
             if not unknown
-            else f"unknown model(s): {', '.join(unknown)} (choose from {', '.join(ALL_MODEL_KEYS)})",
+            else f"unknown model(s): {', '.join(unknown)} (choose from {available})",
         ),
         Check(
             "param.epochs",
@@ -208,11 +208,11 @@ def check_metric_thresholds(min_metrics: tuple[tuple[str, float], ...]) -> list[
 def check_weights(cfg: TrainConfig) -> list[Check]:
     checks: list[Check] = []
     for key in cfg.models:
-        spec = MODEL_SPECS.get(key)
-        if spec is None:
+        if key not in MODEL_REGISTRY:
             # Unknown keys are reported by ``param.models``; skipping here keeps
             # the report complete instead of raising ``KeyError`` mid-preflight.
             continue
+        spec = MODEL_REGISTRY[key]
         weights = cfg.weights_path(spec)
         present = weights.exists()
         detail = "present" if present else f"{spec.ckpt} missing — ultralytics will download it (needs network)"

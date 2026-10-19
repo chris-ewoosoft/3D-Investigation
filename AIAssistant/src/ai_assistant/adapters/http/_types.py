@@ -1,11 +1,11 @@
 """Structural types for the dependencies injected into the HTTP routers.
 
-The routers accept live legacy module handles (``llm_module``, ``rag_module``),
-the application ``platform`` object and a logger. Typing them as ``object`` or
-``types.ModuleType`` would disable static analysis for the adapter layer;
-these protocols describe exactly the surface each router touches, so the
-adapters depend on interfaces and stay honest about what they reach into on
-the legacy singletons (ADR 0001).
+The routers accept live module handles (the injected ``LlmModule`` and
+``RagModule`` instances), the application ``platform`` object and a logger.
+Typing them as ``object`` or ``types.ModuleType`` would disable static
+analysis for the adapter layer; these protocols describe exactly the surface
+each router touches, so the adapters depend on interfaces and stay honest
+about what they reach into on the runtime handles (ADR 0001).
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class LoggerLike(Protocol):
 
 
 class LLMModuleLike(Protocol):
-    """The live llm_module handle (legacy singleton or an equivalent fake)."""
+    """The injected LLM runtime handle (a live instance or an equivalent fake)."""
 
     llm: Any
     llm_lock: Any
@@ -36,7 +36,7 @@ class LLMModuleLike(Protocol):
 
 
 class RAGModuleLike(Protocol):
-    """The live rag_module handle (legacy singleton or an equivalent fake)."""
+    """The injected RAG runtime handle (a live instance or an equivalent fake)."""
 
     knowledge_chunks: list[Any]
     knowledge_index: Any

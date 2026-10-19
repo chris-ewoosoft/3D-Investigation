@@ -1,5 +1,6 @@
 #include "ReconstructionRibbonUI.h"
 
+#include "AppConstants.h"
 #include "IAppContext.h"
 #include "IShellService.h"
 
@@ -11,7 +12,7 @@ ReconstructionRibbonUI::ReconstructionRibbonUI(IAppContext* ctx, QObject* parent
 }
 
 void ReconstructionRibbonUI::setupUI() {
-    if (QWidget* panel = ctx()->shell()->getTabPanel("tab.reconstruction")) {
+    if (QWidget* panel = ctx()->shell()->getTabPanel(AppConstants::TabIds::Reconstruction)) {
         if (beginPanel(panel, "reconDataGroup")) {
             // Labels are filled by updateTranslations() so they follow the
             // active language immediately after construction.

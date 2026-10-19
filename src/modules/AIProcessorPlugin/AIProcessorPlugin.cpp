@@ -178,7 +178,7 @@ void AIProcessorPlugin::setupMenus() {
 }
 
 void AIProcessorPlugin::setupRibbonUI() {
-  if (QWidget* panel = m_ctx->shell()->getTabPanel("tab.ai")) {
+  if (QWidget* panel = m_ctx->shell()->getTabPanel(AppConstants::TabIds::AiProcessor)) {
       m_ribbonUI = new AIProcessorRibbonUI(m_ctx, panel, this);
       connect(m_ribbonUI->btnDet(), &QToolButton::clicked, this, &AIProcessorPlugin::onObjectDetection);
       connect(m_ribbonUI->btnSeg(), &QToolButton::clicked, this, &AIProcessorPlugin::onSegmentation);
@@ -417,6 +417,8 @@ void AIProcessorPlugin::onViewCharts() {
 }
 
 void AIProcessorPlugin::onImageChanged(int index, int total) {
+    Q_UNUSED(index);
+    Q_UNUSED(total);
     AIMode mode = m_ctx->viewer()->getCurrentAIMode();
     if (mode == AIMode::Detection) {
         onObjectDetection();

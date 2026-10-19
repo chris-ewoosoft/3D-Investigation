@@ -214,6 +214,13 @@ target_include_directories(TestChatSessionManager PRIVATE ../src/services/ai)
 target_link_libraries(TestChatSessionManager PRIVATE Qt6::Test Qt6::Core AppCore)
 add_test(NAME TestChatSessionManager COMMAND TestChatSessionManager)
 
+# Test AIAssistant — request state machine + injected transport (no sockets,
+# no Python child process; the ready transition is driven via the protected seam).
+qt_add_executable(TestAIAssistant TestAIAssistant.cpp)
+target_include_directories(TestAIAssistant PRIVATE ../src/services/ai)
+target_link_libraries(TestAIAssistant PRIVATE Qt6::Test Qt6::Core Qt6::Network AppCore)
+add_test(NAME TestAIAssistant COMMAND TestAIAssistant)
+
 # Test AI Yolo PostProcessor
 qt_add_executable(TestAIYoloPostProcessor
     TestAIYoloPostProcessor.cpp

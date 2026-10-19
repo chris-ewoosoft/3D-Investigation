@@ -1,6 +1,5 @@
 #include "ShellService.h"
 #include "SignalBus.h"
-#include "ILanguageService.h"
 
 #include <QMenu>
 #include <QMainWindow>
@@ -8,9 +7,8 @@
 
 #include <utility>
 
-ShellService::ShellService(SignalBus* bus, ILanguageService* language)
+ShellService::ShellService(SignalBus* bus)
     : m_bus(bus)
-    , m_language(language)
 {
 }
 
@@ -51,14 +49,6 @@ QWidget* ShellService::getTabPanel(const QString& tabName)
     const auto it = m_tabPanels.constFind(tabName);
     if (it != m_tabPanels.constEnd() && it.value())
         return it.value();
-
-    // Fallback: tìm theo nhãn đã dịch (plugin có thể tra bằng label hiển thị).
-    if (m_language) {
-        for (auto i = m_tabPanels.cbegin(); i != m_tabPanels.cend(); ++i) {
-            if (i.value() && m_language->translate(i.key()) == tabName)
-                return i.value();
-        }
-    }
     return nullptr;
 }
 

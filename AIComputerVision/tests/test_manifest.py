@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from cvtrain import manifest as manifest_mod
-from cvtrain.config import MANIFEST_NAME, MODEL_SPECS
+from cvtrain.config import MANIFEST_NAME, MODEL_REGISTRY
 from cvtrain.errors import ManifestIntegrityError
 from cvtrain.fsio import sha256_file
 
@@ -120,41 +120,50 @@ class ManifestRoundTripTests(unittest.TestCase):
     def test_build_from_scan_records_only_present_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
-            (models_dir / MODEL_SPECS["det"].output).write_bytes(b"det")
+            (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"det")
             manifest = manifest_mod.build_from_scan(models_dir)
-            self.assertIn(MODEL_SPECS["det"].output, manifest["entries"])
-            self.assertNotIn(MODEL_SPECS["seg"].output, manifest["entries"])
-            entry = manifest["entries"][MODEL_SPECS["det"].output]
+            self.assertIn(MODEL_REGISTRY["det"].output, manifest["entries"])
+            self.assertNotIn(MODEL_REGISTRY["seg"].output, manifest["entries"])
+            entry = manifest["entries"][MODEL_REGISTRY["det"].output]
             self.assertEqual(entry["role"], "detection")
             self.assertEqual(entry["size_bytes"], 3)
+
+    def test_build_from_scan_records_the_tracker_for_a_tracking_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            (models_dir / MODEL_REGISTRY["track"].output).write_bytes(b"track")
+            manifest = manifest_mod.build_from_scan(models_dir)
+            entry = manifest["entries"][MODEL_REGISTRY["track"].output]
+            self.assertEqual(entry["tracker"]["algorithm"], "iou")
+            self.assertEqual(entry["tracker"]["scope"], "qt-runtime")
 
     def test_build_from_scan_keeps_metadata_when_file_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
-            target = models_dir / MODEL_SPECS["det"].output
+            target = models_dir / MODEL_REGISTRY["det"].output
             target.write_bytes(b"det")
             manifest = manifest_mod.build_from_scan(models_dir)
-            manifest["entries"][MODEL_SPECS["det"].output]["trained_at"] = "2026-01-01T00:00:00+00:00"
+            manifest["entries"][MODEL_REGISTRY["det"].output]["trained_at"] = "2026-01-01T00:00:00+00:00"
             manifest_mod.save_manifest(models_dir, manifest)
 
             refreshed = manifest_mod.build_from_scan(models_dir)
-            entry = refreshed["entries"][MODEL_SPECS["det"].output]
+            entry = refreshed["entries"][MODEL_REGISTRY["det"].output]
             self.assertEqual(entry["trained_at"], "2026-01-01T00:00:00+00:00")
 
     def test_build_from_scan_drops_stale_provenance_after_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
-            target = models_dir / MODEL_SPECS["det"].output
+            target = models_dir / MODEL_REGISTRY["det"].output
             target.write_bytes(b"original")
             manifest = manifest_mod.build_from_scan(models_dir)
-            entry = manifest["entries"][MODEL_SPECS["det"].output]
+            entry = manifest["entries"][MODEL_REGISTRY["det"].output]
             entry["trained_at"] = "2026-01-01T00:00:00+00:00"
             entry["metrics"] = {"metrics/mAP50(B)": 0.9}
             manifest_mod.save_manifest(models_dir, manifest)
 
             target.write_bytes(b"replaced")
             refreshed = manifest_mod.build_from_scan(models_dir)
-            entry = refreshed["entries"][MODEL_SPECS["det"].output]
+            entry = refreshed["entries"][MODEL_REGISTRY["det"].output]
             self.assertIsNone(entry["trained_at"])
             self.assertNotIn("metrics", entry)
             self.assertEqual(entry["sha256"], sha256_file(target))
@@ -164,19 +173,19 @@ class ManifestRoundTripTests(unittest.TestCase):
         # must still drop provenance and re-derive identity from the spec.
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
-            target = models_dir / MODEL_SPECS["det"].output
+            target = models_dir / MODEL_REGISTRY["det"].output
             target.write_bytes(b"original")
             manifest = manifest_mod.build_from_scan(models_dir)
-            entry = manifest["entries"][MODEL_SPECS["det"].output]
+            entry = manifest["entries"][MODEL_REGISTRY["det"].output]
             entry.pop("role", None)
             entry.pop("source_weights", None)
             manifest_mod.save_manifest(models_dir, manifest)
 
             target.write_bytes(b"replaced")
             refreshed = manifest_mod.build_from_scan(models_dir)
-            entry = refreshed["entries"][MODEL_SPECS["det"].output]
-            self.assertEqual(entry["role"], MODEL_SPECS["det"].role)
-            self.assertEqual(entry["source_weights"], MODEL_SPECS["det"].ckpt)
+            entry = refreshed["entries"][MODEL_REGISTRY["det"].output]
+            self.assertEqual(entry["role"], MODEL_REGISTRY["det"].role)
+            self.assertEqual(entry["source_weights"], MODEL_REGISTRY["det"].ckpt)
             self.assertIsNone(entry["trained_at"])
 
 
@@ -275,14 +284,14 @@ class SchemaMigrationTests(unittest.TestCase):
     def test_a_disk_scan_does_not_down_stamp_a_newer_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
-            (models_dir / MODEL_SPECS["det"].output).write_bytes(b"det")
+            (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"det")
             (models_dir / MANIFEST_NAME).write_text('{"schema_version": 99, "entries": {}}', encoding="utf-8")
 
             with self.assertLogs("cvtrain.manifest", level="WARNING"):
                 manifest = manifest_mod.build_from_scan(models_dir)
 
             self.assertEqual(manifest["schema_version"], 99)
-            self.assertIn(MODEL_SPECS["det"].output, manifest["entries"])
+            self.assertIn(MODEL_REGISTRY["det"].output, manifest["entries"])
 
 
 class ManifestQuarantineTests(unittest.TestCase):

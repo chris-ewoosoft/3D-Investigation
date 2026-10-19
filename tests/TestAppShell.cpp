@@ -79,7 +79,7 @@ void TestAppShell::initTestCase()
     QDir().mkpath(sandbox);
     QT_WARNING_PUSH
     QT_WARNING_DISABLE_DEPRECATED
-    AppConfig::instance().initialize(sandbox);
+    AppConfig::bootstrap().initialize(sandbox);
     QT_WARNING_POP
 
     m_missingKey = QStringLiteral("test.key.that.does.not.exist");

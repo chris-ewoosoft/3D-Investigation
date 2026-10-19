@@ -8,7 +8,7 @@ after the build step. The reference run recorded here is
 | # | Gate | Command | What it proves |
 |---|------|---------|----------------|
 | 1 | Architecture boundaries | `cmake -DSOURCE_DIR=<repo> -P tests/CheckArchitectureBoundaries.cmake` | Layering invariants (heavy/light PCH split, plugin includes, blocking-I/O waits, singleton confinement …). Runs in CTest as `TestArchitectureBoundaries`. |
-| 2 | Unit + integration suite | `ctest --test-dir build -C Release --output-on-failure` | 24 tests: kernel units, plugin host/resolver with an injected loader, real-plugin smoke, `TestAppShell` composition-root wiring, plus `TestReconstructionFinalize` (labelled `slow`). |
+| 2 | Unit + integration suite | `ctest --test-dir build -C Release --output-on-failure` | 25 tests: kernel units, plugin host/resolver with an injected loader, real-plugin smoke, `TestAppShell` composition-root wiring, `TestAIAssistant` request state machine (injected transport), plus `TestReconstructionFinalize` (labelled `slow`). |
 | 3 | Coverage gate | `python tests/coverage_gate.py` | Measured line coverage of the kernel/guard/composition files, with per-file floors; runs OpenCppCoverage over the owning tests. |
 | 4 | Mutation check | `python tests/mutation_check.py` | Every load-bearing guard decision is *pinned*: one inverted decision per mutant, rebuilt and re-run; the owning test must fail. |
 
@@ -30,17 +30,17 @@ executes it) and enforces the ratchet in `FLOORS`. Measured reference:
 
 | file | measured | floor |
 |------|----------|-------|
-| `src/app/appshell.cpp` | 100 % (60/60) | 100 |
+| `src/app/appshell.cpp` | 100 % (61/61) | 100 |
 | `src/services/ai/chatsessionmanager.cpp` | 100 % (56/56) | 100 |
-| `src/services/ai/chatsessionstore.cpp` | 100 % (44/44) | 100 |
+| `src/services/ai/chatsessionstore.cpp` | 100 % (46/46) | 100 |
 | `src/services/settings/settingsservice.cpp` | 100 % (18/18) | 100 |
-| `src/services/shell/shellservice.cpp` | 96.3 % (52/54) | 95 |
-| `src/core/plugindependencyresolver.cpp` | 93.3 % (84/90) | 92 |
+| `src/services/shell/shellservice.cpp` | 96.1 % (49/51) | 96 |
+| `src/core/plugindependencyresolver.cpp` | 93.3 % (84/90) | 93 |
 | `src/core/secretvault.cpp` | 92.9 % (26/28) | 92 |
-| `src/core/pluginhost.cpp` | 91.8 % (90/98) | 90 |
-| `src/core/languagemanager.cpp` | 91.8 % (56/61) | 90 |
+| `src/core/pluginhost.cpp` | 91.8 % (90/98) | 91 |
+| `src/core/languagemanager.cpp` | 96.5 % (55/57) | 96 |
 | `src/core/usermanager.cpp` | 57.5 % (253/440) | 57 |
-| `src/core/appconfig.cpp` | 37.1 % (26/70) | 36 |
+| `src/core/appconfig.cpp` | 43.9 % (36/82) | 43 |
 
 Rules for the table:
 

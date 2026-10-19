@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from typing import Any
 
 from .checks import Check, module_available
 
 __all__ = [
     "check_data_yaml",
     "dataset_base",
+    "dataset_class_count",
     "dataset_content_fingerprint",
     "missing_dataset_paths",
     "ref_exists",
@@ -127,12 +129,75 @@ def check_data_yaml(path: Path) -> Check:
     return Check("dataset", True, f"{path} ({len(parsed.get('names') or [])} classes)")
 
 
+def dataset_class_count(path: Path) -> int | None:
+    """Number of classes declared by ``names`` in ``data.yaml``, or ``None``.
+
+    The ONNX contract needs the class count to prove that an export exposes the
+    channels the Qt parser expects (``4 + classes`` for detection,
+    ``4 + classes + 32`` for segmentation). This deliberately re-reads the YAML
+    instead of threading a count through every layer: it is the same document
+    the framework trains from, so there is no second source of truth to drift.
+    ``None`` means "cannot prove" — the caller relaxes only the exact channel
+    check and keeps validating rank/count/dtype.
+    """
+
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not module_available("yaml"):
+        return None
+
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    names = parsed.get("names")
+    if isinstance(names, dict):
+        return len(names)
+    if isinstance(names, (list, tuple)):
+        return len(names)
+    return None
+
+
+def _digest_file(digest: Any, label: str, path: Path, *, relative_name: str | None = None) -> None:
+    """Feed one file's identity and bytes into ``digest``.
+
+    The relative name is part of the hash (moving an image between splits is a
+    different dataset), and unreadable files contribute a stable marker instead
+    of aborting the fingerprint: ``--skip-unchanged`` reads the filesystem
+    opportunistically, and a transient sharing violation must not crash a run.
+    """
+
+    name = path.name if relative_name is None else relative_name
+    digest.update(f"{label}:{name}:".encode("utf-8"))
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        digest.update(b"<unreadable>")
+    digest.update(b"\n")
+
+
 def dataset_content_fingerprint(path: Path) -> str | None:
-    """Compute a fast inventory fingerprint (relative paths and sizes) of dataset files.
+    """Compute a content fingerprint of the files a dataset YAML references.
 
     Returns ``None`` when the YAML file is absent or unreadable. Combines the
-    raw hash of ``data.yaml`` with the sorted ``(relative_path, size)`` pairs
-    of every file present in the referenced ``train``/``val`` splits.
+    raw hash of ``data.yaml`` with the relative path and contents of every file
+    in the referenced ``train``/``val`` splits. Hashing the bytes — not just
+    ``(name, size)`` — is what detects an image replaced by different pixels
+    under the same name and the same file size.
+
+    The cost is O(dataset bytes) per check. That is deliberate: the fingerprint
+    exists so ``--skip-unchanged`` can prove the data, and an inventory that a
+    single same-size edit can fool is not proof.
     """
 
     if not path.exists():
@@ -165,20 +230,14 @@ def dataset_content_fingerprint(path: Path) -> str | None:
             continue
         target = Path(value) if Path(value).is_absolute() else base / value
         if target.is_dir():
-            entries: list[tuple[str, int]] = []
-            for child in target.rglob("*"):
-                if child.is_file():
-                    try:
-                        entries.append((child.relative_to(target).as_posix(), child.stat().st_size))
-                    except OSError:
-                        pass
-            for rel_path, size in sorted(entries):
-                digest.update(f"{key}:{rel_path}:{size}\n".encode("utf-8"))
+            def _relative(child: Path) -> str:
+                return child.relative_to(target).as_posix()
+
+            files = sorted((child for child in target.rglob("*") if child.is_file()), key=_relative)
+            for child in files:
+                _digest_file(digest, key, child, relative_name=_relative(child))
         elif target.is_file():
-            try:
-                digest.update(f"{key}:{target.name}:{target.stat().st_size}\n".encode("utf-8"))
-            except OSError:
-                pass
+            _digest_file(digest, key, target)
 
     return digest.hexdigest()
 

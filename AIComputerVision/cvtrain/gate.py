@@ -88,10 +88,10 @@ def dataset_digest(cfg: TrainConfig) -> str | None:
     unchanged file name is a different experiment. ``None`` (the file is gone)
     is again "cannot prove", and :func:`already_current` retracts the skip.
 
-    Deliberately the *definition*, not the images: hashing a dataset is
-    O(dataset) and would make every re-run pay for gigabytes the operator did
-    not touch. Re-shuffled images under an unchanged ``data.yaml`` are a
-    documented blind spot of ``--skip-unchanged`` (see README, "Manifest").
+    Deliberately the *definition*, not the images: this stays O(1) so a
+    re-run can cheaply prove the YAML it used. The bytes live in
+    :func:`dataset_content_digest`, which :func:`already_current` also
+    compares whenever the recorded entry carries that digest.
     """
 
     path = cfg.data_yaml
@@ -99,11 +99,13 @@ def dataset_digest(cfg: TrainConfig) -> str | None:
 
 
 def dataset_content_digest(cfg: TrainConfig) -> str | None:
-    """Digest of the dataset inventory (files and sizes), if data.yaml exists.
+    """Digest of the dataset contents (paths and file bytes), if data.yaml exists.
 
-    Complements :func:`dataset_digest` by inventorying the actual files
-    under ``train``/``val``, closing the blind spot where images are added or
-    replaced under an unchanged ``data.yaml``.
+    Complements :func:`dataset_digest` by hashing the actual files under
+    ``train``/``val``. Because the bytes are hashed — not just names and
+    sizes — an image replaced with different pixels under the same name and
+    size is still a different dataset, which is exactly what
+    ``--skip-unchanged`` must not miss.
     """
 
     return dataset_content_fingerprint(cfg.data_yaml)

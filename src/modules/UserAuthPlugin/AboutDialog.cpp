@@ -64,7 +64,7 @@ void AboutDialog::setupUi() {
     };
 
     addRow(UserAuthPlugin::translate("admin.col_username"), u.username);
-    addRow("Email", u.email);
+    addRow(UserAuthPlugin::translate("admin.col_email"), u.email);
     addRow(UserAuthPlugin::translate("admin.col_role"), u.role == UserRole::Admin ? "🛡 Admin" : UserAuthPlugin::translate("admin.role_user"));
 
     QString statusIcon, statusColor;

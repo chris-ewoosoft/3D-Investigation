@@ -27,6 +27,7 @@ AIComputerVision/
 │  ├─ backend.py          # Protocol TrainingBackend + adapter UltralyticsBackend (lazy import)
 │  ├─ trainer.py          # Điều phối: preflight → train → gate → export → publish → verify
 │  ├─ manifest.py         # Schema manifest (TypedDict), đọc/ghi/xác minh, migration + cách ly file hỏng
+│  ├─ onnx_contract.py    # Hợp đồng tensor ONNX sau export (rank/dtype/output/opset + smoke inference ORT)
 │  ├─ progress.py         # Giao thức [PROGRESS] mà dock Qt parse để dựng progress bar
 │  └─ logging_setup.py    # Định dạng log ra stdout
 ├─ Models/                # *.onnx xuất bản (Git LFS) + manifest.json + advisory lock
@@ -51,13 +52,14 @@ AIComputerVision/
 | `config.py` | Model contract (map `--det`/`--seg`/`--track` → file `.pt`/`.onnx`) và cách phân giải đường dẫn: `models_dir`, `runs_dir`, `weights_path`. Preflight, trainer và digest provenance đều resolve checkpoint qua `TrainConfig.weights_path` nên ba nơi này không thể lệch nhau. |
 | `checks.py` | Từ vựng kiểm tra dùng chung: `Check` (tên + ok + thông điệp) và `PreflightReport`. Không module nào phải tự nghĩ lại cách báo lỗi. |
 | `dataset.py` | Đọc `data.yaml` bằng PyYAML (lazy), kiểm tra khóa `train`/`val`/`names`, resolve đường dẫn tương đối/tuyệt đối/glob theo đúng ngữ nghĩa của Ultralytics (kể cả khoá `path:` cấp trên). |
-| `errors.py` | `ExitCode` (`0/1/2/3/130`) khai báo **một lần** và phân cấp `CvTrainError` (`StorageError`, `ManifestIntegrityError`, `QualityGateError`, `ConcurrentRunError`…). Lỗi dự kiến được log thành một dòng actionable; lỗi còn lại giữ trọn traceback. |
+| `errors.py` | `ExitCode` (`0/1/2/3/4/130`) khai báo **một lần** và phân cấp `CvTrainError` (`StorageError`, `ManifestIntegrityError`, `QualityGateError`, `ExportContractError`, `ConcurrentRunError`…). Lỗi dự kiến được log thành một dòng actionable; lỗi còn lại giữ trọn traceback. |
 | `fsio.py` | Primitive hệ thống tệp dùng chung: `sha256_file`, ghi nguyên tử (staging + `os.replace` + fsync thư mục), sao chép có backup `.bak`, và **advisory lock** `Models/.cvtrain.lock` (pid+token, chống steal, quá hạn sau 24 h, heartbeat mỗi epoch qua `touch_lock`). |
 | `preflight.py` | Kiểm tra fail-fast: môi trường (`env.*`) và siêu tham số (`param.*`) — `epochs`, `imgsz`, `batch`, `workers`, `opset` (cửa sổ `MIN_OPSET=11..MAX_OPSET=21`), `device`, từng ngưỡng `--min-metric`. Nhận danh sách dependency từ backend thay vì hard-code framework. |
 | `gate.py` | Chính sách (không phải luồng điều khiển): `already_current` trả lời "ONNX đã publish có đúng những gì lần gọi này sẽ build không?" (quy tắc `--skip-unchanged`); `enforce_quality_gate` trả lời "artifact có đủ tốt để giữ không?" (mục Quality gate). |
 | `backend.py` | Protocol `TrainingBackend` (`prepare`/`train`/`export` + `required_modules`) và adapter `UltralyticsBackend` — nơi duy nhất được import `ultralytics`, và chỉ khi huấn luyện thực sự chạy. |
-| `trainer.py` | Điều phối “điều gì xảy ra”: preflight → huấn luyện từng model → quality gate → export ONNX → publish nguyên tử (kèm backup) → ghi manifest → xác minh lại. Không bao giờ import `ultralytics`. |
+| `trainer.py` | Điều phối “điều gì xảy ra”: preflight → huấn luyện từng model → quality gate → export ONNX → **kiểm tra hợp đồng tensor** → publish nguyên tử (kèm backup) → ghi manifest → xác minh lại. Không bao giờ import `ultralytics`. |
 | `manifest.py` | Schema manifest dạng `TypedDict`, đọc/ghi (`schema_version` + migration `_MIGRATIONS`), xác minh hai chiều, và cách ly manifest không parse được thành `manifest.json.corrupt-<timestamp>`. |
+| `onnx_contract.py` | Hợp đồng tensor mà `AIProcessor.cpp` giả định: một input NCHW float32, output detection rank-3, hai output segmentation (một rank-4 proto), opset ≤ runtime được pin, và một smoke inference bằng chính ONNX Runtime trước khi publish. |
 | `progress.py` | Giao thức stdout `[PROGRESS] pct=… stage=… key=…` — một *hợp đồng dây* với chương trình khác (dock Qt), tách khỏi `logging_setup.py` vì không phải “sở thích log”. Có guard thế tiến: marker có giá trị lùi sẽ bị giữ lại kèm warning. |
 | `logging_setup.py` | Định dạng log stdout thống nhất (một dòng, có timestamp/level) cho toàn bộ pipeline. |
 
@@ -69,7 +71,7 @@ AIComputerVision/
 | `Models/` | Sản phẩm: `yolo11n.onnx`, `yolo11n-seg.onnx`, `yolo11x-tracking.onnx` (Git LFS), `manifest.json` (provenance), `Models/.cvtrain.lock` (advisory lock, git-ignored) và `Models/*.onnx.bak` (một thế hệ khôi phục, git-ignored). |
 | `runs/` | Log huấn luyện mà Ultralytics ghi ra (git-ignored). `--runs-dir` di chuyển nó. |
 | `Docs/adr/` | 6 ADR: 0001 đồ thị phụ thuộc một chiều + composition root; 0002 protocol `TrainingBackend`; 0003 manifest provenance + `--skip-unchanged` fail-closed; 0004 advisory lock, publish nguyên tử, quality gate; 0005 lỗi lưu trữ có kiểu, sở hữu lock, tiến trình đơn điệu; 0006 dependency có điều kiện, input fail-closed, heartbeat lock. |
-| `requirements.txt` | Dependency runtime đã pin: `ultralytics==8.4.41`, `PyYAML==6.0.2`, `onnx==1.21.0`, `onnxslim==0.1.91`, `tensorboard==2.15.2` (chỉ cần khi `--tensorboard`). `torch` cố ý *không* pin để bạn chọn bản khớp CUDA/CPU. |
+| `requirements.txt` | Dependency runtime đã pin: `ultralytics==8.4.41`, `PyYAML==6.0.2`, `onnx==1.21.0`, `onnxslim==0.1.91`, `onnxruntime>=1.20.1` (khớp `ONNXRUNTIME_VERSION` trong `CMakeLists.txt`), `tensorboard==2.15.2` (chỉ cần khi `--tensorboard`). `torch` dùng khoảng `>=2.7,<3`: bản CPU/CUDA chia sẻ cùng số version và được chọn bằng index cài đặt. |
 | `pyproject.toml` | Cấu hình ruff (`E/W/F/I/BLE/S/RUF`), mypy (strict, `files = ["cvtrain", "tests", "TrainModel.py"]`) và coverage (branch, `fail_under = 100`). Không phải package cài đặt được. |
 
 ### Giải thích từng file test trong `tests/`
@@ -80,10 +82,11 @@ AIComputerVision/
 | `test_backend.py` | Adapter `UltralyticsBackend` thật, chạy trên package `ultralytics` giả: resolve checkpoint, gắn callback, đối số export, nhánh thiếu dependency. |
 | `test_cli.py` | wiring argparse, ánh xạ đối số → `TrainConfig` và mã thoát — `main()` là nơi duy nhất biến thất bại thành mã process. |
 | `test_config.py` | Model contract (map spec, tên export không trùng), cách resolve lựa chọn, mặc định `TrainConfig`, override đường dẫn `--models-dir`/`--weights-dir`. |
-| `test_contract.py` | Ràng buộc hai chiều với `src/core/AppConstants.h` (tên file ONNX) và `MAX_OPSET` với ONNX Runtime được pin trong `CMakeLists.txt`. |
-| `test_dataset.py` | Kiểm tra `data.yaml`: khóa bắt buộc, di chuyển bằng `path:`, tham chiếu tuyệt đối/tương đối/glob và các dạng không phải chuỗi mà framework tự resolve. |
+| `test_contract.py` | Ràng buộc hai chiều với `src/core/AIConstants.h` (tên file ONNX), `MAX_OPSET` với ONNX Runtime được pin trong `CMakeLists.txt`, các hằng schema ONNX với `AIYoloPostProcessor.h`, và ngưỡng IoU của tracker với `AIProcessor.cpp`. |
+| `test_dataset.py` | Kiểm tra `data.yaml`: khóa bắt buộc, di chuyển bằng `path:`, tham chiếu tuyệt đối/tương đối/glob, số class cho hợp đồng ONNX, và fingerprint nội dung (đổi byte cùng kích thước phải đổi digest). |
 | `test_fsio.py` | Primitive hệ thống tệp: digest, ghi nguyên tử, sao chép có backup, và toàn bộ quy tắc sở hữu của advisory lock (từ chối lock đang sống, đánh cắp lock cũ, không mở lock của chủ khác). |
 | `test_manifest.py` | Tính toàn vẹn và provenance của manifest: digest, migration `schema_version`, cách ly manifest hỏng, xác minh hai chiều. |
+| `test_onnx_contract.py` | Hợp đồng ONNX sau export: input/output rank–dtype–channel theo role, opset, file hỏng, smoke inference thật và mọi nhánh từ chối của validator. |
 | `test_preflight.py` | Kiểm tra môi trường và siêu tham số — các check `env.*` và `param.*` mà một lần chạy có thể fail. |
 | `test_progress.py` | Giao thức `[PROGRESS]`: các dải %, thứ tự stage, guard đơn điệu, marker kết thúc `done`/`error`, slot của model bị skip. |
 | `test_qt_contract.py` | argv, nhãn checkbox và regex `pct=` mà `AITrainDockWidget.cpp` dùng có khớp với thứ CLI chấp nhận và phát ra hay không. |
@@ -96,7 +99,8 @@ Phụ thuộc trỏ về một chiều, từ tầng điều phối xuống tần
 ```text
 TrainModel.py → cli ──► trainer ──┬─► preflight ─┬─► dataset
    (composition root,              ├─► manifest   └─► checks
-    tiêm backend vào)              ├─► gate ─┐
+    tiêm backend vào)              ├─► onnx_contract ─► preflight
+                                   ├─► gate ─┐
                                    └─► backend┤
                                               ├─► fsio ──► errors
                                               └─► config
@@ -243,7 +247,8 @@ Mã thoát được khai báo **một lần** trong `cvtrain/errors.py` (`ExitCo
 không bao giờ viết như số nguyên trần ở nơi khác: `0` thành công, `1` thất bại
 bất ngờ, `2` preflight/manifest thất bại (kể cả file mà pipeline phải hash,
 đo lường hoặc *ghi* — `StorageError`, "this storage is not ready"), `3` quality
-gate thất bại, `130` bị ngắt. Lỗi dự kiến (`CvTrainError`) được log thành một
+gate thất bại, `4` export không thoả hợp đồng tensor của Qt (`ExportContractError`),
+`130` bị ngắt. Lỗi dự kiến (`CvTrainError`) được log thành một
 dòng actionable duy nhất; mọi thứ khác giữ nguyên traceback đầy đủ. Dock Qt báo
 cái số đó nguyên văn và chỉ so nó với zero, nên thêm mã mới là một thay đổi tương
 thích.
@@ -273,10 +278,25 @@ nào cũng phải được phản chiếu sang bên kia; `tests/test_contract.py
 |----------|------------------|-----------------------|---------------|
 | `--det`  | `yolo11n.pt`     | `yolo11n.onnx`        | detection     |
 | `--seg`  | `yolo11n-seg.pt` | `yolo11n-seg.onnx`    | segmentation  |
-| `--track`| `yolo11x.pt`     | `yolo11x-tracking.onnx` | tracking    |
+| `--track`| `yolo11x.pt`     | `yolo11x-tracking.onnx` | tracking detector |
 
 Khi không truyền cờ lựa chọn nào, `--det` và `--seg` được huấn luyện (hành vi
 di sản). Trọng số gốc bị thiếu sẽ được Ultralytics tải về ở lần dùng đầu.
+
+Ngoài tên file, artifact còn phải khớp **hợp đồng tensor** mà
+`src/services/ai/AIProcessor.cpp` đọc: một input NCHW float32; detection và
+tracking có đúng một output rank-3 dạng `[1, 4+classes, N]`; segmentation có
+hai output (một rank-3 `[1, 4+classes+32, N]`, một proto rank-4 `[1, 32, h, w]`,
+thứ tự không quan trọng vì C++ nhận diện theo rank); opset không vượt runtime
+được pin. `cvtrain/onnx_contract.py` kiểm tra cấu trúc bằng `onnx.checker`, rồi
+chạy một smoke inference thật bằng ONNX Runtime với đúng kích thước input trước
+khi publish. Artifact không đạt bị chặn với exit `4`, và model đang chạy tốt
+trong `Models/` không bị thay thế.
+
+`--track` là **detector + tracker phía Qt**: file ONNX chỉ chứa trọng số phát
+hiện; việc gán ID theo IoU nằm trong `AIProcessor::runTracking`, và manifest ghi
+lại thuật toán/ngưỡng dưới khóa `tracker` để provenance không ám chỉ rằng graph
+tự tracking.
 
 ## Giao thức tiến trình (progress protocol)
 
@@ -305,9 +325,12 @@ lại mang tính thông tin.
 ## Manifest & provenance
 
 Mỗi model xuất bản được ghi vào `Models/manifest.json` kèm SHA-256, kích thước,
-đường dẫn dataset *và digest của `data.yaml`*, mọi siêu tham số, thiết bị tính
+đường dẫn dataset *và digest của `data.yaml`*, digest nội dung các file
+`train`/`val`, mọi siêu tham số, thiết bị tính
 toán, digest của checkpoint gốc mà nó thực sự được huấn luyện từ đó, phiên bản
-backend đã tạo ra nó, và (best-effort) các metric. Header của lần chạy
+backend đã tạo ra nó, và (best-effort) các metric. Mục `tracking` còn mang khối
+`tracker` (`algorithm`, `iou_threshold`, `scope`, `implementation`) vì phần
+association nằm ở Qt chứ không ở graph. Header của lần chạy
 (`last_run`) ghi lại lời gọi đã tạo ra nó — tham số, hạng device, phiên bản
 interpreter và ngưỡng cổng — và `updated_at` được làm mới trên mọi lần ghi
 provenance, nên header không bao giờ cũ hơn các mục bên dưới. `--verify-manifest`
@@ -359,10 +382,14 @@ nhận về (mà không ghi provenance) bị huấn luyện lại:
   sau cùng một tên file; “unspecified” và `auto` là cùng một thiết bị);
 * `data.yaml` vẫn cho cùng một digest — riêng đường dẫn không phải là provenance,
   vì đổi tên class hoặc chuyển split sau một cái tên không đổi là một thí điểm
-  khác. Digest bao trùm *định nghĩa*, không bao trùm ảnh: hash một dataset là
-  O(dataset) và sẽ bắt mọi lần chạy lại trả giá cho hàng GB mà người vận hành
-  không đụng tới. Ảnh bị xáo trộn dưới một `data.yaml` không đổi là điểm mù duy
-  nhất mà `--skip-unchanged` có, và điều đó là có chủ đích;
+  khác;
+* digest **nội dung** các file `train`/`val` vẫn khớp (đường dẫn tương đối +
+  byte của từng file). Đây là lý do fingerprint hash byte chứ không chỉ
+  `(tên, kích thước)`: thay một ảnh bằng pixel khác cùng độ dài vẫn là dataset
+  khác, và `--skip-unchanged` không được phép bỏ qua nó. Chi phí O(dataset) mỗi
+  lần kiểm tra là có chủ đích — đó là cái giá của một bằng chứng thật. Digest
+  được ghi bởi thuật toán inventory cũ sẽ không khớp một lần sau khi nâng cấp,
+  nên lần chạy đầu tiên huấn luyện lại thay vì tin nhầm (fail-closed);
 * checkpoint gốc trên đĩa vẫn cho digest đã ghi khi artifact được huấn luyện —
   `yolo11n.pt` bị thay hoặc tải lại là một điểm xuất phát khác, và nếu nó biến
   mất thì không thể xác minh gì cả.

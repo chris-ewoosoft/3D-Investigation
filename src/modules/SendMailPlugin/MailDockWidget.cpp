@@ -287,9 +287,9 @@ void MailDockWidget::sendCurrentMail()
             ModernMessageBox::warning(m_dock, m_ctx->translate("common.error"), result.second);
         }
     });
-    watcher->setFuture(QtConcurrent::run([this, msg]() {
+    watcher->setFuture(QtConcurrent::run([mail = m_mail, msg]() {
         QString error;
-        const bool ok = m_mail->sendMail(msg, error);
+        const bool ok = mail->sendMail(msg, error);
         return qMakePair(ok, error);
     }));
 }

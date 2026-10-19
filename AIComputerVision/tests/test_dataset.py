@@ -5,11 +5,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from cvtrain.dataset import (
     check_data_yaml,
     dataset_base,
+    dataset_class_count,
     dataset_content_fingerprint,
     missing_dataset_paths,
     ref_exists,
@@ -285,6 +287,51 @@ class DatasetPathTests(unittest.TestCase):
             )
 
 
+class DatasetClassCountTests(unittest.TestCase):
+    """The ONNX contract reads the class count from the same YAML the trainer uses."""
+
+    def test_missing_file_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(dataset_class_count(Path(tmp) / "absent.yaml"))
+
+    def test_unreadable_file_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "data.yaml"
+            path.mkdir()  # a directory where a file is expected
+            self.assertIsNone(dataset_class_count(path))
+
+    def test_pyyaml_missing_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "names:\n  0: part\n")
+            with mock.patch("cvtrain.dataset.module_available", return_value=False):
+                self.assertIsNone(dataset_class_count(path))
+
+    def test_invalid_yaml_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "names: [unclosed\n")
+            self.assertIsNone(dataset_class_count(path))
+
+    def test_a_non_mapping_document_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "- one\n- two\n")
+            self.assertIsNone(dataset_class_count(path))
+
+    def test_mapping_names_return_their_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "names:\n  0: part\n  1: widget\n")
+            self.assertEqual(dataset_class_count(path), 2)
+
+    def test_sequence_names_return_their_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "names: [part, widget, screw]\n")
+            self.assertEqual(dataset_class_count(path), 3)
+
+    def test_a_non_name_value_returns_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp) / "data.yaml", "names: part\n")
+            self.assertIsNone(dataset_class_count(path))
+
+
 class DatasetContentFingerprintTests(unittest.TestCase):
     def test_missing_or_empty_path_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,7 +412,7 @@ class DatasetContentFingerprintTests(unittest.TestCase):
             fp = dataset_content_fingerprint(yaml_path)
             self.assertIsNotNone(fp)
 
-    def test_os_error_during_stat_is_swallowed_in_dir_walk(self) -> None:
+    def test_an_unreadable_file_contributes_a_stable_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             train_dir = root / "images" / "train"
@@ -373,20 +420,20 @@ class DatasetContentFingerprintTests(unittest.TestCase):
             _write(train_dir / "img.jpg", "data")
 
             yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/train\nnames:\n  0: part\n")
-            orig_stat = Path.stat
+            orig_open = Path.open
 
-            def _flaky_stat(self: Path, *a: object, **kw: object) -> object:
+            def _flaky_open(self: Path, *a: Any, **kw: Any) -> Any:
                 import sys
-                frame = sys._getframe(1)
-                if frame.f_code.co_name == "dataset_content_fingerprint":
+                if sys._getframe(1).f_code.co_name == "_digest_file":
                     raise OSError("disk error")
-                return orig_stat(self, *a, **kw)  # type: ignore[arg-type]
+                return orig_open(self, *a, **kw)
 
-            with mock.patch.object(Path, "stat", _flaky_stat):
+            with mock.patch.object(Path, "open", _flaky_open):
                 fp = dataset_content_fingerprint(yaml_path)
                 self.assertIsNotNone(fp)
+                self.assertEqual(len(fp or ""), 64)
 
-    def test_os_error_during_single_file_stat_is_swallowed(self) -> None:
+    def test_an_unreadable_single_file_contributes_a_stable_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             train_file = _write(root / "train.txt", "line1\nline2")
@@ -395,18 +442,53 @@ class DatasetContentFingerprintTests(unittest.TestCase):
                 root / "data.yaml",
                 f"train: {train_file.name}\nval: {train_file.name}\nnames:\n  0: part\n",
             )
-            orig_stat = Path.stat
+            orig_open = Path.open
 
-            def _flaky_stat(self: Path, *a: object, **kw: object) -> object:
+            def _flaky_open(self: Path, *a: Any, **kw: Any) -> Any:
                 import sys
-                frame = sys._getframe(1)
-                if frame.f_code.co_name == "dataset_content_fingerprint":
+                if sys._getframe(1).f_code.co_name == "_digest_file":
                     raise OSError("disk error")
-                return orig_stat(self, *a, **kw)  # type: ignore[arg-type]
+                return orig_open(self, *a, **kw)
 
-            with mock.patch.object(Path, "stat", _flaky_stat):
+            with mock.patch.object(Path, "open", _flaky_open):
                 fp = dataset_content_fingerprint(yaml_path)
                 self.assertIsNotNone(fp)
+                self.assertEqual(len(fp or ""), 64)
+
+    def test_same_size_content_change_changes_the_fingerprint(self) -> None:
+        # The inventory-only fingerprint this replaces compared (name, size),
+        # so rewriting an image with different pixels of the same length was
+        # invisible to --skip-unchanged. The content hash must catch it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            train_dir.mkdir(parents=True)
+            _write(train_dir / "img.jpg", "aaaa")
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/train\nnames:\n  0: part\n")
+
+            first = dataset_content_fingerprint(yaml_path)
+            _write(train_dir / "img.jpg", "bbbb")  # same length, different bytes
+            second = dataset_content_fingerprint(yaml_path)
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertNotEqual(first, second)
+
+    def test_moving_a_file_between_splits_changes_the_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "img.jpg", "pixels")
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/val\nnames:\n  0: part\n")
+
+            first = dataset_content_fingerprint(yaml_path)
+            (train_dir / "img.jpg").rename(val_dir / "img.jpg")
+            second = dataset_content_fingerprint(yaml_path)
+
+            self.assertNotEqual(first, second)
 
     def test_nonexistent_split_path_does_not_crash(self) -> None:
         """A split pointing to a path that is neither a dir nor a file."""

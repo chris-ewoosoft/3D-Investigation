@@ -18,6 +18,7 @@ void save(const QList<ChatSession> &sessions, const QString &username,
         sessionObject["id"] = session.id;
         sessionObject["title"] = session.title;
         sessionObject["createdAt"] = session.createdAt.toString(Qt::ISODate);
+        sessionObject["titleIsDefault"] = session.titleIsDefault;
 
         QJsonArray messages;
         for (const auto &message : session.messages) {
@@ -49,6 +50,7 @@ QList<ChatSession> load(const QString &username, const QString &configFilePath)
         session.id = sessionObject["id"].toString();
         session.title = sessionObject["title"].toString();
         session.createdAt = QDateTime::fromString(sessionObject["createdAt"].toString(), Qt::ISODate);
+        session.titleIsDefault = sessionObject["titleIsDefault"].toBool();
         for (const auto &message : sessionObject["messages"].toArray()) {
             session.messages.append(message.toObject());
         }

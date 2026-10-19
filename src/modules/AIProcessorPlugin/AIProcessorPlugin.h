@@ -2,7 +2,9 @@
 #define AI_PROCESSOR_PLUGIN_H
 
 #include <QObject>
+#include <QStringList>
 #include "IPlugin.h"
+#include "AppConstants.h"
 #include <QAction>
 #include <QProcess>
 #include <QToolButton>
@@ -31,6 +33,9 @@ class AIProcessorPlugin : public QObject, public IPlugin {
 
 public:
     QString pluginName() const override { return "AI Processor Plugin"; }
+    QStringList dependencies() const override {
+        return {QString::fromLatin1(AppConstants::PluginNames::UserAuthentication)};
+    }
     bool initialize(IAppContext* context) override;
     void cleanup() override;
     int  loadOrder() const override { return 30; }

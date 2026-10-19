@@ -6,9 +6,9 @@ bridges with no-op shims, so the entry point started while every agent call
 failed with ``ModelNotLoadedError``. These tests pin the load path:
 
     bootstrap_runtime()
-      -> legacy.rag_module.initialize_rag  -> real RAG bridge
-      -> legacy.llm_module.load_model      -> ai_assistant.llm.load_model
-      -> LlamaCppBackend                   -> llm_module.llm is set
+      -> runtime_modules.rag.initialize_rag  -> real RAG bridge
+      -> runtime_modules.llm.load_model      -> ai_assistant.llm.load_model
+      -> LlamaCppBackend                     -> runtime_modules.llm.llm is set
 
 Model weights and the embedding model are never loaded in tests; the backend
 and the document scan are replaced with doubles.
@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from ai_assistant.bootstrap.server import llm_module, rag_module
+from ai_assistant.bootstrap.server import runtime_modules
 
 
 class CompositionRootImportTests(unittest.TestCase):
@@ -41,11 +41,11 @@ class CompositionRootImportTests(unittest.TestCase):
 
     def test_legacy_bridges_are_functional_not_noops(self) -> None:
         """The bridges must delegate to the real loaders, not log-and-return."""
-        self.assertIsNotNone(llm_module.load_model)
+        self.assertIsNotNone(runtime_modules.llm.load_model)
         # A no-op shim logs "legacy shim" and never delegates; the real bridge
         # calls into ai_assistant.llm, which we can observe by patching below.
         import inspect
-        source = inspect.getsource(llm_module.load_model)
+        source = inspect.getsource(runtime_modules.llm.load_model)
         self.assertNotIn("legacy shim", source)
         self.assertTrue(
             any(name in source for name in ("_new_load", "load_model")),
@@ -65,7 +65,7 @@ class CompositionRootImportTests(unittest.TestCase):
             "release_embedding_for_vision",
             "_release_ml_memory",
         ):
-            self.assertTrue(hasattr(rag_module, attribute), f"missing {attribute}")
+            self.assertTrue(hasattr(runtime_modules.rag, attribute), f"missing {attribute}")
 
 
 class BootstrapRuntimeLoadTests(unittest.TestCase):
@@ -101,7 +101,7 @@ class BootstrapRuntimeLoadTests(unittest.TestCase):
         if self._saved_registry is not None:
             self.server._registry = self._saved_registry
         # Stabilizer: prevent module-level LLM state leakage across integration tests
-        llm_module.llm = None
+        runtime_modules.llm.llm = None
 
     @staticmethod
     def _patch_backend(backend):
@@ -134,21 +134,21 @@ class BootstrapRuntimeLoadTests(unittest.TestCase):
         mock_registry = MagicMock()
         mock_registry.get_by_index.return_value = mock_model_def
         def _fake_load(**kw):
-            llm_module.llm = backend
-            llm_module.is_vision_model = False
-            llm_module.active_model_desc = "Test model (Q4_K_M)"
+            runtime_modules.llm.llm = backend
+            runtime_modules.llm.is_vision_model = False
+            runtime_modules.llm.active_model_desc = "Test model (Q4_K_M)"
 
         with (
             p1, p2, p3,
-            patch.object(rag_module, "initialize_rag", return_value=0),
-            patch.object(llm_module, "load_model", _fake_load),
+            patch.object(runtime_modules.rag, "initialize_rag", return_value=0),
+            patch.object(runtime_modules.llm, "load_model", _fake_load),
         ):
             self.server.bootstrap_runtime()
 
         # The agent facade gates on llm_runtime.llm — this is the P0 signal.
-        self.assertIsNotNone(llm_module.llm)
-        self.assertFalse(llm_module.is_vision_model)
-        self.assertEqual(llm_module.active_model_desc, "Test model (Q4_K_M)")
+        self.assertIsNotNone(runtime_modules.llm.llm)
+        self.assertFalse(runtime_modules.llm.is_vision_model)
+        self.assertEqual(runtime_modules.llm.active_model_desc, "Test model (Q4_K_M)")
 
         # The whole facade must now accept an execution request.
         self.server.agent_service._require_llm()
@@ -157,13 +157,13 @@ class BootstrapRuntimeLoadTests(unittest.TestCase):
         """Without a backend the facade must raise, proving the gate is real."""
         from ai_assistant.domain.errors import ModelNotLoadedError
 
-        saved = llm_module.llm
+        saved = runtime_modules.llm.llm
         try:
-            llm_module.llm = None
+            runtime_modules.llm.llm = None
             with self.assertRaises(ModelNotLoadedError):
                 self.server.agent_service._require_llm()
         finally:
-            llm_module.llm = saved
+            runtime_modules.llm.llm = saved
 
     def test_vision_model_releases_embedding(self) -> None:
         """Vision models must drop the embedding model after load."""
@@ -174,19 +174,19 @@ class BootstrapRuntimeLoadTests(unittest.TestCase):
         p1, p2, p3 = self._patch_backend(backend)
 
         def _fake_vision_load(**kw):
-            llm_module.llm = backend
-            llm_module.is_vision_model = True
-            llm_module.active_model_desc = "Vision model"
+            runtime_modules.llm.llm = backend
+            runtime_modules.llm.is_vision_model = True
+            runtime_modules.llm.active_model_desc = "Vision model"
 
         with p1, p2, p3, patch.object(
-            rag_module, "initialize_rag", return_value=0
-        ), patch.object(rag_module, "release_embedding_for_vision") as release, patch.object(
-            llm_module, "load_model", _fake_vision_load
+            runtime_modules.rag, "initialize_rag", return_value=0
+        ), patch.object(runtime_modules.rag, "release_embedding_for_vision") as release, patch.object(
+            runtime_modules.llm, "load_model", _fake_vision_load
         ):
             self.server.bootstrap_runtime()
             release.assert_called_once()
 
-        self.assertTrue(llm_module.is_vision_model)
+        self.assertTrue(runtime_modules.llm.is_vision_model)
 
 
 class LazyCompositionTests(unittest.TestCase):

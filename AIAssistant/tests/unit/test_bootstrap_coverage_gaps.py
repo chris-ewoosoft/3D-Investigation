@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 
 class BootstrapServerCoverageGaps(unittest.TestCase):
-    """Pin defensive import-time branches in bootstrap/server.py."""
+    """Pin defensive branches in bootstrap/server.py and bootstrap/modules.py."""
 
     def test_model_index_guard_negative_and_overrun(self) -> None:
         """The selector really is clamped by ``_resolve_model_idx``.
@@ -34,80 +34,83 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
 
     def test_adopt_backend_refuses_a_missing_backend(self) -> None:
         """A failed load must be visible, not leave the old model advertised."""
-        from ai_assistant.bootstrap.server import _LLMModule
+        from ai_assistant.bootstrap.modules import LlmModule
 
-        previous = _LLMModule.llm
-        try:
-            self.assertFalse(_LLMModule._adopt_backend(None))
-            self.assertIs(_LLMModule.llm, previous)
-            backend = MagicMock()
-            backend.is_vision_supported = False
-            backend.model_description = "adopted"
-            self.assertTrue(_LLMModule._adopt_backend(backend))
-            self.assertIs(_LLMModule.llm, backend)
-            self.assertEqual(_LLMModule.active_model_desc, "adopted")
-        finally:
-            _LLMModule.llm = previous
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(), model_idx=0,
+                           use_vision_llm=False)
+        self.assertFalse(module._adopt_backend(None))
+        self.assertIsNone(module.llm)
+        backend = MagicMock()
+        backend.is_vision_supported = False
+        backend.model_description = "adopted"
+        self.assertTrue(module._adopt_backend(backend))
+        self.assertIs(module.llm, backend)
+        self.assertEqual(module.active_model_desc, "adopted")
 
     def test_llm_load_reload_and_estimate(self) -> None:
-        """Cover _LLMModule load/reload/estimate (lines 132-164)."""
-        from ai_assistant.bootstrap.server import _LLMModule, llm_module
+        """Cover LlmModule load/reload/estimate paths."""
+        from ai_assistant.bootstrap.modules import LlmModule
+
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(),
+                           model_idx=0, use_vision_llm=False)
         # Mock registry and backend so load/reload can execute without weights
         mock_backend = MagicMock()
         mock_backend.is_vision_supported = False
         mock_backend.model_description = "Test"
         with patch("ai_assistant.llm.load_model") as mock_load:
             with patch("ai_assistant.llm.get_backend", return_value=mock_backend):
-                llm_module.load_model()
+                module.load_model()
                 mock_load.assert_called()
                 # reload path — mock reload_model dependency
                 with patch("ai_assistant.llm.reload_model"):
-                    llm_module.reload_model()
+                    module.reload_model()
         # estimate defensive
-        self.assertEqual(_LLMModule.estimate_tokens(""), 1)
-        self.assertGreaterEqual(_LLMModule.estimate_tokens("hello"), 1)
+        self.assertEqual(LlmModule.estimate_tokens(""), 1)
+        self.assertGreaterEqual(LlmModule.estimate_tokens("hello"), 1)
 
     def test_rag_bridge_methods(self) -> None:
-        """Cover _RAGModule legacy bridge branches (initialize_rag / get_context)."""
+        """Cover RagModule retrieval branches (initialize_rag / get_context)."""
         import os
 
-        from ai_assistant.bootstrap.server import _RAGModule, rag_module
-        self.assertTrue(hasattr(_RAGModule.initialize_rag, "__call__"))
-        self.assertTrue(hasattr(_RAGModule.get_context, "__call__"))
-        self.assertTrue(hasattr(_RAGModule.release_embedding_for_vision, "__call__"))
-        self.assertTrue(hasattr(_RAGModule._release_ml_memory, "__call__"))
-        self.assertTrue(hasattr(_RAGModule._build_retrievers, "__call__"))
+        from ai_assistant.bootstrap.modules import RagModule
+
+        rag = RagModule()
+        self.assertTrue(hasattr(rag.initialize_rag, "__call__"))
+        self.assertTrue(hasattr(rag.get_context, "__call__"))
+        self.assertTrue(hasattr(rag.release_embedding_for_vision, "__call__"))
+        self.assertTrue(hasattr(rag._release_ml_memory, "__call__"))
+        self.assertTrue(hasattr(rag._build_retrievers, "__call__"))
         # No pipeline wired yet: get_context is honestly empty, not a stub that
         # pretends it searched.
-        result = rag_module.get_context("test", None, None)
+        result = rag.get_context("test", None, None)
         self.assertIsInstance(result, tuple)
         self.assertEqual(result, ("", "", []))
         # Disabled branch (AI_ENABLE_RAG=0): no I/O, deterministic.
         with patch.dict(os.environ, {"AI_ENABLE_RAG": "0"}):
-            self.assertEqual(rag_module.initialize_rag(enable_reranker=False, force_rebuild=False), 0)
+            self.assertEqual(rag.initialize_rag(enable_reranker=False, force_rebuild=False), 0)
         # Cache-miss + empty-corpus branch: scan is stubbed so no full project
         # walk happens, and the module must report the empty state it would
         # expose on /health.
         with patch("ai_assistant.rag.index.is_cache_valid", return_value=False), \
                 patch("ai_assistant.rag.index.scan_documents", return_value=[]):
-            ret = rag_module.initialize_rag(enable_reranker=False, force_rebuild=False)
+            ret = rag.initialize_rag(enable_reranker=False, force_rebuild=False)
         self.assertEqual(ret, 0)
-        self.assertIsNone(rag_module.knowledge_index)
-        self.assertEqual(rag_module.get_context("test", None, None), ("", "", []))
+        self.assertIsNone(rag.knowledge_index)
+        self.assertEqual(rag.get_context("test", None, None), ("", "", []))
         # Hard failure (I/O error) is logged with traceback and clears state.
         with patch("ai_assistant.rag.index.is_cache_valid", side_effect=RuntimeError("disk gone")), \
-                patch("ai_assistant.bootstrap.server.logger") as fake_logger:
-            self.assertEqual(rag_module.initialize_rag(), 0)
+                patch("ai_assistant.bootstrap.modules.logger") as fake_logger:
+            self.assertEqual(rag.initialize_rag(), 0)
             self.assertTrue(fake_logger.exception.called)
-        self.assertIsNone(rag_module._pipeline)
+        self.assertIsNone(rag._pipeline)
         # Retrieval failure path logs and returns the empty envelope, never raises.
-        rag_module._pipeline = object()
-        with patch("ai_assistant.bootstrap.server.logger") as fake_logger:
-            self.assertEqual(rag_module.get_context("test", None, None), ("", "", []))
+        rag._pipeline = object()
+        with patch("ai_assistant.bootstrap.modules.logger") as fake_logger:
+            self.assertEqual(rag.get_context("test", None, None), ("", "", []))
             self.assertTrue(fake_logger.exception.called)
-        rag_module._pipeline = None
+        rag._pipeline = None
         # Direct release (release_embedding_for_vision → llm.hardware)
-        rag_module.release_embedding_for_vision()
+        rag.release_embedding_for_vision()
 
     def test_logging_devnull_branches(self) -> None:
         """Cover sys.stdout/sys.stderr None branches in logging.py (lines 33,35)."""
@@ -187,10 +190,10 @@ class BootstrapStabilizer(unittest.TestCase):
     """Stabilize mock-path state leakage across integration tests."""
 
     def tearDown(self) -> None:
-        from ai_assistant.bootstrap.server import llm_module, rag_module
-        llm_module.llm = None
-        llm_module.is_vision_model = False
-        llm_module.active_model_desc = ""
-        rag_module.knowledge_index = None
-        rag_module.knowledge_chunks = []
-        rag_module.bm25_index = None
+        from ai_assistant.bootstrap.server import runtime_modules
+        runtime_modules.llm.llm = None
+        runtime_modules.llm.is_vision_model = False
+        runtime_modules.llm.active_model_desc = ""
+        runtime_modules.rag.knowledge_index = None
+        runtime_modules.rag.knowledge_chunks = []
+        runtime_modules.rag.bm25_index = None
