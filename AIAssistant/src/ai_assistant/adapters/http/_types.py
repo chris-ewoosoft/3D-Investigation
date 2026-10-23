@@ -9,8 +9,10 @@ about what they reach into on the runtime handles (ADR 0001).
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from typing import Any, Protocol
+
+from ...ports import ToolCatalog
 
 
 class LoggerLike(Protocol):
@@ -32,7 +34,10 @@ class LLMModuleLike(Protocol):
     is_vision_model: bool
 
     def estimate_tokens(self, text: str) -> int: ...
+    def release(self) -> bool: ...
     def load_model(self) -> None: ...
+    def model_lease(self) -> AbstractContextManager[Any]: ...
+    def model_reload(self) -> AbstractContextManager[None]: ...
 
 
 class RAGModuleLike(Protocol):
@@ -47,16 +52,13 @@ class RAGModuleLike(Protocol):
     CHUNK_CHARS: int
     MAX_CONTEXT_CHARS: int
 
+    def reset_index_state(self) -> None:
+        """Drop every retrieval handle (ADR 0032: the module owns this)."""
+        ...
+
     def _release_ml_memory(self) -> None: ...
     def release_embedding_for_vision(self) -> None: ...
     def initialize_rag(self, *, force_rebuild: bool, enable_reranker: bool) -> int: ...
-
-
-class AttachmentHelpers(Protocol):
-    """Optional image helpers used by the chat router's ImportError fallback."""
-
-    def _is_image_file(self, path: str) -> bool: ...
-    def _image_to_data_uri(self, path: str) -> str: ...
 
 
 class ActionManifestLike(Protocol):
@@ -68,10 +70,6 @@ class PluginSpecLike(Protocol):
     def name(self) -> str: ...
     @property
     def description(self) -> str: ...
-
-
-class PluginRegistryLike(Protocol):
-    def specs(self) -> Sequence[PluginSpecLike]: ...
 
 
 class PlatformSettingsLike(Protocol):
@@ -87,8 +85,10 @@ class PlatformLike(Protocol):
     # Declared as read-only properties so a frozen/slots container (a read-only
     # attribute) satisfies the protocol; a bare protocol attribute would demand
     # a settable variable (ADR 0001, mypy "read-only attribute" error).
+    # The catalogue is the shared ``ToolCatalog`` port (ADR 0032) — the
+    # adapter used to declare its own duck-typed duplicate of it.
     @property
-    def plugins(self) -> PluginRegistryLike: ...
+    def plugins(self) -> ToolCatalog: ...
     @property
     def settings(self) -> PlatformSettingsLike: ...
 

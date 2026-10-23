@@ -50,14 +50,73 @@ void ReconstructionPipeline::setConfig(const ReconstructionConfig &cfg) {
 // ─── setImages ───────────────────────────────────────────────────────────────
 
 void ReconstructionPipeline::setImages(const std::vector<QString> &imagePaths) {
-    imageFiles = imagePaths;
+    imageFiles.clear();
     images.clear();
     for (const auto &path : imagePaths) {
         cv::Mat img = cv::imread(path.toStdString(), cv::IMREAD_COLOR);
-        if (!img.empty()) images.push_back(img);
-        else qWarning() << "Cannot read image:" << path;
+        if (img.empty()) {
+            qWarning() << "Cannot read image:" << path;
+            // The path is DROPPED together with its image: imageFiles and
+            // images must stay index-aligned, because the camera parameters
+            // are matched against the images by index. Keeping a path whose
+            // image failed to load would shift every following pair.
+            continue;
+        }
+        imageFiles.push_back(path);
+        images.push_back(img);
     }
     qDebug() << "Loaded" << images.size() << "images";
+    // The camera parameters are matched against the (possibly new) image
+    // list; the previous match is stale.
+    cameraParamsMatched = false;
+}
+
+// ─── Camera parameters ↔ images ─────────────────────────────────────────────
+//
+// The ground-truth camera file names its images; the loaded image list comes
+// from the file dialog and is in no particular order. Binding the poses by
+// POSITION therefore assigns every pose to the wrong image as soon as the
+// two orders differ — silently, and with geometrically wrong output.
+//
+// The match is done by the image's base name. When the file names cannot be
+// matched (a different naming convention, a subset), the pipeline says so
+// loudly and falls back to the positional order instead of pretending the
+// poses are the ground truth.
+
+bool ReconstructionPipeline::matchCameraParamsToImages() {
+    cameraParamsMatched = false;
+    if (!hasGroundTruthParams || camParams.empty() || images.empty()) return false;
+    if (camParams.size() < images.size()) {
+        qWarning() << "Reconstruction: the camera file describes"
+                   << camParams.size() << "image(s) but" << images.size()
+                   << "were loaded — the ground-truth poses are not used.";
+        return false;
+    }
+
+    std::vector<CameraParams> ordered;
+    ordered.reserve(images.size());
+    int matched = 0;
+    for (const auto &imagePath : imageFiles) {
+        const QString wanted = QFileInfo(imagePath).fileName();
+        const auto found = std::find_if(camParams.begin(), camParams.end(),
+                                         [&](const CameraParams &p) {
+                                             return p.imageName == wanted;
+                                         });
+        if (found == camParams.end()) {
+            qWarning() << "Reconstruction: no camera parameters for image"
+                       << wanted << "— the ground-truth poses are not used.";
+            camParams.clear();
+            hasGroundTruthParams = false;
+            return false;
+        }
+        ordered.push_back(*found);
+        ++matched;
+    }
+    camParams = ordered;
+    cameraParamsMatched = true;
+    qDebug() << "Reconstruction: matched" << matched
+             << "camera parameter(s) to the images by name.";
+    return true;
 }
 
 // ─── loadCameraParams ────────────────────────────────────────────────────────
@@ -188,7 +247,11 @@ bool ReconstructionPipeline::extractAllFeatures() {
 // ─── Reconstruction branch dispatch ──────────────────────────────────────────
 
 bool ReconstructionPipeline::runSfMBranch() {
-    if (hasGroundTruthParams && (int)camParams.size() >= (int)images.size()) {
+    // The ground-truth branch only runs when the poses are actually bound to
+    // the images they belong to.
+    matchCameraParamsToImages();
+    if (hasGroundTruthParams && cameraParamsMatched
+        && (int)camParams.size() >= (int)images.size()) {
         TrackSfM stage(images, keypoints, descriptors, m_config, camParams,
                        points3D, colors, m_lastError);
         return stage.run();
@@ -344,3 +407,23 @@ void ReconstructionPipeline::processPointCloud() {
 
 const std::vector<cv::Point3f>& ReconstructionPipeline::getPointCloud()  const { return points3D; }
 const std::vector<cv::Vec3b>&   ReconstructionPipeline::getPointColors() const { return colors; }
+
+std::shared_ptr<const PointCloudSnapshot> ReconstructionPipeline::buildSnapshot() const {
+    // The ABI-neutral copy of the current cloud. Points and colours are
+    // copied together so a consumer can never observe two different
+    // reconstruction generations.
+    auto snapshot = std::make_shared<PointCloudSnapshot>();
+
+    snapshot->points.reserve(points3D.size());
+    for (const auto& p : points3D)
+        snapshot->points.push_back({p.x, p.y, p.z});
+
+    snapshot->colors.reserve(colors.size());
+    for (const auto& c : colors) {
+        // OpenCV is BGR, PointColor is {r, g, b}: the channels have to be
+        // swapped here, or the rendered cloud shows red and blue inverted.
+        snapshot->colors.push_back({c[2], c[1], c[0]});
+    }
+
+    return snapshot;
+}

@@ -84,3 +84,15 @@ class UnprocessableRequestError(PlatformError):
 
 class ServiceUnavailableError(PlatformError):
     """A required backend or capability is not currently available."""
+
+
+class TaskCapacityError(ServiceUnavailableError):
+    """The task service has no free execution slot; the caller should retry."""
+
+    def __init__(self, max_concurrent_tasks: int) -> None:
+        self.max_concurrent_tasks = max_concurrent_tasks
+        super().__init__(
+            f"Task service is at capacity ({max_concurrent_tasks} concurrent tasks); "
+            "retry later"
+        )
+

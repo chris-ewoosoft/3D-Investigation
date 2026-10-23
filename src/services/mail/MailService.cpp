@@ -13,7 +13,29 @@
 
 namespace {
 constexpr int ImapTimeoutMs = 8000;
+
+/// Quote a value for an IMAP quoted string (RFC 3501 §6.2.3).
+///
+/// Inside a quoted string the backslash and the double quote are escaped
+/// with a backslash. Without this a password containing `"` or `\` ends the
+/// string early and the rest of the password is parsed as protocol text —
+/// the login fails with a confusing error, and a crafted password can inject
+/// commands into the session.
+QString imapQuoted(const QString &value)
+{
+    QString escaped = value;
+    escaped.replace(QLatin1Char('\\'), QLatin1String("\\\\"));
+    escaped.replace(QLatin1Char('"'), QLatin1String("\\\""));
+    return escaped;
 }
+
+/// The LOGIN command with both values escaped. Every session opens with it,
+/// so it is built in exactly one place.
+QString imapLoginCommand(const QString &email, const QString &password)
+{
+    return QStringLiteral("LOGIN \"%1\" \"%2\"").arg(imapQuoted(email), imapQuoted(password));
+}
+} // namespace
 
 MailService::MailService(IUserManager* users)
     : m_users(users)
@@ -240,17 +262,40 @@ bool MailService::testConnection(QString& errorMsg)
         return false;
     }
 
-    QSslSocket sock;
-    if (!openImap(errorMsg, sock)) return false;
-
-    QString response;
-    const QString login = QString("LOGIN \"%1\" \"%2\"").arg(email, password);
-    if (!sendImap(sock, "A001", login, response)) {
-        errorMsg = "IMAP login failed: " + response;
-        return false;
+    // RECEIVING and SENDING are two different servers, usually with two
+    // different credentials. Probing only IMAP reported "connected" for an
+    // account that could read its inbox but could never send a message —
+    // the one thing the button exists to find out.
+    QString imapError;
+    bool imapOk = false;
+    {
+        QSslSocket sock;
+        if (openImap(imapError, sock)) {
+            QString response;
+            if (sendImap(sock, "A001", imapLoginCommand(email, password), response)) {
+                imapOk = true;
+                sendImap(sock, "A002", "LOGOUT", response);
+            } else {
+                imapError = "IMAP login failed: " + response;
+            }
+        }
     }
-    sendImap(sock, "A002", "LOGOUT", response);
-    return true;
+
+    QString smtpError;
+    SmtpMailer mailer(email, password);
+    const bool smtpOk = mailer.testConnection(smtpError);
+
+    if (imapOk && smtpOk) return true;
+
+    // Report the half that failed: "connection failed" with no direction
+    // leaves the user guessing which server rejected them.
+    if (!imapOk && !smtpOk)
+        errorMsg = QStringLiteral("IMAP: %1\nSMTP: %2").arg(imapError, smtpError);
+    else if (!imapOk)
+        errorMsg = QStringLiteral("Receiving (IMAP) failed: %1").arg(imapError);
+    else
+        errorMsg = QStringLiteral("Sending (SMTP) failed: %1").arg(smtpError);
+    return false;
 }
 
 QList<MailMessage> MailService::fetchInbox(int limit, QString& errorMsg)
@@ -274,7 +319,7 @@ QList<MailMessage> MailService::fetchInbox(int limit, QString& errorMsg)
     if (!openImap(errorMsg, sock)) return messages;
 
     QString response;
-    if (!sendImap(sock, "A001", QString("LOGIN \"%1\" \"%2\"").arg(email, password), response)) {
+    if (!sendImap(sock, "A001", imapLoginCommand(email, password), response)) {
         errorMsg = "IMAP login failed: " + response;
         return messages;
     }
@@ -293,7 +338,12 @@ QList<MailMessage> MailService::fetchInbox(int limit, QString& errorMsg)
     if (match.hasMatch()) {
         uids = match.captured(1).split(' ', Qt::SkipEmptyParts);
     }
-    while (uids.size() > limit) uids.removeFirst();
+    // A negative limit is not "unlimited": the trim loop would remove one
+    // element per iteration from a list it has already emptied, which is
+    // undefined behaviour. 0 is the honest reading of "no messages".
+    limit = std::max(0, limit);
+    if (limit < uids.size())
+        uids = uids.mid(uids.size() - limit);
     std::reverse(uids.begin(), uids.end());
 
     int tagIndex = 4;
@@ -330,7 +380,7 @@ bool MailService::markRead(const QString& uid, QString& errorMsg)
     QSslSocket sock;
     if (!openImap(errorMsg, sock)) return false;
     QString response;
-    if (!sendImap(sock, "A001", QString("LOGIN \"%1\" \"%2\"").arg(email, password), response)) {
+    if (!sendImap(sock, "A001", imapLoginCommand(email, password), response)) {
         errorMsg = "IMAP login failed: " + response;
         return false;
     }
@@ -355,7 +405,7 @@ bool MailService::deleteMail(const QString& uid, QString& errorMsg)
     QSslSocket sock;
     if (!openImap(errorMsg, sock)) return false;
     QString response;
-    if (!sendImap(sock, "A001", QString("LOGIN \"%1\" \"%2\"").arg(email, password), response)) {
+    if (!sendImap(sock, "A001", imapLoginCommand(email, password), response)) {
         errorMsg = "IMAP login failed: " + response;
         return false;
     }

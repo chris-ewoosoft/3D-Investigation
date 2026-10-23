@@ -22,7 +22,9 @@ from ai_assistant.settings import (
     a2a_card_name,
     a2a_card_url,
     a2a_enabled,
+    a2a_max_subscribers,
     a2a_remote_agent_urls,
+    a2a_tenants,
     agent_bind_host,
     agent_bind_port,
     agent_write_roots,
@@ -38,6 +40,7 @@ from ai_assistant.settings import (
     otlp_exporter_endpoint,
     rag_enabled,
     rate_limit_per_minute,
+    task_retention_days,
     transport_tokens,
     vision_llm_enabled,
 )
@@ -66,6 +69,54 @@ class ArchitectureSettingsTests(unittest.TestCase):
             self.assertEqual(settings.allowed_plugins, frozenset({"builtin.legacy-tools"}))
             self.assertEqual(settings.allowed_origins, ())
             self.assertEqual(settings.capability_scopes, {})
+            # ADR 0032: the docs surface is opt-in, never on by default.
+            self.assertFalse(settings.expose_api_docs)
+            self.assertEqual(settings.allowed_hosts, ())
+
+    def test_the_docs_surface_is_opt_in(self):
+        """ADR 0032: ``/docs`` is an app-level route, so the transport guard
+        never reaches it. It therefore ships disabled and a deployment has to
+        say so explicitly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "AIAssistant"
+            base.mkdir()
+            self._write(base, "base.toml", '[api]\nexpose_docs = true\n')
+            with mock.patch.dict("os.environ", {}, clear=True):
+                settings = ArchitectureSettings.load(base, config_dir=base / "config")
+            self.assertTrue(settings.expose_api_docs)
+
+    def test_the_environment_overrides_the_config_file_for_the_docs_surface(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "AIAssistant"
+            base.mkdir()
+            self._write(base, "base.toml", '[api]\nexpose_docs = true\n')
+            # An explicitly set variable always wins — including "0", which is
+            # how an operator turns the surface off for one session.
+            with mock.patch.dict("os.environ", {"AGENT_EXPOSE_API_DOCS": "0"}, clear=True):
+                settings = ArchitectureSettings.load(base, config_dir=base / "config")
+            self.assertFalse(settings.expose_api_docs)
+            with mock.patch.dict("os.environ", {"AGENT_EXPOSE_API_DOCS": "1"}, clear=True):
+                settings = ArchitectureSettings.load(base, config_dir=base / "config")
+            self.assertTrue(settings.expose_api_docs)
+
+    def test_the_host_allow_list_is_read_from_the_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "AIAssistant"
+            base.mkdir()
+            with mock.patch.dict(
+                "os.environ", {"AGENT_ALLOWED_HOSTS": "localhost, 127.0.0.1 ,"}, clear=True
+            ):
+                settings = ArchitectureSettings.load(base, config_dir=base / "config")
+            self.assertEqual(settings.allowed_hosts, ("localhost", "127.0.0.1"))
+
+    def test_the_host_allow_list_falls_back_to_the_config_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "AIAssistant"
+            base.mkdir()
+            self._write(base, "base.toml", '[api]\nallowed_hosts = ["ai.internal"]\n')
+            with mock.patch.dict("os.environ", {}, clear=True):
+                settings = ArchitectureSettings.load(base, config_dir=base / "config")
+            self.assertEqual(settings.allowed_hosts, ("ai.internal",))
 
     def test_tracked_config_is_read_for_any_base_dir(self):
         """ADR 0015: ``AIAssistant/config/*.toml`` must be live, not decorative.
@@ -159,11 +210,19 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.checkpoint_backend, "memory")
         self.assertEqual(settings.checkpoint_url, "")
         self.assertFalse(settings.native_tool_calls)
-        # Production gates stay off by default so the desktop distribution
-        # keeps working without Docker or a database (ADR 0023).
-        self.assertFalse(settings.sandbox_require_isolation)
+        # The sandbox gate defaults to *on*: an allow-list is not an OS
+        # boundary, so a deployment that says nothing gets the isolated
+        # runtime. The local desktop opts out explicitly (ADR 0023).
+        self.assertTrue(settings.sandbox_require_isolation)
+        # The checkpoint gate stays off by default so the desktop distribution
+        # keeps working without a database (ADR 0023).
         self.assertFalse(settings.checkpoint_required)
         self.assertEqual(settings.max_concurrent_runs, 0)
+
+    def test_the_sandbox_gate_can_be_switched_off_explicitly(self):
+        """The opt-out is a decision, not a default: it has to be written down."""
+        settings = load_agent_runtime_settings({"AGENT_SANDBOX_REQUIRE_ISOLATION": "0"})
+        self.assertFalse(settings.sandbox_require_isolation)
 
     def test_overrides_and_casefold(self):
         env = {
@@ -404,6 +463,32 @@ class EnvironmentOwnerAccessorTests(unittest.TestCase):
         self.assertEqual(tokens.a2a, "a2a")
         self.assertEqual(tokens.agent, "")
         self.assertEqual(tokens.mcp, "")
+
+    def test_a2a_tenants_parses_the_json_mapping(self) -> None:
+        self.assertEqual(
+            a2a_tenants({"AI_A2A_TENANTS": '{"tok-a": "alpha", "tok-b": "beta"}'}),
+            {"tok-a": "alpha", "tok-b": "beta"},
+        )
+
+    def test_a2a_tenants_fails_closed_on_bad_input(self) -> None:
+        for raw in ("", "not-json", '["tok-a"]', '{"": "alpha"}', '{"tok": ""}'):
+            with self.subTest(raw=raw):
+                self.assertEqual(a2a_tenants({"AI_A2A_TENANTS": raw}), {})
+
+    def test_a2a_max_subscribers_has_a_safe_default(self) -> None:
+        self.assertEqual(a2a_max_subscribers({}), 32)
+        self.assertEqual(a2a_max_subscribers({"AI_A2A_MAX_SUBSCRIBERS": " 8 "}), 8)
+        for raw in ("nope", "0", "-3"):
+            with self.subTest(raw=raw):
+                self.assertEqual(a2a_max_subscribers({"AI_A2A_MAX_SUBSCRIBERS": raw}), 32)
+
+    def test_task_retention_days_defaults_and_allows_disabling(self) -> None:
+        self.assertEqual(task_retention_days({}), 30)
+        self.assertEqual(task_retention_days({"AI_TASK_RETENTION_DAYS": " 7 "}), 7)
+        self.assertEqual(task_retention_days({"AI_TASK_RETENTION_DAYS": "0"}), 0)
+        for raw in ("nope", "-1"):
+            with self.subTest(raw=raw):
+                self.assertEqual(task_retention_days({"AI_TASK_RETENTION_DAYS": raw}), 30)
 
     def test_rag_enabled_parses_the_documented_values(self) -> None:
         for raw, expected in (("1", True), ("true", True), ("OFF", False), ("0", False)):

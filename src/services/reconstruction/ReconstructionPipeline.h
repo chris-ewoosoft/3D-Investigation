@@ -5,9 +5,11 @@
 #include <opencv2/core.hpp>
 #include <opencv2/features2d.hpp>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "Global.h"
+#include "PointCloudData.h"
 #include "ReconstructionConfig.h"
 
 /**
@@ -59,6 +61,15 @@ public:
     bool hasResult() const { return !points3D.empty(); }
     std::vector<QString> getImages() const { return imageFiles; }
 
+    /// Builds the ABI-neutral snapshot of the current point cloud.
+    ///
+    /// The service publishes it so the UI never has to touch the pipeline
+    /// (which the worker holds locked for the whole reconstruction). The
+    /// conversion lives HERE, next to the data it converts, so it can be
+    /// measured by the fast pipeline tests instead of only by a completed
+    /// reconstruction.
+    std::shared_ptr<const PointCloudSnapshot> buildSnapshot() const;
+
     /// Pipeline lọc tổng hợp (adaptive ROR → SOR → voxel) trên cloud hiện có.
     /// Delegate sang ReconstructionPostProcessor (không còn nội bộ ở đây).
     void processPointCloud();
@@ -78,6 +89,18 @@ private:
     // Ground truth params
     std::vector<CameraParams> camParams;
     bool hasGroundTruthParams = false;
+    /// Whether camParams has been matched to the loaded images BY NAME. The
+    /// ground-truth branch may only run when this is true: a positional
+    /// binding would assign every pose to the wrong image.
+    bool cameraParamsMatched = false;
+
+    /// Bind the ground-truth camera parameters to the loaded images.
+    ///
+    /// Returns false when the names do not match (or the file describes
+    /// fewer images than were loaded); the caller then falls back to the
+    /// self-estimating branch instead of using poses that belong to other
+    /// images.
+    bool matchCameraParamsToImages();
 
     // Kết quả
     std::vector<cv::Point3f> points3D;

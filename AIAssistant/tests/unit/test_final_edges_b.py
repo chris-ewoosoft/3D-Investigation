@@ -16,6 +16,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from fastapi.testclient import TestClient
+
 from ai_assistant.bootstrap.app_factory import TraceContextMiddleware, create_app
 from ai_assistant.domain.errors import (
     ApprovalRequiredError,
@@ -97,7 +99,11 @@ class SafePathTests(unittest.TestCase):
     def test_an_uncomputable_common_path_is_rejected(self):
         from ai_assistant.tools.builtin.path_utils import agent_safe_path
 
-        with patch("os.path.commonpath", side_effect=ValueError("different drives")):
+        # The containment comparison now lives in the kernel
+        # (path_policy.resolve_within) and refuses when the two paths share
+        # no root — a comparison that cannot be made is a rejection, never
+        # a crash.
+        with patch("ai_assistant.path_policy.os.path.commonpath", side_effect=ValueError("different drives")):
             self.assertIsNone(agent_safe_path("a.py"))
 
 
@@ -143,25 +149,20 @@ class ModelLoaderTests(unittest.TestCase):
             ),),
             fallback=ModelDefinition("repo/fallback", "fallback.gguf", "Fallback"),
         )
-        saved_backend = model_loader._global_backend
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                (Path(tmpdir) / "mmproj.gguf").write_bytes(b"clip")
-                with (
-                    patch.object(model_loader, "download_if_missing",
-                                 return_value="primary.gguf"),
-                    patch.object(model_loader, "LlamaCppBackend") as backend_cls,
-                    patch.object(model_loader, "release_ml_memory"),
-                    patch("huggingface_hub.hf_hub_download") as mock_download,
-                ):
-                    model_loader.load_model(registry, tmpdir, enable_vision=True)
-            mock_download.assert_not_called()
-            self.assertEqual(
-                backend_cls.call_args.kwargs["mmproj_path"],
-                str(Path(tmpdir) / "mmproj.gguf"),
-            )
-        finally:
-            model_loader._global_backend = saved_backend
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "mmproj.gguf").write_bytes(b"clip")
+            with (
+                patch.object(model_loader, "download_if_missing",
+                             return_value="primary.gguf"),
+                patch.object(model_loader, "LlamaCppBackend") as backend_cls,
+                patch("huggingface_hub.hf_hub_download") as mock_download,
+            ):
+                model_loader.load_backend(registry, tmpdir, enable_vision=True)
+        mock_download.assert_not_called()
+        self.assertEqual(
+            backend_cls.call_args.kwargs["mmproj_path"],
+            str(Path(tmpdir) / "mmproj.gguf"),
+        )
 
 
 class DomainErrorHandlerTests(unittest.TestCase):
@@ -287,7 +288,8 @@ class DesktopAckServiceTests(unittest.TestCase):
 class AppFactoryTests(unittest.TestCase):
     """Coverage for the FastAPI composition boundary."""
 
-    def _settings(self, tmpdir: str) -> ArchitectureSettings:
+    def _settings(self, tmpdir: str, *, expose_api_docs: bool = False,
+                  allowed_hosts: tuple[str, ...] = ()) -> ArchitectureSettings:
         return ArchitectureSettings(
             profile="desktop",
             data_dir=Path(tmpdir),
@@ -299,6 +301,8 @@ class AppFactoryTests(unittest.TestCase):
             capability_scopes={},
             allowed_plugins=frozenset(),
             allowed_origins=("*",),
+            expose_api_docs=expose_api_docs,
+            allowed_hosts=allowed_hosts,
         )
 
     def test_create_app_registers_handlers_and_cors(self) -> None:
@@ -319,6 +323,65 @@ class AppFactoryTests(unittest.TestCase):
         self.assertTrue(
             any(m.cls is TraceContextMiddleware for m in app.user_middleware)
         )
+
+    def test_the_docs_surface_is_not_served_by_default(self) -> None:
+        """ADR 0032: ``/docs``/``/redoc``/``/openapi.json`` are *app-level*
+        FastAPI routes, so the transport guard that protects every other
+        surface never reaches them. They therefore ship disabled — a peer that
+        could reach the port must not receive the route schema by default."""
+        async def _lifespan(app):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(self._settings(tmpdir), _lifespan)
+        client = TestClient(app, client=("127.0.0.1", 50000))
+        for path in ("/openapi.json", "/docs", "/redoc"):
+            self.assertEqual(client.get(path).status_code, 404, path)
+
+    def test_the_docs_surface_is_served_when_a_deployment_opts_in(self) -> None:
+        async def _lifespan(app):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(
+                self._settings(tmpdir, expose_api_docs=True), _lifespan
+            )
+        client = TestClient(app, client=("127.0.0.1", 50000))
+        self.assertEqual(client.get("/openapi.json").status_code, 200)
+        self.assertEqual(client.get("/docs").status_code, 200)
+
+    def test_the_host_allow_list_is_installed_only_when_declared(self) -> None:
+        """ADR 0032: the trusted-host middleware refuses a spoofed ``Host``
+        header. It is installed only when the deployment declares a policy —
+        an empty list means "no policy declared", not "deny everything"."""
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        async def _lifespan(app):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            without = create_app(self._settings(tmpdir), _lifespan)
+            with_policy = create_app(
+                self._settings(tmpdir, allowed_hosts=("ai.internal",)), _lifespan
+            )
+        self.assertFalse(
+            any(m.cls is TrustedHostMiddleware for m in without.user_middleware)
+        )
+        self.assertTrue(
+            any(m.cls is TrustedHostMiddleware for m in with_policy.user_middleware)
+        )
+
+    def test_a_spoofed_host_header_is_refused_when_the_policy_is_declared(self) -> None:
+        async def _lifespan(app):
+            yield
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = create_app(
+                self._settings(tmpdir, allowed_hosts=("ai.internal",)), _lifespan
+            )
+        client = TestClient(app, client=("127.0.0.1", 50000))
+        response = client.get("/openapi.json", headers={"Host": "evil.example"})
+        self.assertEqual(response.status_code, 400)
 
     def test_create_app_installs_the_rate_limiter_only_when_configured(self) -> None:
         """ADR 0024: the admission governor is opt-in via env, installed

@@ -31,11 +31,12 @@ from .config import (
     DEFAULT_WORKERS,
     MANIFEST_NAME,
     MODEL_REGISTRY,
+    RUN_DIR_PREFIX,
     TrainConfig,
     resolve_models,
 )
 from .errors import CvTrainError, ExitCode, ManifestIntegrityError
-from .fsio import directory_lock
+from .fsio import directory_lock, prune_run_directories
 from .logging_setup import setup_logging
 
 LOG = logging.getLogger("cvtrain.cli")
@@ -80,6 +81,23 @@ def _min_metric(raw: str) -> tuple[str, float]:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _keep_count(raw: str) -> int:
+    """argparse adapter for the count of runs ``--prune-runs`` keeps.
+
+    A negative count is a usage error (exit ``2``), not a runtime surprise:
+    "keep minus three runs" has no meaning, and the pipeline must say so
+    before it deletes anything.
+    """
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a number, got {raw!r}") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative count, got {raw!r}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="TrainModel.py",
@@ -109,6 +127,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify-manifest",
         action="store_true",
         help="verify manifest checksums and exit",
+    )
+    mode.add_argument(
+        "--prune-runs",
+        type=_keep_count,
+        nargs="?",
+        const=1,
+        metavar="KEEP",
+        help="delete old training runs, keeping the newest KEEP per model (default: 1)",
     )
 
     selection = parser.add_argument_group(
@@ -156,6 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip models whose ONNX already matches this invocation (idempotent re-run)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue the most recent run of each model instead of starting a new one",
+    )
     quality = parser.add_argument_group(
         "quality gate",
         "publish only models whose metrics meet a minimum; repeatable, and applied to a "
@@ -193,6 +224,7 @@ def config_from_args(args: argparse.Namespace) -> TrainConfig:
         check_only=args.check_only,
         verbose=args.verbose,
         skip_unchanged=args.skip_unchanged,
+        resume=args.resume,
         min_metrics=tuple(args.min_metric or ()),
     )
 
@@ -237,6 +269,25 @@ def _verify_manifest(models_dir: Path) -> int:
     return int(ExitCode.OK)
 
 
+def _prune_runs(runs_dir: Path, keep: int) -> int:
+    # The one destructive command in the pipeline, so it is a *mode* of its own:
+    # it can never be combined with a training run, and it never touches
+    # ``Models/`` (the published artifacts and their provenance are not its
+    # business). The safety rules live in ``fsio.prune_run_directories`` — the
+    # newest runs survive, a run that is still alive is never deleted, and
+    # anything that is not a run directory is not ours to remove.
+    deleted = prune_run_directories(runs_dir, keep=keep, prefix=RUN_DIR_PREFIX)
+    for path in deleted:
+        LOG.info("Removed old run: %s", path)
+    LOG.info(
+        "Pruned %d run(s) under %s (kept the newest %d per model)",
+        len(deleted),
+        runs_dir,
+        keep,
+    )
+    return int(ExitCode.OK)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -251,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
             return _write_manifest(Path(args.models_dir))
         if args.verify_manifest:
             return _verify_manifest(Path(args.models_dir))
+        if args.prune_runs is not None:
+            return _prune_runs(Path(args.runs_dir), args.prune_runs)
 
         cfg = config_from_args(args)
         # Composition root: the orchestrator is handed a backend, never left to

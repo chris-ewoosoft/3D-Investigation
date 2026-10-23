@@ -14,7 +14,11 @@ import unittest
 from unittest import mock
 
 from ai_assistant.adapters import mcp as mcp_module
-from ai_assistant.domain.security import current_principal
+from ai_assistant.domain.security import (
+    DataClassification,
+    current_principal,
+    principal_for,
+)
 
 
 class _FakeGateway:
@@ -36,9 +40,20 @@ class _FakePlugins:
 
 
 class _Spec:
-    def __init__(self, name, description="desc") -> None:
+    def __init__(
+        self,
+        name,
+        description="desc",
+        *,
+        requires_approval: bool = False,
+        required_scope: str | None = None,
+        maximum_classification: DataClassification | None = None,
+    ) -> None:
         self.name = name
         self.description = description
+        self.requires_approval = requires_approval
+        self.required_scope = required_scope
+        self.maximum_classification = maximum_classification
 
 
 class _FakeServer:
@@ -239,6 +254,52 @@ class BuiltinWrapperDispatchTests(unittest.TestCase):
             "action": "login", "language": "vi",
             "username": "user", "password": "secret",
         })
+
+
+class McpCapabilityFilterTests(unittest.TestCase):
+    """MCP must not advertise what its principal/approval model cannot run."""
+
+    def test_only_tools_the_mcp_principal_can_execute_are_bound(self) -> None:
+        server = _FakeServer()
+        plugins = _FakePlugins([
+            _Spec("read_ok", required_scope="project.read",
+                  maximum_classification=DataClassification.INTERNAL),
+            _Spec("desktop_ok", required_scope="desktop.action",
+                  maximum_classification=DataClassification.RESTRICTED),
+            _Spec("write_denied", required_scope="project.write"),
+            _Spec("approval_denied", required_scope="project.read", requires_approval=True),
+            _Spec("app_action_viewer"),
+        ])
+        count = mcp_module.bind_plugin_tools(
+            server, lambda name, params: "{}", plugins,
+            principal=mcp_module.MCP_PRINCIPAL,
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual([tool.__name__ for tool in server.registered], ["read_ok", "desktop_ok"])
+
+    def test_a_lower_clearance_principal_does_not_see_restricted_tools(self) -> None:
+        reader = principal_for("reader", frozenset({"project.read"}))
+        server = _FakeServer()
+        count = mcp_module.bind_plugin_tools(
+            server, lambda name, params: "{}",
+            _FakePlugins([
+                _Spec("read_internal", required_scope="project.read",
+                      maximum_classification=DataClassification.INTERNAL),
+                _Spec("read_restricted", required_scope="project.read",
+                      maximum_classification=DataClassification.RESTRICTED),
+            ]),
+            principal=reader,
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(server.registered[0].__name__, "read_internal")
+
+    def test_without_a_principal_the_legacy_unfiltered_binding_stays_available(self) -> None:
+        server = _FakeServer()
+        count = mcp_module.bind_plugin_tools(
+            server, lambda name, params: "{}",
+            _FakePlugins([_Spec("write", required_scope="project.write")]),
+        )
+        self.assertEqual(count, 1)
 
 
 class BindPluginToolsEdgeTests(unittest.TestCase):

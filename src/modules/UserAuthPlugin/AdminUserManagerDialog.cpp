@@ -298,7 +298,14 @@ void AdminUserManagerDialog::onDeleteUser() {
 }
 
 void AdminUserManagerDialog::onGenerateLicenseKey() {
-    QString key = UserAuthPlugin::users()->generateLicenseKey();
+    AuthError code = AuthError::None;
+    QString key = UserAuthPlugin::users()->generateLicenseKey(&code);
+    if (key.isEmpty()) {
+        // The core refuses key generation without the administrator role.
+        ModernMessageBox::warning(this, UserAuthPlugin::translate("common.error"),
+                                  UserAuthPlugin::translate("auth.not_authorized"));
+        return;
+    }
     ModernMessageBox::information(this,
         UserAuthPlugin::translate("admin.new_key_title"),
         UserAuthPlugin::translate("admin.new_key_msg").arg(key));

@@ -1,0 +1,43 @@
+# ─── AIComputerVision gate dependencies ───────────────────────────────────────
+# The tools that decide whether the gates are green. They are *gates*, so they
+# belong in a hash-pinned lock exactly like the AIAssistant side (ADR 0012):
+# an unpinned ruff release can change the lint semantics of a build without
+# anyone reviewing the change, and an unpinned mypy can turn a green build
+# red (or the other way round) for reasons that have nothing to do with the
+# code under test.
+#
+#   pip install --require-hashes -r AIComputerVision/requirements-test.lock
+#
+# requirements-test.lock is the hash-pinned resolution of this file, generated
+# by:
+#   uv pip compile requirements-test.txt \
+#       --python-version 3.11 --generate-hashes \
+#       -o requirements-test.lock
+#
+# Not ``--universal`` on purpose: numpy==1.26.4 (the version the gates were
+# measured with) has no branch for Python >= 3.13, so a universal resolution has
+# no solution. The lock still carries *every* artifact digest of each pinned
+# version on PyPI, so the same file installs on ubuntu-latest and windows-latest.
+#
+# Every pin below is *exact* on purpose: the recorded lint / type-check /
+# coverage results were measured with these versions, and a range would let a
+# new release change a gate's verdict without a review.
+#
+# The versions are the ones the offline gates were measured with (Windows,
+# Python 3.11, 2026-10-22).
+ruff==0.16.0
+mypy==2.4.0
+coverage==7.16.2
+# The dataset tests parse a real data.yaml, and the export-contract tests
+# build a real ONNX graph and run a real smoke inference through the engine
+# the Qt application ships.
+PyYAML==6.0.2
+onnx==1.21.0
+# The engine the export contract is validated against: the same version
+# CMakeLists.txt pins for the desktop application (ONNXRUNTIME_VERSION), so
+# "the artifact loads" means "it loads under the runtime that ships".
+onnxruntime==1.20.1
+# numpy is pinned rather than left to the resolver: the contract tests build
+# real graphs and read real tensors, so the array library is part of what the
+# gate measures. This is the version the recorded results were measured with.
+numpy==1.26.4

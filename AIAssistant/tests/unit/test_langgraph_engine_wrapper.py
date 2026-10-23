@@ -44,6 +44,17 @@ class LangGraphEngineWrapperTests(unittest.TestCase):
         compiled = engine.compile()
         self.assertIsNotNone(compiled)
 
+    def test_compile_forwards_the_checkpointer(self) -> None:
+        """Dropping the checkpointer turns resumable runs stateless."""
+        engine = LangGraphEngine(AgentState)
+        sentinel = object()
+        builder = mock.Mock()
+        builder.compile.return_value = sentinel
+        engine._builder = builder
+        result = engine.compile(sentinel)  # type: ignore[arg-type]
+        builder.compile.assert_called_once_with(checkpointer=sentinel)
+        self.assertIs(result._graph, sentinel)  # type: ignore[attr-defined]
+
     def test_invoke_delegates_to_compiled_graph(self) -> None:
         """``invoke`` delegates to the compiled graph's invoke method."""
         mock_graph = mock.Mock()

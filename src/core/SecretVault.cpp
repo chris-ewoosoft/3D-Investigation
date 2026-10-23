@@ -13,15 +13,16 @@
 namespace {
 constexpr const char *kEncodedPrefix = "enc1:";
 constexpr const char *kPlainPrefix = "plain:";
-}
 
-QString SecretVault::encrypt(const QString &plainValue)
-{
-    if (plainValue.isEmpty()) return {};
+/// Test seam: makes the protection call fail. Thread-local, so a test never
+/// changes the behaviour of another thread.
+thread_local bool g_protectionFails = false;
 
 #ifdef Q_OS_WIN
-    // DPAPI CurrentUser scope: the blob is bound to this user profile on this
-    // machine, so the INI file alone is useless when copied elsewhere.
+/// Protects a value with DPAPI (CurrentUser scope). Returns an empty string
+/// when the OS call fails — the caller decides what to do with that.
+QString dpapiProtect(const QString &plainValue)
+{
     const std::wstring wideValue = plainValue.toStdWString();
     DATA_BLOB input;
     input.pbData = reinterpret_cast<BYTE *>(const_cast<wchar_t *>(wideValue.data()));
@@ -35,12 +36,72 @@ QString SecretVault::encrypt(const QString &plainValue)
         LocalFree(output.pbData);
         return QString::fromLatin1(kEncodedPrefix) + blob.toBase64();
     }
+    // The OS refused to protect the value.
     qWarning() << "SecretVault: CryptProtectData failed, error =" << GetLastError();
+    return {};
+}
+#endif
+
+} // namespace
+
+void SecretVault::setProtectionFailureForTesting(bool fail)
+{
+    g_protectionFails = fail;
+}
+
+bool SecretVault::protectionFailsForTesting()
+{
+    return g_protectionFails;
+}
+
+QString SecretVault::encrypt(const QString &plainValue)
+{
+    if (plainValue.isEmpty()) return {};
+
+#ifdef Q_OS_WIN
+    if (g_protectionFails) {
+        qWarning() << "SecretVault: the protection call was forced to fail (test seam).";
+    } else {
+        const QString sealed = dpapiProtect(plainValue);
+        if (!sealed.isEmpty()) return sealed;
+    }
 #else
     qWarning() << "SecretVault: no OS protection available on this platform; "
                   "storing value marked as unencrypted plaintext.";
 #endif
+    // The value could not be protected: fail closed (see the class contract)
+    // — never downgrade to cleartext just because DPAPI hiccuped.
+    return protectionFailureFallback(plainValue);
+}
+
+QString SecretVault::protectionFailureFallback(const QString &plainValue)
+{
+    if (plainValue.isEmpty()) return {};
+#ifdef Q_OS_WIN
+    // Fail closed: this platform HAS an OS backend, so a protection failure
+    // must not turn into a plaintext write. An empty result tells the caller
+    // "do not write anything — keep the value that is already stored".
+    return {};
+#else
+    // Documented platform limit: there is no OS backend at all on POSIX, so
+    // the value is stored marked as explicitly unprotected.
     return QString::fromLatin1(kPlainPrefix) + plainValue;
+#endif
+}
+
+SecretVault::Protection SecretVault::protectionOf(const QString &storedValue)
+{
+    if (storedValue.isEmpty()) return Protection::Empty;
+    if (storedValue.startsWith(QString::fromLatin1(kEncodedPrefix))) return Protection::Protected;
+    if (storedValue.startsWith(QString::fromLatin1(kPlainPrefix))) return Protection::PlaintextMarked;
+    return Protection::LegacyPlaintext;
+}
+
+bool SecretVault::isUnprotected(const QString &storedValue)
+{
+    const Protection protection = protectionOf(storedValue);
+    return protection == Protection::PlaintextMarked
+        || protection == Protection::LegacyPlaintext;
 }
 
 QString SecretVault::decrypt(const QString &storedValue)

@@ -12,8 +12,10 @@
 #include "AppShell.h"
 #include "AppConfig.h"
 #include "IAIAssistantService.h"
+#include "IAIModelLoadService.h"
 #include "IAIService.h"
 #include "IAppPaths.h"
+#include "IAuthService.h"
 #include "ILanguageService.h"
 #include "ILicenseService.h"
 #include "IMailService.h"
@@ -22,7 +24,10 @@
 #include "ISettingsService.h"
 #include "IShellService.h"
 #include "IUserManager.h"
+#include "IUserAdminService.h"
 #include "IUserPreferences.h"
+#include "IUserProfileService.h"
+#include "ISmtpCredentialService.h"
 #include "IViewerService.h"
 #include "SignalBus.h"
 
@@ -111,10 +116,29 @@ void TestAppShell::phaseOneRegistersCoreServicesOnly()
     QVERIFY(m_registry->get<IViewerService>());
     QVERIFY(m_registry->get<ISettingsService>());
 
+    // The segregated user contracts: the composition root registers the SAME
+    // UserManager instance under every narrow key, so a consumer that only
+    // needs the identity or the preferences resolves them without depending
+    // on the aggregate (Interface Segregation).
+    QVERIFY(m_registry->get<IAuthService>());
+    QVERIFY(m_registry->get<IUserProfileService>());
+    QVERIFY(m_registry->get<IUserAdminService>());
+    QVERIFY(m_registry->get<ISmtpCredentialService>());
+    QVERIFY(m_registry->get<IUserPreferences>());
+    QVERIFY(m_registry->get<ILicenseService>());
+    // …and they are the same object, not copies.
+    QCOMPARE(static_cast<IAuthService *>(m_registry->get<IUserManager>()),
+             m_registry->get<IAuthService>());
+    QCOMPARE(static_cast<IUserPreferences *>(m_registry->get<IUserManager>()),
+             m_registry->get<IUserPreferences>());
+    QCOMPARE(static_cast<ILicenseService *>(m_registry->get<IUserManager>()),
+             m_registry->get<ILicenseService>());
+
     // Deferred services must stay unregistered until MainWindow asks for
     // them right before loadPlugins().
     QVERIFY(!m_registry->get<IReconstructionService>());
     QVERIFY(!m_registry->get<IAIService>());
+    QVERIFY(!m_registry->get<IAIModelLoadService>());
     QVERIFY(!m_registry->get<IAIAssistantService>());
     QVERIFY(!m_registry->get<IMailService>());
 }
@@ -144,20 +168,48 @@ void TestAppShell::deferredPhaseIsIdempotent()
     ISceneService* scene = m_registry->get<ISceneService>();
     auto* recon = m_registry->get<IReconstructionService>();
     auto* ai = m_registry->get<IAIService>();
+    auto* modelLoader = m_registry->get<IAIModelLoadService>();
     auto* assistant = m_registry->get<IAIAssistantService>();
     auto* mail = m_registry->get<IMailService>();
     QVERIFY(scene);
     QVERIFY(recon);
     QVERIFY(ai);
+    QVERIFY(modelLoader);
     QVERIFY(assistant);
     QVERIFY(mail);
 
     // MainWindow may call this more than once; live instances held by dock
     // widgets and plugins must not be silently replaced.
+    //
+    // Comparing the registry entries before and after proves NOTHING here:
+    // the registry REFUSES a duplicate registration (the first one wins), so
+    // the entries are the same pointers either way. The real defect of a
+    // non-idempotent deferred phase is that the shell REPLACES its
+    // instances — destroying the old ones — while the registry keeps
+    // pointing at the destroyed objects. What has to be checked is therefore
+    // the LIVENESS of the instances, not the identity of the registry
+    // entries.
+    QPointer<IReconstructionService> reconAlive(recon);
+    QPointer<IAIModelLoadService> modelLoaderAlive(modelLoader);
+    QPointer<IAIAssistantService> assistantAlive(assistant);
+
     m_shell->initializeDeferredServices();
+
+    QVERIFY2(reconAlive,
+             "initializeDeferredServices() replaced a live reconstruction "
+             "service — the registry would keep pointing at a destroyed object");
+    QVERIFY2(modelLoaderAlive,
+             "initializeDeferredServices() replaced a live model loader — the "
+             "registry would keep pointing at a destroyed object");
+    QVERIFY2(assistantAlive,
+             "initializeDeferredServices() replaced a live assistant — the "
+             "registry would keep pointing at a destroyed object");
+
+    // The registry still resolves the very same instances.
     QCOMPARE(m_registry->get<ISceneService>(), scene);
     QCOMPARE(m_registry->get<IReconstructionService>(), recon);
     QCOMPARE(m_registry->get<IAIService>(), ai);
+    QCOMPARE(m_registry->get<IAIModelLoadService>(), modelLoader);
     QCOMPARE(m_registry->get<IAIAssistantService>(), assistant);
     QCOMPARE(m_registry->get<IMailService>(), mail);
 }

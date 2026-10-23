@@ -16,6 +16,7 @@ from typing import Any, cast
 from ai_assistant.domain.governance import scrub_pii
 from ai_assistant.ports import LLMBackend, LLMRuntime
 from ai_assistant.settings import load_agent_runtime_settings
+from ai_assistant.tools.aliases import TOOL_NAME_ALIASES, canonical_tool_name
 
 logger = logging.getLogger("ai_assistant.agents.completion")
 
@@ -46,17 +47,9 @@ CRITIC_JSON_SCHEMA = {
     "additionalProperties": False,
 }
 
-# Normalize legacy/alias tool names to canonical
-_TOOL_NAME_ALIASES = {
-    "app_action_reconstruction": "application_action",
-    "app_action_general": "application_action",
-    "app_action_ai": "application_action",
-    "app_action_viewer": "application_action",
-    "application_actions": "application_action",
-    "app_action": "application_action",
-    "desktop_action": "application_action",
-    "ui_action": "application_action",
-}
+# Kept as a module alias for callers/tests that imported the old private
+# table; the map itself is owned by ``tools.aliases``.
+_TOOL_NAME_ALIASES = TOOL_NAME_ALIASES
 
 
 def _strip_think_tags(text: str) -> str:
@@ -100,7 +93,7 @@ def parse_tool_call(
       (tool_name, params)  — where tool_name may be "_step_answer" or "_validation_error"
     """
     def _normalise(name: str) -> str:
-        return _TOOL_NAME_ALIASES.get(name, name)
+        return canonical_tool_name(name)
 
     try:
         data = json.loads(response_text.strip())
@@ -149,7 +142,10 @@ def _record_and_decode_content(response: dict[str, Any],
                               "params": json.loads(call.get("arguments", "{}"))}, ensure_ascii=False)
     else:
         content = message.get("content", "")
-    logger.info("Constrained LLM response%s: %s", f" ({label})" if label else "", content)
+    # ADR 0032: the remote leg scrubs exactly like the local leg — raw model
+    # output can echo secrets/PII from the context into a plaintext log file,
+    # and only the *log call* is scrubbed; the value itself stays intact.
+    logger.info("Constrained LLM response%s: %s", f" ({label})" if label else "", scrub_pii(content))
     return content
 
 

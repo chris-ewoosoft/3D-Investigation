@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+import inspect
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
 from .domain.security import Principal
 from .domain.tasks import AgentTask, TaskStatus
-from .domain.tools import ToolRequest, ToolResult
+from .domain.tools import ToolRequest, ToolResult, ToolSpec
 
 
 class LockLike(Protocol):
@@ -132,21 +134,33 @@ class AgentOrchestrator(Protocol):
 
 
 class TaskStore(Protocol):
-    def create(self, task: AgentTask) -> None: ...
-    def get(self, task_id: str) -> AgentTask | None: ...
-    def save(self, task: AgentTask) -> None: ...
+    def commit(
+        self, task: AgentTask, *,
+        expected: TaskStatus | None = None,
+        events: Sequence[tuple[str, dict[str, Any]]] = (),
+    ) -> bool:
+        """Persist ``task`` and its events as **one unit of work**.
 
-    def save_if_status(self, task: AgentTask, expected: TaskStatus) -> bool:
-        """Compare-and-set write: persist ``task`` only when the stored status
-        still equals ``expected``; return whether the write happened.
+        ``expected`` selects the mode:
 
-        This is the TOCTOU guard for the A2A worker: without it a cancel that
-        lands while the executor runs is overwritten by an unconditional
-        ``UPDATE ... SET status='completed'``.
+        * ``None`` — insert the task; it must not exist yet.
+        * a status — compare-and-set: the write happens only while the stored
+          status still equals it, and the return value says whether it did.
+          This is the TOCTOU guard for the A2A worker: without it a cancel
+          that lands while the executor runs is overwritten by an
+          unconditional ``UPDATE ... SET status='completed'``.
+
+        The state write and the event append are the same fact observed
+        twice. A subscriber that tails the event log must see a transition
+        exactly once, and must never see a task whose state changed without
+        its event. Two separate transactions break both halves of that
+        promise: a crash between them leaves a task that is ``completed``
+        with no terminal event, and a subscriber waits forever for an event
+        that will never arrive (ADR 0032).
         """
         ...
 
-    def append_event(self, task_id: str, kind: str, data: dict[str, Any]) -> None: ...
+    def get(self, task_id: str) -> AgentTask | None: ...
 
     def events(self, task_id: str, *, since: int = 0) -> Iterable[dict[str, Any]]:
         """Yield events with an ordering key strictly greater than ``since``.
@@ -157,7 +171,57 @@ class TaskStore(Protocol):
         """
         ...
 
-    def list(self, *, context_id: str | None = None, limit: int = 100) -> Iterable[AgentTask]: ...
+    def list(self, *, context_id: str | None = None, limit: int = 100, owner: str | None = None) -> Iterable[AgentTask]: ...
+
+    def prune(self, retention_days: int) -> int:
+        """Delete terminal tasks older than ``retention_days``; return the count."""
+        ...
+
+
+def store_supports_cursor(events: Any) -> bool:
+    """Whether a store's ``events`` callable accepts the ``since`` cursor.
+
+    The duck-typed fallback used to be detected by catching the ``TypeError``
+    the *call* raised when the store did not know the keyword. That also
+    swallowed a ``TypeError`` raised **inside** the store, and then called the
+    store a second time with the old signature — a real bug in the store
+    turned into "this store is old". The signature is asked instead.
+    """
+    try:
+        parameters = inspect.signature(events).parameters
+    except (TypeError, ValueError):
+        return False
+    return "since" in parameters
+
+
+class ToolCatalogEntry(Protocol):
+    """One registered tool: its policy record and the executor behind it."""
+
+    @property
+    def spec(self) -> ToolSpec: ...
+
+    @property
+    def executor(self) -> ToolExecutor: ...
+
+
+class ToolCatalog(Protocol):
+    """The catalogue of tools the platform is allowed to execute.
+
+    ADR 0032: the application layer used to depend on the *concrete*
+    ``plugins.registry.PluginRegistry`` — a peer layer's class, reached
+    through an import-linter exception. The catalogue is a port, so the
+    policy chokepoint depends on the *contract* and the plugin layer stays
+    replaceable (and the HTTP adapter's own duck-typed duplicate of it
+    becomes redundant).
+    """
+
+    def tool(self, name: str) -> ToolCatalogEntry | None:
+        """The registered tool, or ``None`` when the name is unknown."""
+        ...
+
+    def specs(self) -> tuple[ToolSpec, ...]:
+        """Every registered policy record — the catalogue's own listing."""
+        ...
 
 
 class LLMRuntime(Protocol):
@@ -170,10 +234,20 @@ class LLMRuntime(Protocol):
 
     The lock is typed structurally (:class:`LockLike`) so both
     ``threading.Lock`` and ``threading.RLock`` satisfy it.
+
+    ``model_lease`` is the drain contract (ADR 0032): a run pins one backend
+    for its whole length, so an admin reload cannot swap the model in the
+    middle of it. It used to be duck-typed with a ``getattr`` probe, which
+    meant a runtime that forgot the method silently lost the guarantee — no
+    type error, no log. The port now states it.
     """
 
     llm: LLMBackend | None
     llm_lock: LockLike
+
+    def model_lease(self) -> AbstractContextManager[None]:
+        """Pin the current backend for the duration of the block."""
+        ...
 
 
 class RagContextPort(Protocol):
@@ -188,9 +262,21 @@ class RagContextPort(Protocol):
     def get_context(self, query: str, query_image_b64: str | None = None, result_k: int | None = None) -> tuple[Any, ...]: ...
 
 
+class VisionRuntimePort(Protocol):
+    """What the chatbot specialist needs from the LLM runtime handle.
+
+    The handle is a *runtime* concern (backend, lock, lease) — the prompt
+    building lives behind :class:`PromptBuilder`. Declaring the one flag the
+    specialist reads keeps the boundary typed: a collaborator typed ``Any``
+    cannot be checked, and an unchecked collaborator is exactly how a chat
+    route ends up calling a method that does not exist (ADR 0029).
+    """
+
+    is_vision_model: bool
+
+
 class AgentTaskExecutor(Protocol):
     def __call__(self, task: AgentTask) -> dict[str, Any]: ...
-
 
 ToolEventSink = Callable[[ToolRequest, ToolResult], None]
 
@@ -215,3 +301,69 @@ class PendingActionPort(Protocol):
     def load(self) -> None: ...
     def save(self) -> None: ...
     def cleanup(self, cutoff: float) -> bool: ...
+
+
+class StorageCryptoError(RuntimeError):
+    """Base class for at-rest storage failures (ADR 0027/0028).
+
+    The exception lives in ``ports`` so a layer that only holds a
+    :class:`FieldCipher` can react to a failed seal without importing the
+    adapter that implements it.
+    """
+
+
+class StorageKeyError(StorageCryptoError):
+    """The key is missing, malformed or does not match the ciphertext."""
+
+
+class StorageDecryptionError(StorageCryptoError):
+    """A sealed field failed authentication or could not be decoded."""
+
+
+#: The at-rest envelope marker (ADR 0027/0028/0029). It is a *contract*, not
+#: an implementation detail: the persistence adapters seal with it, the
+#: kernel helpers recognise it, and the Qt client produces the same bytes.
+#: Keeping the literal here is what lets a kernel module (which may not
+#: import an adapter) tell a sealed file from a plaintext one.
+SEALED_BINARY_PREFIX = b"enc:v1:"
+
+#: The associated-data context of a chat attachment file. The Qt client seals
+#: the attachment it stores with exactly this context, so the AI service can
+#: open it with the platform at-rest key (ADR 0029). It is a contract between
+#: two processes, which is why it lives here.
+CHAT_ATTACHMENT_CONTEXT = "chat.attachment"
+
+
+class FieldCipher(Protocol):
+    """Authenticating cipher for state that reaches local disk (ADR 0027/0028).
+
+    The composition root loads one key and injects the cipher into every
+    adapter that persists user content: the task store, the pending-action
+    store and the RAG cache. The protocol lives in ``ports`` so those adapters
+    and the ``rag`` layer share one inward-facing contract instead of
+    importing each other.
+
+    ``context`` names the field being sealed. It becomes the AEAD associated
+    data, so a ciphertext moved to a different field fails authentication
+    instead of being read as if it belonged there.
+    """
+
+    def seal(self, value: str, *, context: str) -> str:
+        """Return an authenticated envelope for ``value`` bound to ``context``."""
+        ...
+
+    def open(self, value: str, *, context: str) -> str:
+        """Return the plaintext, accepting legacy unsealed values unchanged."""
+        ...
+
+    def is_sealed(self, value: str) -> bool:
+        """Return whether ``value`` already carries the sealed envelope."""
+        ...
+
+    def seal_bytes(self, value: bytes, *, context: str) -> bytes:
+        """Return an authenticated binary envelope for ``value``."""
+        ...
+
+    def open_bytes(self, value: bytes, *, context: str) -> bytes:
+        """Return the plaintext bytes, refusing anything not sealed."""
+        ...

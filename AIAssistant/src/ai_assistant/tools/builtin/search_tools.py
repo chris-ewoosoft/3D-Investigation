@@ -8,7 +8,7 @@ from typing import Any
 
 from ai_assistant.config.paths import get_paths
 
-from .path_utils import _AGENT_BLOCKED_DIRS, agent_safe_path
+from .path_utils import agent_safe_path, is_blocked_dir, is_secret_name
 
 _agent_safe_path = agent_safe_path
 
@@ -19,7 +19,7 @@ def _walk_directory_recursive(abs_path: str, project_root: str,
     entries: list[dict[str, Any]] = []
     count = 0
     for root, dirs, files in os.walk(abs_path):
-        dirs[:] = sorted(d for d in dirs if d not in _AGENT_BLOCKED_DIRS)
+        dirs[:] = sorted(d for d in dirs if not is_blocked_dir(d))
         depth = root.replace(abs_path, "").count(os.sep)
         if depth >= max_depth:
             dirs.clear()
@@ -70,7 +70,7 @@ def tool_list_directory(params: dict[str, Any]) -> dict[str, Any]:
             entries = _walk_directory_recursive(abs_path, project_root, max_depth, max_entries)
         else:
             for item in sorted(os.listdir(abs_path)):
-                if item in _AGENT_BLOCKED_DIRS:
+                if is_blocked_dir(item):
                     continue
                 if count >= max_entries:
                     break
@@ -105,7 +105,7 @@ def tool_find_files(params: dict[str, Any]) -> dict[str, Any]:
     matches = []
     try:
         for root, dirs, files in os.walk(abs_root):
-            dirs[:] = sorted(d for d in dirs if d not in _AGENT_BLOCKED_DIRS)
+            dirs[:] = sorted(d for d in dirs if not is_blocked_dir(d))
             for filename in sorted(files):
                 relative_to_root = os.path.relpath(os.path.join(root, filename), abs_root)
                 if not fnmatch.fnmatch(filename, pattern) and not fnmatch.fnmatch(relative_to_root, pattern):
@@ -155,10 +155,16 @@ def tool_search_text(params: dict[str, Any]) -> dict[str, Any]:
         )
         search_root = os.path.dirname(abs_search) if os.path.isfile(abs_search) else abs_search
         for root, dirs, files in walk_roots:
-            dirs[:] = sorted(d for d in dirs if d not in _AGENT_BLOCKED_DIRS)
+            dirs[:] = sorted(d for d in dirs if not is_blocked_dir(d))
             for filename in sorted(files):
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in text_exts:
+                    continue
+                # A secret file is skipped by *name*, not by extension: the
+                # walk reaches ``secrets.json`` (a ``.json`` file) long
+                # before any dotfile, and the extension filter would let it
+                # through. The name rule is the one that covers both.
+                if is_secret_name(filename):
                     continue
                 relative_to_search = os.path.relpath(os.path.join(root, filename), search_root)
                 relative_to_project = os.path.relpath(os.path.join(root, filename), project_root)

@@ -1,9 +1,11 @@
+#include "BlockingCall.h"
 #include "MailSettingsDialog.h"
 
 #include "IAppContext.h"
 #include "IMailService.h"
 #include "ModernMessageBox.h"
-#include "IUserManager.h"
+#include "IAuthService.h"
+#include "IUserPreferences.h"
 
 #include <QDialog>
 #include <QFormLayout>
@@ -19,8 +21,16 @@ namespace MailSettingsDialog {
 
 void show(QWidget *parent, IAppContext *context, IMailService *mailService)
 {
-    auto* users = context->services()->get<IUserManager>();
-    if (!users) return;
+    // The narrow contracts: the current identity (IAuthService) and the
+    // per-user preferences/secrets (IUserPreferences) — not the whole user
+    // service.
+    auto* auth = context->services()->get<IAuthService>();
+    auto* prefs = context->services()->get<IUserPreferences>();
+    if (!auth || !prefs) return;
+
+    // The background tasks of this dialog (the connection test). The wait at
+    // the end of the function keeps them from outliving the dialog.
+    blocking::TaskTracker tasks;
 
     QDialog dlg(parent);
     dlg.setWindowTitle(context->translate("mail.settings"));
@@ -31,15 +41,15 @@ void show(QWidget *parent, IAppContext *context, IMailService *mailService)
     auto *email = new QLineEdit(mailService ? mailService->senderEmail() : QString(), &dlg);
     auto *password = new QLineEdit(&dlg);
     password->setEchoMode(QLineEdit::Password);
-    auto *displayName = new QLineEdit(users->currentUsername(), &dlg);
+    auto *displayName = new QLineEdit(auth->currentUsername(), &dlg);
     auto *signature = new QTextEdit(&dlg);
     signature->setAcceptRichText(true);
     signature->setMinimumHeight(110);
 
-    const QString username = users->currentUsername();
-    password->setText(users->getUserSecret(username, "mail_password"));
-    displayName->setText(users->getUserPref(username, "mail_display_name", username));
-    signature->setHtml(users->getUserPref(
+    const QString username = auth->currentUsername();
+    password->setText(prefs->getUserSecret(username, "mail_password"));
+    displayName->setText(prefs->getUserPref(username, "mail_display_name", username));
+    signature->setHtml(prefs->getUserPref(
         username,
         "mail_signature",
         QString("<b>%1</b><br>3D-Reconstruction").arg(username)));
@@ -65,7 +75,7 @@ void show(QWidget *parent, IAppContext *context, IMailService *mailService)
     QObject::connect(saveBtn, &QPushButton::clicked, &dlg, [&]() {
         if (mailService) {
             mailService->setCredentials(email->text().trimmed(), password->text(), displayName->text().trimmed());
-            context->services()->get<IUserManager>()->setUserPref(username, "mail_signature", signature->toHtml());
+            context->services()->get<IUserPreferences>()->setUserPref(username, "mail_signature", signature->toHtml());
         }
         dlg.accept();
     });
@@ -88,14 +98,17 @@ void show(QWidget *parent, IAppContext *context, IMailService *mailService)
                 ModernMessageBox::warning(&dlg, context->translate("common.error"), result.second);
             }
         });
-        watcher->setFuture(QtConcurrent::run([mailService]() {
+        watcher->setFuture(blocking::run([mailService]() {
             QString error;
             const bool ok = mailService->testConnection(error);
             return qMakePair(ok, error);
-        }));
+        }, &tasks));
     });
 
     dlg.exec();
+    // The connection test may still be running: it must not outlive the
+    // dialog (and the mail service it calls). The wait is bounded.
+    tasks.waitForFinished(3000);
 }
 
 }

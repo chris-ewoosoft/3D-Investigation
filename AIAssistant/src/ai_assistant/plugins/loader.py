@@ -52,6 +52,7 @@ def load_entrypoint_plugins(registry: PluginRegistry, group: str = "ai_assistant
         if not callable(register):
             msg = f"Plugin {plugin_id} has no register method"
             raise TypeError(msg)
-        register(registry)
+        with registry.registration_scope(plugin_id):
+            register(registry)
         loaded.append(plugin_id)
     return tuple(loaded)

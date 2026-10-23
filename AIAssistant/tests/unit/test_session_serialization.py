@@ -19,13 +19,17 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+from pydantic import ValidationError
+
 import ai_assistant.agents.context as agents_context
 from ai_assistant.agents.models import (
     AgentApproveRequest,
+    AgentCancelRequest,
     AgentExecuteRequest,
     AgentUiActionResultRequest,
 )
 from ai_assistant.agents.service import AgentService
+from ai_assistant.agents.session_locks import SessionLockPool
 from ai_assistant.domain.errors import ServiceUnavailableError
 
 # Generous on purpose: a gate timeout means the lock itself broke, not that
@@ -38,11 +42,6 @@ class SessionSerializationTests(unittest.TestCase):
         llm = MagicMock()
         llm.llm = MagicMock()
         return AgentService(llm_runtime=llm)
-
-    def test_the_lock_is_reused_per_session_and_never_shared(self):
-        service = self._service()
-        self.assertIs(service._session_lock("s1"), service._session_lock("s1"))
-        self.assertIsNot(service._session_lock("s1"), service._session_lock("s2"))
 
     def test_two_runs_for_one_session_never_overlap(self):
         service = self._service()
@@ -244,6 +243,95 @@ class SessionSerializationTests(unittest.TestCase):
         self.assertFalse(ack_thread.is_alive())
 
 
+class SessionLockPoolTests(unittest.TestCase):
+    """The pool is bounded by live sessions, not by session ids ever seen."""
+
+    def test_the_entry_is_dropped_after_the_last_user_leaves(self) -> None:
+        pool = SessionLockPool()
+        for index in range(10_000):
+            with pool.hold(f"session-{index}"):
+                self.assertEqual(pool.active_sessions(), 1)
+        self.assertEqual(pool.active_sessions(), 0)
+
+    def test_a_queued_thread_keeps_its_entry_until_it_runs(self) -> None:
+        pool = SessionLockPool()
+        first_inside = threading.Event()
+        release_first = threading.Event()
+        second_inside = threading.Event()
+        self.addCleanup(release_first.set)
+
+        def first() -> None:
+            with pool.hold("s1"):
+                first_inside.set()
+                if not release_first.wait(timeout=_GATE_TIMEOUT):
+                    msg = "gate was never released"
+                    raise RuntimeError(msg)
+
+        def second() -> None:
+            with pool.hold("s1"):
+                second_inside.set()
+
+        first_thread = threading.Thread(target=first)
+        first_thread.start()
+        self.assertTrue(first_inside.wait(timeout=_GATE_TIMEOUT))
+        second_thread = threading.Thread(target=second)
+        second_thread.start()
+
+        # The second thread increments the entry's user count *before* it
+        # blocks. Wait until both users are registered; the entry must still
+        # be the one the first thread holds (no second lock was created).
+        deadline = time.monotonic() + _GATE_TIMEOUT
+        while time.monotonic() < deadline:
+            with pool._guard:
+                entry = pool._entries.get("s1")
+                if entry is not None and entry.users == 2:
+                    break
+            time.sleep(0.01)
+        else:
+            self.fail("the queued thread never registered as a user")
+        self.assertFalse(second_inside.is_set())
+
+        release_first.set()
+        first_thread.join(timeout=_GATE_TIMEOUT)
+        second_thread.join(timeout=_GATE_TIMEOUT)
+        self.assertTrue(second_inside.is_set())
+        self.assertEqual(pool.active_sessions(), 0)
+
+    def test_reentry_uses_the_same_lock_and_distinct_sessions_do_not(self) -> None:
+        pool = SessionLockPool()
+        with pool.hold("s1"):
+            with pool._guard:
+                first = pool._entries["s1"].lock
+            with pool.hold("s1"):
+                with pool._guard:
+                    self.assertIs(pool._entries["s1"].lock, first)
+        with pool.hold("s2"):
+            with pool._guard:
+                self.assertIsNot(pool._entries["s2"].lock, first)
+
+
+class SessionIdBoundsTests(unittest.TestCase):
+    """A session id becomes a checkpointer thread id and a lock-pool key."""
+
+    def test_execute_rejects_an_oversized_session_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            AgentExecuteRequest(task="x", session_id="s" * 129)
+
+    def test_approve_rejects_an_oversized_session_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            AgentApproveRequest(action_id="a", approved=True, session_id="s" * 129)
+
+    def test_cancel_rejects_an_oversized_session_id(self) -> None:
+        with self.assertRaises(ValidationError):
+            AgentCancelRequest(session_id="s" * 129)
+
+    def test_a_128_character_session_id_is_accepted(self) -> None:
+        self.assertEqual(
+            AgentExecuteRequest(task="x", session_id="s" * 128).session_id,
+            "s" * 128,
+        )
+
+
 class GlobalRunBudgetTests(unittest.TestCase):
     """ADR 0024: ``AGENT_MAX_CONCURRENT_RUNS`` bounds total concurrency.
 
@@ -315,6 +403,47 @@ class GlobalRunBudgetTests(unittest.TestCase):
                 service.execute(AgentExecuteRequest(task="explode", session_id="s1"))
             result = service.execute(AgentExecuteRequest(task="retry", session_id="s2"))
         self.assertEqual(result["status"], "completed")
+
+    def test_a_resume_is_refused_while_the_budget_is_full(self) -> None:
+        """ADR 0024 follows the ADR 0040 rule: a resume is a run.
+
+        Both resume paths used to skip the global budget, so a burst of
+        approvals/desktop acks could stack graphs on the single local model
+        even while ``execute`` was capped.
+        """
+        service = self._service(1)
+        slots = service._run_slots
+        self.assertIsNotNone(slots)
+        slots.acquire()
+        self.addCleanup(slots.release)
+        with self.assertRaises(ServiceUnavailableError):
+            service.approve(
+                AgentApproveRequest(action_id="a1", approved=True, session_id="s1")
+            )
+        with self.assertRaises(ServiceUnavailableError):
+            service.ui_action_result(
+                AgentUiActionResultRequest(request_id="r1", success=True, result={})
+            )
+
+    def test_a_failed_resume_releases_its_slot(self) -> None:
+        """A resume that crashes must return its slot, like a fresh run does."""
+        service = self._service(1)
+        with patch.object(service._approval_service, "approve", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                service.approve(
+                    AgentApproveRequest(action_id="a1", approved=True, session_id="s1")
+                )
+        with patch.object(
+            service._ui_action_service, "ui_action_result", side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                service.ui_action_result(
+                    AgentUiActionResultRequest(request_id="r1", success=True, result={})
+                )
+        # Both failures returned their slot: the cap did not leak to the
+        # next run (a leak would surface as a 503 after two bad resumes).
+        self.assertTrue(service._run_slots.acquire(blocking=False))
+        service._run_slots.release()
 
     def test_a_zero_budget_keeps_the_facade_unlimited(self) -> None:
         self.assertIsNone(self._service(0)._run_slots)

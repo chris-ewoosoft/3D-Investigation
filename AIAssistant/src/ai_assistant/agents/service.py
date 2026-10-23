@@ -17,11 +17,12 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from ..application.coordination import TaskCoordinator
-from ..domain.errors import NotFoundError, ServiceUnavailableError
+from ..domain.errors import ModelNotLoadedError, NotFoundError, ServiceUnavailableError
 from ..orchestration.specialists.code import (
     CodingTaskContext,
     is_coding_task,
@@ -42,6 +43,7 @@ from .models import (
 )
 from .pending_store import MemoryPendingStore
 from .prompts import build_agent_system_prompt
+from .session_locks import SessionLockPool
 from .ui_action_service import UIActionService
 
 logger = logging.getLogger("ai_assistant.agents.service")
@@ -61,7 +63,9 @@ class AgentService:
                  tool_gateway: ToolGateway | None = None,
                  checkpointer: Any = None, a2a_router: Any = None,
                  task_coordinator: TaskCoordinator | None = None,
-                 max_concurrent_runs: int = 0) -> None:
+                 max_concurrent_runs: int = 0,
+                 delegate_fn: Callable[..., Any] | None = None,
+                 authorise_delegation_fn: Callable[..., tuple[bool, str | None]] | None = None) -> None:
         self.llm_runtime = llm_runtime
         # Durability is injected (ADR 0003): the composition root wires the
         # file-backed store; a bare facade (tests, embeds) keeps approvals in
@@ -70,12 +74,11 @@ class AgentService:
             pending_actions if pending_actions is not None else MemoryPendingStore()
         )
         self.pending_lock = pending_lock if pending_lock is not None else threading.Lock()
-        # One re-entrant run lock per session id (review finding 3).  Entries
-        # live for the process: a pruning cache could build a *second* lock for
-        # a session while an older thread is still queued on the first, which
-        # is exactly the overlap this lock exists to prevent.  Cost is one tiny
-        # lock per distinct session the client has opened.
-        self._session_locks: dict[str, threading.RLock] = {}
+        # One re-entrant run lock per live session id (review finding 3).
+        # The pool reference-counts holders *and* queued threads and drops the
+        # entry when the last one leaves, so the map is bounded by current
+        # concurrency rather than by every session id ever seen.
+        self._session_locks = SessionLockPool()
         # Global run budget (ADR 0024): one run per session is already
         # enforced below, but a deployment can also cap total concurrency so
         # a burst of sessions cannot exhaust the single local model. Zero
@@ -112,6 +115,14 @@ class AgentService:
             "checkpointer": self._checkpointer,
             "task_coordinator": self.task_coordinator,
         }
+        if delegate_fn is not None:
+            # The composition root injects a delegate bound to its A2A
+            # registry; a bare facade keeps the local-only default.
+            shared["delegate_fn"] = delegate_fn
+        if authorise_delegation_fn is not None:
+            # The composition root binds the live plugin tool row here; a bare
+            # facade keeps the builtin-only fail-closed default.
+            shared["authorise_delegation_fn"] = authorise_delegation_fn
         self._ctx = AgentRunContext(**shared, a2a_router=a2a_router)
         self._approval_service = ApprovalService(**shared)
         self._ui_action_service = UIActionService(**shared)
@@ -129,43 +140,92 @@ class AgentService:
                 self._save_pending()
                 logger.info("Cleaned up expired pending agent actions")
 
-    def _session_lock(self, session_id: str) -> threading.RLock:
-        """The session's run lock, created on first use.
+    def _hold_session(self, session_id: str) -> Any:
+        """Serialize work for one session through the reference-counted pool."""
+        return self._session_locks.hold(session_id)
 
-        ``dict.setdefault`` is a single atomic operation under the GIL, so
-        concurrent first runs of the same session can not build two locks.
+    @contextmanager
+    def _model_lease(self) -> Iterator[None]:
+        """Pin one model backend for the whole run.
+
+        ADR 0032: the drain contract is part of the ``LLMRuntime`` port, so
+        it is called directly. It used to be duck-typed with a ``getattr``
+        probe: a runtime that forgot the method silently lost the guarantee
+        — no type error, no log — and the admin reload could swap the model
+        in the middle of a run.
+
+        ADR 0040: every entry point that runs the graph takes this lease
+        (``execute``, ``approve``, ``ui_action_result``), not only the fresh
+        run. The two resume paths were unguarded, so a reload could free the
+        backend under a graph that was already executing.
         """
-        return self._session_locks.setdefault(session_id, threading.RLock())
+        runtime = self.llm_runtime
+        if runtime is None:
+            # ``_require_llm`` refuses the run before this point; the guard
+            # is here so the port's contract is not violated on the way out.
+            msg = "The LLM runtime is not configured"
+            raise ModelNotLoadedError(msg)
+        with runtime.model_lease():
+            yield
+
+    def _acquire_run_slot(self) -> threading.BoundedSemaphore | None:
+        """Take one global run slot or refuse with a retryable 503 (ADR 0024).
+
+        The session lock is always acquired first: a run queued behind its own
+        session must not hold one of the few global slots, or two same-session
+        requests could consume the entire budget and 503 unrelated sessions.
+        Only a run that can actually execute spends a slot.
+
+        ADR 0040 pinned the model lease to every entry point that runs the
+        graph; the budget follows the same rule. A resume is a run too, so
+        ``approve`` and ``ui_action_result`` take a slot exactly like
+        ``execute`` — leaving them outside the cap let a burst of resumes
+        exceed ``AGENT_MAX_CONCURRENT_RUNS`` on the single local model.
+        """
+        slots = self._run_slots
+        if slots is not None and not slots.acquire(blocking=False):
+            # Backpressure: refuse immediately (503) instead of queueing behind
+            # the single local model; the caller retries.
+            msg = ("The agent run budget is exhausted; retry after a running "
+                   "run finishes (AGENT_MAX_CONCURRENT_RUNS).")
+            raise ServiceUnavailableError(msg)
+        return slots
+
+    def _release_run_slot(self, slots: threading.BoundedSemaphore | None) -> None:
+        """Return a slot on every exit path, including a crashing run."""
+        if slots is not None:
+            slots.release()
 
     def execute(self, request: AgentExecuteRequest, *,
                 event_sink: Callable[[dict[str, Any]], None] | None = None,
                 client_host: str = "unknown") -> dict[str, Any]:
         self._cleanup_pending()
         self._require_llm()
-        slots = self._run_slots
-        if slots is not None and not slots.acquire(blocking=False):
-            # Backpressure (ADR 0024): refuse immediately (503) instead of
-            # queueing behind the single local model; the caller retries.
-            msg = ("The agent run budget is exhausted; retry after a running "
-                   "run finishes (AGENT_MAX_CONCURRENT_RUNS).")
-            raise ServiceUnavailableError(msg)
-        try:
-            req_start = time.monotonic()
-            task = request.task
-            session_id = request.session_id or "agent_default"
-            # One run at a time per session (review finding 3): concurrent executes
-            # for the same session share one checkpointer thread_id and would
-            # clobber the coordinator's running record, so they queue here while
-            # other sessions keep running in parallel.  ``cancel``/``approve`` stay
-            # outside this lock on purpose — they must work while a run holds it.
-            with self._session_lock(session_id):
-                return self._execute_locked(
-                    request, session_id=session_id, task=task, req_start=req_start,
-                    event_sink=event_sink, client_host=client_host,
-                )
-        finally:
-            if slots is not None:
-                slots.release()
+        req_start = time.monotonic()
+        task = request.task
+        session_id = request.session_id or "agent_default"
+        # One run at a time per session (review finding 3): concurrent executes
+        # for the same session share one checkpointer thread_id and would
+        # clobber the coordinator's running record, so they queue here while
+        # other sessions keep running in parallel.  ``cancel`` stays outside
+        # this lock on purpose — it must answer while a run holds it; approval
+        # and the desktop ack resume the run, so they re-enter the same lock.
+        #
+        # The global budget is acquired *after* the session lock: taking it
+        # first let a run queued behind its own session hold one of the few
+        # global slots, so two same-session requests could consume the entire
+        # budget and 503 unrelated sessions. Now only a run that can actually
+        # execute spends a slot.
+        with self._hold_session(session_id):
+            slots = self._acquire_run_slot()
+            try:
+                with self._model_lease():
+                    return self._execute_locked(
+                        request, session_id=session_id, task=task, req_start=req_start,
+                        event_sink=event_sink, client_host=client_host,
+                    )
+            finally:
+                self._release_run_slot(slots)
 
     def _execute_locked(
         self, request: AgentExecuteRequest, *, session_id: str, task: str,
@@ -235,24 +295,42 @@ class AgentService:
         concurrent execute of the same session — exactly the overlap the lock
         exists to prevent. ``cancel`` stays lock-free: it must answer while a
         run holds one.
+
+        It also takes the model lease and the global run slot for the same
+        reason ``execute`` does. The resume *is* a run: leaving it unleased let
+        ``/admin/reload-model`` wait only for fresh runs and free the backend
+        under a graph that had already started (ADR 0040); leaving it outside
+        the budget let a burst of resumes exceed
+        ``AGENT_MAX_CONCURRENT_RUNS`` on the single local model (ADR 0024).
         """
         self._cleanup_pending()
-        with self._session_lock(request.session_id):
-            return self._approval_service.approve(request)
+        with self._hold_session(request.session_id):
+            slots = self._acquire_run_slot()
+            try:
+                with self._model_lease():
+                    return self._approval_service.approve(request)
+            finally:
+                self._release_run_slot(slots)
 
     def ui_action_result(self, request: AgentUiActionResultRequest) -> dict[str, Any]:
         """Delegate to UIActionService for desktop UI action continuation.
 
         The desktop ack resumes the run too, so it takes the owning session's
-        run lock. The request id alone does not carry the session, so the
-        parked action is peeked (never popped) under the pending lock first;
-        an unknown id still fails inside the sub-service as before.
+        run lock, one global run slot and the model lease. The request id alone
+        does not carry the session, so the parked action is peeked (never
+        popped) under the pending lock first; an unknown id still fails inside
+        the sub-service as before.
         """
         self._cleanup_pending()
         with self.pending_lock:
             parked = self.pending_actions.get(request.request_id) or {}
-        with self._session_lock(str(parked.get("session_id", ""))):
-            return self._ui_action_service.ui_action_result(request)
+        with self._hold_session(str(parked.get("session_id", ""))):
+            slots = self._acquire_run_slot()
+            try:
+                with self._model_lease():
+                    return self._ui_action_service.ui_action_result(request)
+            finally:
+                self._release_run_slot(slots)
 
     def reset_state(self) -> None:
         with self.pending_lock:

@@ -52,16 +52,35 @@ class _FakeLLMModule:
     def __init__(self, lock=None, is_vision: bool = False, load_error: Exception | None = None) -> None:
         self.llm = "loaded-llm"
         self.lock = lock or _NullLock()
+        self._vision = is_vision
         self.is_vision_model = is_vision
         self.active_model_desc = "fake-model"
         self.load_calls = 0
         self.load_error = load_error
         self.llm_lock = self.lock
+        self.reload_gate_calls = 0
+
+    def release(self) -> bool:
+        # Mirrors LlmModule.release(): the reference and the metadata that
+        # describes it are cleared as one unit.
+        with self.llm_lock:
+            had_backend = self.llm is not None
+            self.llm = None
+            self.active_model_desc = ""
+            self.is_vision_model = False
+        return had_backend
 
     def load_model(self) -> None:
         self.load_calls += 1
         if self.load_error is not None:
             raise self.load_error
+        self.llm = "reloaded-llm"
+        self.active_model_desc = "fake-model"
+        self.is_vision_model = self._vision
+
+    def model_reload(self):
+        self.reload_gate_calls += 1
+        return _NullLock()
 
 
 class _FakeRAGModule:
@@ -70,6 +89,16 @@ class _FakeRAGModule:
         self.init_error = init_error
         self.release_embedding_calls = 0
         self.released_memory = False
+        self.knowledge_index = None
+        self.knowledge_chunks = []
+        self.bm25_index = None
+        self.embed_model_ref = None
+        self._reranker = None
+        self.reset_calls = 0
+
+    def reset_index_state(self) -> None:
+        """ADR 0032: the module owns the "the RAG state is empty" transition."""
+        self.reset_calls += 1
         self.knowledge_index = None
         self.knowledge_chunks = []
         self.bm25_index = None
@@ -147,10 +176,18 @@ def _build_client(
 
 class AdminRoutesTest(unittest.TestCase):
     def test_release_vram_unloads_and_gc_collects(self) -> None:
-        client, _ = _build_client()
+        llm = _FakeLLMModule()
+        client, _ = _build_client(llm=llm)
         response = client.post("/admin/release-vram")
         self.assertEqual(response.status_code, 200)
         self.assertIn("VRAM", response.json()["message"])
+        self.assertEqual(llm.reload_gate_calls, 1)
+        # The route's promise: the backend reference AND the metadata that
+        # advertises it are gone, so a probe cannot read "unloaded" from one
+        # endpoint and "fake-model" from another.
+        self.assertIsNone(llm.llm)
+        self.assertEqual(llm.active_model_desc, "")
+        self.assertFalse(llm.is_vision_model)
 
     def test_release_vram_error_returns_500(self) -> None:
         llm = _FakeLLMModule(lock=_FailLock())
@@ -165,6 +202,7 @@ class AdminRoutesTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["model"], "fake-model")
         self.assertEqual(llm.load_calls, 1)
+        self.assertEqual(llm.reload_gate_calls, 1)
         self.assertEqual(state["rebuild_calls"], 1)
 
     def test_reload_model_releases_embeddings_for_vision(self) -> None:
@@ -200,6 +238,17 @@ class AdminRoutesTest(unittest.TestCase):
         self.assertEqual(response.json()["chunks"], 42)
         self.assertTrue(rag.released_memory)
         self.assertEqual(state["rebuild_calls"], 1)
+
+    def test_reload_rag_resets_the_state_through_its_single_owner(self) -> None:
+        """ADR 0032: the route used to clear five fields itself and leave the
+        stale pipeline behind. The module owns the transition now, so the
+        route asks for it instead of reaching into the handles."""
+        rag = _FakeRAGModule()
+        client, _ = _build_client(rag=rag)
+        with mock.patch("ai_assistant.config.rag_config.RAGSettings") as mock_rag:
+            mock_rag.from_env_and_dict.return_value = SimpleNamespace(enabled=True)
+            client.post("/admin/reload-rag")
+        self.assertEqual(rag.reset_calls, 1)
 
     def test_reload_rag_releases_embeddings_for_vision(self) -> None:
         llm = _FakeLLMModule(is_vision=True)

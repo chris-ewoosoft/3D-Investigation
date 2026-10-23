@@ -15,7 +15,7 @@ add_library(ViewerPlugin SHARED
 
 target_include_directories(ViewerPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/core
+    ${PROJECT_SOURCE_DIR}/src/include
     ${PROJECT_SOURCE_DIR}/src/utils
     ${VTK_INCLUDE_DIRS}
 )

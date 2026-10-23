@@ -27,18 +27,25 @@ void ReconstructionPostProcessor::processPointCloud(const FilterConfig &f,
     if (points3D.empty()) return;
     qDebug() << "Post-processing. Initial points:" << points3D.size();
 
+    // A value of 0 means "this filter is switched off" — the configuration
+    // defaults are all non-zero, so 0 is unambiguous. Replacing it with a
+    // default here would make the user's "auto-clean off" preference a
+    // no-op: the filters would run anyway.
+    //
     // B1: Adaptive ROR trước - loại bụi cô lập, giữ cột mỏng
     // Log 11662 của bạn: radius = 0.00433567, kept 13838/14819
-    float mult = f.rorRadiusMultiplierTrack > 0 ? f.rorRadiusMultiplierTrack : 6.0f;
-    int minNei = f.rorMinNeighborsTrack > 0 ? f.rorMinNeighborsTrack : 4;
-    PointCloudFilter::adaptiveRadiusOutlier(points3D, colors, mult, minNei);
-    if (points3D.empty()) { qWarning() << "No points after adaptive ROR."; return; }
+    const float mult = f.rorRadiusMultiplierTrack > 0 ? f.rorRadiusMultiplierTrack : 6.0f;
+    if (f.rorMinNeighborsTrack > 0) {
+        PointCloudFilter::adaptiveRadiusOutlier(points3D, colors, mult, f.rorMinNeighborsTrack);
+        if (points3D.empty()) { qWarning() << "No points after adaptive ROR."; return; }
+    }
 
     // B2: SOR - loại điểm bay lơ lửng, để 1.2f là cân bằng nhất
-    float sorK = f.sorMeanKTrack > 0 ? f.sorMeanKTrack : 50.0f;
-    float sorStd = f.sorStdDevMulTrack > 0 ? f.sorStdDevMulTrack : 1.2f;
-    PointCloudFilter::statisticalOutlier(points3D, colors, sorK, sorStd);
-    if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
+    if (f.sorMeanKTrack > 0) {
+        const float sorStd = f.sorStdDevMulTrack > 0 ? f.sorStdDevMulTrack : 1.2f;
+        PointCloudFilter::statisticalOutlier(points3D, colors, f.sorMeanKTrack, sorStd);
+        if (points3D.empty()) { qWarning() << "No points after SOR."; return; }
+    }
 
     // B3: VoxelGrid - giữ chi tiết, không *0.5 nữa
     float leaf = f.voxelLeafSizeTrack > 0 ? f.voxelLeafSizeTrack : 0.003f;
@@ -191,13 +198,43 @@ pcl::PolygonMesh ReconstructionPostProcessor::poissonMeshing(
     pcl::PointCloud<pcl::PointXYZRGB> meshCloud;
     pcl::fromPCLPointCloud2(mesh.cloud, meshCloud);
     pcl::PointCloud<pcl::PointXYZRGB> trimmed;
-    for(auto &pt: meshCloud.points){
-        if(pt.x>=minPt.x && pt.x<=maxPt.x && pt.y>=minPt.y && pt.y<=maxPt.y && pt.z>=minPt.z && pt.z<=maxPt.z){
+    // old index -> new index; -1 for a vertex that was removed.
+    std::vector<int> remap(meshCloud.size(), -1);
+    for (size_t i = 0; i < meshCloud.points.size(); ++i) {
+        const auto &pt = meshCloud.points[i];
+        if (pt.x>=minPt.x && pt.x<=maxPt.x && pt.y>=minPt.y && pt.y<=maxPt.y && pt.z>=minPt.z && pt.z<=maxPt.z) {
+            remap[i] = static_cast<int>(trimmed.size());
             trimmed.push_back(pt);
         }
     }
     qDebug() << "Poisson trimmed:" << meshCloud.size() << "->" << trimmed.size() << " (removed wing)";
+
+    // The faces reference the vertices by index: they have to be remapped
+    // together with the vertices, and a face that lost a vertex has to be
+    // dropped. Replacing the vertices alone leaves faces pointing at
+    // vertices that no longer exist — a corrupt mesh.
     pcl::toPCLPointCloud2(trimmed, mesh.cloud);
+    {
+        std::vector<pcl::Vertices> remapped;
+        remapped.reserve(mesh.polygons.size());
+        for (const auto &poly : mesh.polygons) {
+            bool complete = true;
+            for (const auto vertexIndex : poly.vertices) {
+                if (vertexIndex < 0 || static_cast<size_t>(vertexIndex) >= remap.size()
+                    || remap[static_cast<size_t>(vertexIndex)] < 0) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (!complete) continue;
+            pcl::Vertices face;
+            face.vertices.reserve(poly.vertices.size());
+            for (const auto vertexIndex : poly.vertices)
+                face.vertices.push_back(remap[static_cast<size_t>(vertexIndex)]);
+            remapped.push_back(face);
+        }
+        mesh.polygons = remapped;
+    }
 
     qDebug() << "Poisson done. Vertices:" << mesh.cloud.width << "Faces:" << mesh.polygons.size();
     return mesh;

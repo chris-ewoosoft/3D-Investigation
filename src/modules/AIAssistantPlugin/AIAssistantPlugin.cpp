@@ -5,7 +5,8 @@
 #include "ISettingsService.h"
 #include "SignalBus.h"
 #include "IAIAssistantService.h"
-#include "IUserManager.h"
+#include "IAuthService.h"
+#include "IUserPreferences.h"
 #include "AIAttachmentPreviewFactory.h"
 #include "../../utils/FileUtilities.h"
 #include <QDockWidget>
@@ -33,13 +34,13 @@
 #include "AppConstants.h"
 #include "ChatMessageRenderer.h"
 #include "IAppPaths.h"
-#include "../../utils/CustomProgressDialog.h"
+#include "IProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
 
 
 bool AIAssistantPlugin::initialize(IAppContext* context) {
     m_ctx = context;
-    m_aiAssistant = m_ctx->services()->get<IAIAssistantService>();
+    m_aiAssistant = m_ctx->services()->getRequired<IAIAssistantService>();
     
     if (m_aiAssistant) {
         m_aiAssistant->reloadSessions();
@@ -213,7 +214,7 @@ bool AIAssistantPlugin::initialize(IAppContext* context) {
     });
     
     m_progressDialog = m_ctx->shell()->getProgressDialog();
-    connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, &AIAssistantPlugin::onProgressStopped);
+    connect(m_progressDialog, &IProgressDialog::stopRequested, this, &AIAssistantPlugin::onProgressStopped);
 
     connect(m_ctx->signalBus(), &SignalBus::userChanged, this, [this](const QString &username) {
         if (m_aiAssistant) {
@@ -224,8 +225,10 @@ bool AIAssistantPlugin::initialize(IAppContext* context) {
         }
         if (m_dockUI && m_dockUI->modelSelector()) {
             int savedIdx = 0;
-            if (auto *um = m_ctx->services()->get<IUserManager>()) {
-                savedIdx = um->getUserPref(username, "ai_model_index", "0").toInt();
+            // The narrow contracts: this plugin needs the per-user preference
+            // and the current identity — not the whole user service.
+            if (auto *prefs = m_ctx->services()->get<IUserPreferences>()) {
+                savedIdx = prefs->getUserPref(username, "ai_model_index", "0").toInt();
             }
             m_dockUI->modelSelector()->blockSignals(true);
             m_dockUI->modelSelector()->setCurrentIndex(savedIdx);
@@ -236,6 +239,17 @@ bool AIAssistantPlugin::initialize(IAppContext* context) {
 }
 
 void AIAssistantPlugin::cleanup() {
+    // Dock widgets are parented to the MainWindow, not to this plugin. They
+    // must be destroyed before QPluginLoader unloads this DLL; otherwise Qt
+    // would later delete widgets whose implementation lives in unloaded code.
+    if (m_dockUI) {
+        if (m_ctx && m_ctx->shell())
+            m_ctx->shell()->deleteDockWidget(m_dockUI->dockWidget());
+        delete m_dockUI;
+        m_dockUI = nullptr;
+    }
+    delete m_ribbonUI;
+    m_ribbonUI = nullptr;
 }
 
 void AIAssistantPlugin::setupChatbotUI() {
@@ -367,8 +381,10 @@ void AIAssistantPlugin::onModelSelected(int index) {
     m_aiAssistant->switchModel(index);
 
     // Save per-user AI model index
-    if (auto *um = m_ctx->services()->get<IUserManager>()) {
-        um->setUserPref(um->currentUsername(), "ai_model_index", QString::number(index));
+    auto *prefs = m_ctx->services()->get<IUserPreferences>();
+    auto *auth = m_ctx->services()->get<IAuthService>();
+    if (prefs && auth) {
+        prefs->setUserPref(auth->currentUsername(), "ai_model_index", QString::number(index));
     }
 }
 
@@ -382,7 +398,7 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
             int msgIndex = path.mid(5).toInt();
             auto history = m_aiAssistant->getHistory();
             if (msgIndex >= 0 && msgIndex < history.size()) {
-                QString currentText = history[msgIndex]["content"].toString();
+                QString currentText = history[msgIndex].content;
                 bool ok;
                 QString newText = QInputDialog::getMultiLineText(m_ctx->shell()->dialogParent(), 
                                       "Edit Message", 
@@ -429,7 +445,7 @@ void AIAssistantPlugin::onChatLinkClicked(const QUrl &url) {
         if (path.startsWith("/")) path.remove(0, 1);
         
         // Resolve relative path against the configured project root.
-        auto* paths = m_ctx->services()->get<IAppPaths>();
+        auto* paths = m_ctx->services()->getRequired<IAppPaths>();
         QString absPath = QDir(paths ? paths->projectRootDir() : QString()).absoluteFilePath(path);
         
         if (QFileInfo::exists(absPath)) {
@@ -477,8 +493,8 @@ void AIAssistantPlugin::onSessionMenuRequested(const QPoint &pos) {
             if (s.id == sid) {
                 QString fullChat;
                 for (const auto &msg : s.messages) {
-                    QString role = msg["role"].toString() == "user" ? "User: " : "AI: ";
-                    fullChat += role + msg["content"].toString() + "\n\n";
+                    QString role = msg.role == ChatRole::User ? "User: " : "AI: ";
+                    fullChat += role + msg.content + "\n\n";
                 }
                 QApplication::clipboard()->setText(fullChat);
                 break;
@@ -488,6 +504,14 @@ void AIAssistantPlugin::onSessionMenuRequested(const QPoint &pos) {
     menu.addSeparator();
     menu.addAction(m_ctx->translate("ai.delete_chat"),
                    [this, sid]() { m_aiAssistant->deleteSession(sid); });
+    menu.addAction(m_ctx->translate("ai.rename_chat"), [this, sid, item]() {
+        bool ok = false;
+        const QString title = QInputDialog::getText(
+            m_ctx->shell()->dialogParent(), m_ctx->translate("ai.rename_chat"),
+            m_ctx->translate("ai.rename_chat_prompt"), QLineEdit::Normal,
+            item->text(), &ok);
+        if (ok) m_aiAssistant->renameSession(sid, title);
+    });
     menu.exec(m_dockUI->sessionListWidget()->mapToGlobal(pos));
 }
 
@@ -557,7 +581,7 @@ void AIAssistantPlugin::onAttachFile() {
 
 void AIAssistantPlugin::addAttachmentPreview(const QString &filePath, bool isImage) {
     if (!m_dockUI) return;
-    auto* paths = m_ctx->services()->get<IAppPaths>();
+    auto* paths = m_ctx->services()->getRequired<IAppPaths>();
     if (!paths) return;
     FileUtilities::AttachmentResult result = FileUtilities::processAttachment(
         filePath,

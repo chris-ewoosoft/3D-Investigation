@@ -3,19 +3,20 @@
 
 #include <QObject>
 #include <QStringList>
+#include <functional>
 #include "IPlugin.h"
 #include "AppConstants.h"
 #include <QAction>
 #include <QProcess>
 #include <QToolButton>
 #include <QGroupBox>
-#include <QFutureWatcher>
-#include <atomic>
 
 #include "IAppContext.h"
 #include "IAIService.h"
 
-class CustomProgressDialog;
+#include "BlockingCall.h"
+
+class IProgressDialog;
 #include <QTextBrowser>
 #include <QProgressBar>
 #include <QPushButton>
@@ -23,6 +24,8 @@ class CustomProgressDialog;
 class AITrainDockWidget;
 class AIProcessorRibbonUI;
 class VideoTrackerThread;
+class IAIModelLoadService;
+class IAIPredictionLogService;
 class QTimer;
 class QMenu;
 
@@ -55,14 +58,30 @@ private slots:
     void onImageChanged(int index, int total);
 
 private:
+    /// The inference entry points that run from a GUI slot. They share one
+    /// asynchronous path: the inference itself must never run on the GUI
+    /// thread (that is the class of defect this plugin used to carry — the
+    /// window froze for the whole ONNX call), and only one may be in flight.
+    enum class InferenceKind { Detection, Segmentation };
+
     void loadModelsInBackground();
     void setupMenus();
     void setupRibbonUI();
     void setupConnections();
+    void requestInference(InferenceKind kind);
+    void finishInference(InferenceKind kind, const QString& imagePath,
+                         const cv::Mat& result);
+    QFuture<cv::Mat> dispatchInference(std::function<cv::Mat()> task);
+    static const char *inferenceStage(InferenceKind kind);
 
     IAppContext*   m_ctx         = nullptr;
     IAIService*    m_aiSvc       = nullptr;  ///< Looked up from ServiceRegistry
-    CustomProgressDialog *m_progressDialog = nullptr;
+    IAIModelLoadService* m_modelLoader = nullptr; ///< AppCore-owned async loader
+    /// AppCore-owned prediction writer. Resolved once in initialize() so the
+    /// registry is not consulted on every detection click; null when the
+    /// service is not registered (the plugin still runs, it just logs nothing).
+    IAIPredictionLogService* m_predictionLog = nullptr;
+    IProgressDialog *m_progressDialog = nullptr;
     QProcess *m_tensorboardProcess = nullptr;
     QTimer *m_tensorboardWaitTimer = nullptr;
 
@@ -87,15 +106,20 @@ private:
     // Tab buttons
     AIProcessorRibbonUI* m_ribbonUI = nullptr;
 
-    // Async model loading
-    QFutureWatcher<void>* m_modelLoadWatcher = nullptr;
+    // Async model loading is owned by IAIModelLoadService (AppCore).
     bool m_modelsLoading = false;
-    std::atomic<bool> m_cancelModelLoad{false};
-    QMetaObject::Connection m_modelLoadStopConn;
 
     VideoTrackerThread* m_trackerThread = nullptr;
     bool m_trackingPaused = false;
     QString m_agentVideoPath;
+
+    /// The async inference state. `m_inferenceRunning` is set and cleared on
+    /// the GUI thread only; the task itself runs through blocking::run() on a
+    /// thread the plugin owns. `m_inferenceTasks` lets cleanup() join that
+    /// thread (bounded) before the plugin's code and services go away.
+    bool m_inferenceRunning = false;
+    bool m_cleanedUp = false;
+    blocking::TaskTracker m_inferenceTasks;
 };
 
 #endif // AI_PROCESSOR_PLUGIN_H

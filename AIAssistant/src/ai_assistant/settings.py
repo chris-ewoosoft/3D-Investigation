@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +15,22 @@ from typing import Any
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
 DEFAULT_BASE_URL = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
+
+
+def _env_flag(name: str, default: bool = False, env: Mapping[str, str] | None = None) -> bool:
+    """Read a boolean switch from the environment.
+
+    ``1``/``true``/``yes``/``on`` (case-insensitive) are true; everything else
+    — including an unset variable — is false. An explicitly set variable always
+    wins, including ``0``: that is how an operator turns a surface off for one
+    session even though the deployment file enables it. An *unset* variable
+    falls back to ``default``.
+    """
+    values = os.environ if env is None else env
+    raw = values.get(name, "").strip()
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +54,20 @@ class ArchitectureSettings:
     allowed_origins: tuple[str, ...]
     a2a_card_name: str = "3D-Reconstruction AI Assistant"
     a2a_card_url: str = DEFAULT_BASE_URL
+    #: ADR 0032: the interactive OpenAPI surface (``/docs``, ``/redoc``,
+    #: ``/openapi.json``) is an *app-level* FastAPI route, so the transport
+    #: guard on the routers never reaches it. It is therefore off unless a
+    #: deployment opts in — a network-reachable bind must not publish its own
+    #: route schema by default.
+    expose_api_docs: bool = False
+    #: Host header allow-list for the trusted-host middleware. Empty means the
+    #: middleware is not installed (the operator has not declared a policy).
+    allowed_hosts: tuple[str, ...] = ()
+    #: Maximum number of A2A tasks executing at once (0 = unbounded). The
+    #: admission check runs *before* the worker thread is created; the agent
+    #: run limit (``AGENT_MAX_CONCURRENT_RUNS``) sits later and only protects
+    #: the model, not the process.
+    max_concurrent_tasks: int = 8
 
     @classmethod
     def load(cls, base_dir: Path, config_dir: Path | None = None) -> "ArchitectureSettings":
@@ -88,6 +119,23 @@ class ArchitectureSettings:
             # A2A transport configuration (ADR 0001: centralized in settings, not import-time env reads)
             a2a_card_name=str(runtime.get("a2a_card_name", "3D-Reconstruction AI Assistant")),
             a2a_card_url=str(runtime.get("a2a_card_url", DEFAULT_BASE_URL)),
+            # ADR 0032: the docs surface and the host allow-list are policy,
+            # so they are resolved once here instead of per request. The env
+            # variable wins over the TOML file so an operator can expose the
+            # docs for one debugging session without editing the deployment.
+            expose_api_docs=_env_flag("AGENT_EXPOSE_API_DOCS", bool(api.get("expose_docs", False))),
+            allowed_hosts=tuple(
+                part.strip()
+                for part in (
+                    os.environ.get("AGENT_ALLOWED_HOSTS", "")
+                    or ",".join(str(item) for item in api.get("allowed_hosts", []))
+                ).split(",")
+                if part.strip()
+            ),
+            max_concurrent_tasks=max(0, int(os.environ.get(
+                "AGENT_MAX_CONCURRENT_TASKS",
+                runtime.get("max_concurrent_tasks", 8),
+            ))),
         )
 
 
@@ -111,9 +159,15 @@ class AgentRuntimeSettings:
     native_tool_calls: bool
     #: Production gates (ADR 0023): refuse non-isolated command execution and
     #: refuse to run on a non-durable checkpoint backend instead of silently
-    #: degrading. Both default to off so the Qt desktop distribution keeps
-    #: working without Docker or a database.
-    sandbox_require_isolation: bool = False
+    #: degrading. The checkpoint gate stays off by default so the Qt desktop
+    #: distribution keeps working without a database; the **sandbox** gate
+    #: defaults to *on*, because an allow-list is not an OS boundary: the
+    #: local runtime runs the command with the server's own privileges, and
+    #: ``cmake -P``/``ctest``/``pytest`` all execute code by design. A
+    #: deployment that does not want that boundary says so explicitly with
+    #: ``AGENT_SANDBOX_REQUIRE_ISOLATION=0`` (the Qt desktop launcher does,
+    #: because it is a single-user loopback process).
+    sandbox_require_isolation: bool = True
     checkpoint_required: bool = False
     #: Global agent-run budget (0 = unlimited). One run per session is
     #: already enforced by the service; this caps total concurrent runs.
@@ -131,7 +185,7 @@ class AgentRuntimeSettings:
             checkpoint_url=values.get("AGENT_CHECKPOINT_URL", ""),
             checkpoint_path=values.get("AGENT_CHECKPOINT_PATH", "AIAssistant/Cache/checkpoints.sqlite"),
             native_tool_calls=values.get("AGENT_NATIVE_TOOL_CALLS", "0") == "1",
-            sandbox_require_isolation=values.get("AGENT_SANDBOX_REQUIRE_ISOLATION", "0") == "1",
+            sandbox_require_isolation=values.get("AGENT_SANDBOX_REQUIRE_ISOLATION", "1") == "1",
             checkpoint_required=values.get("AGENT_CHECKPOINT_REQUIRED", "0") == "1",
             max_concurrent_runs=int(values.get("AGENT_MAX_CONCURRENT_RUNS", "0")),
         )
@@ -158,6 +212,42 @@ def app_data_dir(env: Mapping[str, str] | None = None) -> str:
     """Return the ``APP_DATA_DIR`` deployment override (``""`` when unset)."""
     values = os.environ if env is None else env
     return values.get("APP_DATA_DIR", "").strip()
+
+
+def storage_key(env: Mapping[str, str] | None = None) -> str:
+    """Return the explicit at-rest key override (``""`` when unset).
+
+    ``AI_STORAGE_KEY`` accepts ``base64:<url-safe>``, ``hex:<digits>`` or a
+    bare URL-safe base64 value; the persistence adapter validates the decoded
+    length. Keeping the raw string here preserves ADR 0001's single owner for
+    environment reads while the crypto adapter owns key parsing.
+    """
+    values = os.environ if env is None else env
+    return values.get("AI_STORAGE_KEY", "").strip()
+
+
+def storage_key_location(env: Mapping[str, str] | None = None) -> tuple[Path, bool]:
+    """Resolve where the generated local at-rest key lives.
+
+    Returns ``(path, explicit)``. ``AI_STORAGE_KEY_FILE`` is the explicit
+    deployment/secret-store path; when it is set a missing file must fail
+    startup instead of silently generating a replacement key (which would make
+    existing state unreadable). Without it the key lives outside
+    ``APP_DATA_DIR`` (``%LOCALAPPDATA%`` on Windows, ``$XDG_CONFIG_HOME`` on
+    POSIX) so a backup of the data volume does not automatically copy the key
+    with the ciphertext.
+    """
+    values = os.environ if env is None else env
+    raw = values.get("AI_STORAGE_KEY_FILE", "").strip()
+    if raw:
+        return Path(raw).expanduser(), True
+    if sys.platform == "win32":
+        root = values.get("LOCALAPPDATA", "").strip() or values.get("APPDATA", "").strip()
+        base = Path(root).expanduser() if root else Path.home() / "AppData" / "Local"
+    else:
+        root = values.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(root).expanduser() if root else Path.home() / ".config"
+    return base / "3d-reconstruction" / "ai_assistant.key", False
 
 
 def max_request_bytes(env: Mapping[str, str] | None = None) -> int:
@@ -210,6 +300,60 @@ def transport_tokens(env: Mapping[str, str] | None = None) -> TransportTokens:
         a2a=values.get("AI_A2A_TOKEN", "").strip(),
         mcp=values.get("AI_MCP_TOKEN", "").strip(),
     )
+
+
+def a2a_tenants(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Read the A2A bearer-token → tenant mapping from ``env``.
+
+    ``AI_A2A_TENANTS`` is a JSON object mapping each accepted bearer token to
+    the tenant id that owns its tasks. When empty the surface stays
+    single-tenant: the single ``AI_A2A_TOKEN`` maps every task to ``"default"``.
+    """
+    import json
+
+    values = os.environ if env is None else env
+    raw = values.get("AI_A2A_TENANTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(token): str(tenant) for token, tenant in parsed.items() if token and tenant}
+
+
+def a2a_max_subscribers(env: Mapping[str, str] | None = None) -> int:
+    """Admission cap for concurrent A2A SSE subscribers.
+
+    A deadline bounds each stream; this bounds how many can be open at once.
+    Invalid and non-positive values fall back to the documented default rather
+    than disabling the guard.
+    """
+    values = os.environ if env is None else env
+    raw = values.get("AI_A2A_MAX_SUBSCRIBERS", "").strip()
+    try:
+        limit = int(raw)
+    except ValueError:
+        return 32
+    return limit if limit > 0 else 32
+
+
+def task_retention_days(env: Mapping[str, str] | None = None) -> int:
+    """Days to keep terminal A2A tasks (``AI_TASK_RETENTION_DAYS``).
+
+    ``0`` disables pruning (forensic deployments). Invalid and negative values
+    keep the documented 30-day default rather than accidentally retaining
+    everything.
+    """
+    values = os.environ if env is None else env
+    raw = values.get("AI_TASK_RETENTION_DAYS", "").strip()
+    try:
+        days = int(raw)
+    except ValueError:
+        return 30
+    return days if days >= 0 else 30
 
 
 # ── One-time process environment bootstrap ──────────────────────────────────

@@ -66,21 +66,26 @@ def build_health_router(
     @router.get("/health")
     async def health() -> dict[str, Any]:
         reasons = _degraded_reasons()
+        # One source of truth: the model description is only advertised while
+        # a backend is actually held. After ``/admin/release-vram`` the old
+        # route left ``active_model_desc`` populated, so ``/health`` said
+        # "unloaded" while ``/v1/models`` kept advertising the released model.
+        loaded = llm_module.llm is not None
         return {
             # Degraded (not "ok") whenever a subsystem is missing, so a probe
             # reading only ``status`` sees the truth.
             "status": "degraded" if reasons else "ok",
             "reasons": reasons,
             "uptime_sec": round(time.monotonic() - server_start_time, 1),
-            "llm_loaded": llm_module.llm is not None,
+            "llm_loaded": loaded,
             "rag_chunks": len(rag_module.knowledge_chunks),
             "reranker": rag_module._reranker is not None,
             "embed_model": embed_model_name,
             "chunk_chars": rag_module.CHUNK_CHARS,
             "chars_per_token": chars_per_token,
             "max_context": rag_module.MAX_CONTEXT_CHARS,
-            "model": llm_module.active_model_desc,
-            "is_vision": llm_module.is_vision_model,
+            "model": llm_module.active_model_desc if loaded else "",
+            "is_vision": llm_module.is_vision_model if loaded else False,
             "model_idx": model_idx,
             "platform": {
                 "version": getattr(app, "version", "3.0.0"),
@@ -103,6 +108,10 @@ def build_health_router(
 
     @router.get("/v1/models")
     async def list_models() -> dict[str, Any]:
+        # No backend ⇒ no model to advertise. Returning an entry with an empty
+        # id made a released model look served to OpenAI-compatible clients.
+        if llm_module.llm is None:
+            return {"data": []}
         return {
             "data": [
                 {

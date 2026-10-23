@@ -47,34 +47,143 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
         self.assertIs(module.llm, backend)
         self.assertEqual(module.active_model_desc, "adopted")
 
+    def test_model_reload_waits_for_an_active_lease(self) -> None:
+        import threading
+
+        from ai_assistant.bootstrap.modules import LlmModule
+
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(), model_idx=0,
+                           use_vision_llm=False)
+        lease_entered = threading.Event()
+        release_lease = threading.Event()
+        reload_done = threading.Event()
+
+        def hold_lease() -> None:
+            with module.model_lease():
+                lease_entered.set()
+                release_lease.wait(5)
+
+        def swap_model() -> None:
+            with module.model_reload():
+                reload_done.set()
+
+        holder = threading.Thread(target=hold_lease)
+        holder.start()
+        self.assertTrue(lease_entered.wait(2))
+        swapper = threading.Thread(target=swap_model)
+        swapper.start()
+        self.assertFalse(reload_done.wait(0.1), "reload started before the lease ended")
+        release_lease.set()
+        holder.join(2)
+        self.assertTrue(reload_done.wait(2))
+        swapper.join(2)
+
+    def test_a_new_lease_waits_for_an_active_reload(self) -> None:
+        import threading
+
+        from ai_assistant.bootstrap.modules import LlmModule
+
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(), model_idx=0,
+                           use_vision_llm=False)
+        reload_entered = threading.Event()
+        release_reload = threading.Event()
+        lease_entered = threading.Event()
+
+        def hold_reload() -> None:
+            with module.model_reload():
+                reload_entered.set()
+                release_reload.wait(5)
+
+        def take_lease() -> None:
+            with module.model_lease():
+                lease_entered.set()
+
+        swapper = threading.Thread(target=hold_reload)
+        swapper.start()
+        self.assertTrue(reload_entered.wait(2))
+        leaser = threading.Thread(target=take_lease)
+        leaser.start()
+        self.assertFalse(lease_entered.wait(0.1), "a lease entered during a reload")
+        release_reload.set()
+        swapper.join(2)
+        self.assertTrue(lease_entered.wait(2))
+        leaser.join(2)
+
     def test_llm_load_reload_and_estimate(self) -> None:
-        """Cover LlmModule load/reload/estimate paths."""
+        """Cover LlmModule load/reload/estimate paths (single owner, ADR 0041)."""
         from ai_assistant.bootstrap.modules import LlmModule
 
         module = LlmModule(registry=MagicMock(), paths=MagicMock(),
                            model_idx=0, use_vision_llm=False)
-        # Mock registry and backend so load/reload can execute without weights
-        mock_backend = MagicMock()
-        mock_backend.is_vision_supported = False
-        mock_backend.model_description = "Test"
-        with patch("ai_assistant.llm.load_model") as mock_load:
-            with patch("ai_assistant.llm.get_backend", return_value=mock_backend):
-                module.load_model()
-                mock_load.assert_called()
-                # reload path — mock reload_model dependency
-                with patch("ai_assistant.llm.reload_model"):
-                    module.reload_model()
+        first_backend = MagicMock()
+        first_backend.is_vision_supported = False
+        first_backend.model_description = "Test"
+        second_backend = MagicMock()
+        second_backend.is_vision_supported = True
+        second_backend.model_description = "Second"
+        with (
+            patch("ai_assistant.llm.load_backend", return_value=first_backend) as mock_load,
+            patch("ai_assistant.llm.hardware.release_ml_memory") as release,
+        ):
+            module.load_model()
+            mock_load.assert_called_once()
+            # Nothing was resident, so there is nothing to release.
+            release.assert_not_called()
+        self.assertIs(module.llm, first_backend)
+        self.assertEqual(module.active_model_desc, "Test")
+
+        with (
+            patch("ai_assistant.llm.load_backend", return_value=second_backend),
+            patch("ai_assistant.llm.hardware.release_ml_memory") as release,
+        ):
+            # A second load replaces the resident model in the same owner.
+            module.load_model()
+            # The previous weights are freed before the new ones are adopted.
+            release.assert_called_once()
+        self.assertIs(module.llm, second_backend)
+        self.assertTrue(module.is_vision_model)
         # estimate defensive
         self.assertEqual(LlmModule.estimate_tokens(""), 1)
         self.assertGreaterEqual(LlmModule.estimate_tokens("hello"), 1)
+
+    def test_release_drops_the_only_backend_reference(self) -> None:
+        """``/admin/release-vram`` is only honest if the object can be collected."""
+        import gc
+        import weakref
+
+        from ai_assistant.bootstrap.modules import LlmModule
+
+        class _Backend:
+            is_vision_supported = True
+            model_description = "loaded"
+
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(),
+                           model_idx=0, use_vision_llm=False)
+        backend = _Backend()
+        module._adopt_backend(backend)
+        reference = weakref.ref(backend)
+        del backend
+
+        with patch("ai_assistant.llm.hardware.release_ml_memory") as release:
+            self.assertTrue(module.release())
+            release.assert_called_once()
+        gc.collect()
+
+        self.assertIsNone(reference(), "a second owner kept the backend alive")
+        self.assertIsNone(module.llm)
+        self.assertEqual(module.active_model_desc, "")
+        self.assertFalse(module.is_vision_model)
+        # Releasing twice is a no-op, not a second "released" signal.
+        self.assertFalse(module.release())
 
     def test_rag_bridge_methods(self) -> None:
         """Cover RagModule retrieval branches (initialize_rag / get_context)."""
         import os
 
+        from ai_assistant.adapters.persistence.storage_crypto import AesGcmFieldCipher
         from ai_assistant.bootstrap.modules import RagModule
 
-        rag = RagModule()
+        rag = RagModule(cipher=AesGcmFieldCipher(b"g" * 32))
         self.assertTrue(hasattr(rag.initialize_rag, "__call__"))
         self.assertTrue(hasattr(rag.get_context, "__call__"))
         self.assertTrue(hasattr(rag.release_embedding_for_vision, "__call__"))

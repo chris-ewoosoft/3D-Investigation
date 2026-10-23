@@ -5,10 +5,11 @@
 #include "IViewerService.h"
 #include "ISceneService.h"
 #include "IAIService.h"
+#include "IAIModelLoadService.h"
 #include "SignalBus.h"
 #include "AITrainDockWidget.h"
 #include "AIProcessorRibbonUI.h"
-#include "AIPredictionLogger.h"
+#include "IAIPredictionLogService.h"
 #include "AppConstants.h"
 #include "VideoTrackerThread.h"
 #include "IconFactory.h"
@@ -17,6 +18,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QFileDialog>
+#include <QFutureWatcher>
 #include <QMenu>
 #include <QProcess>
 #include <QUrl>
@@ -31,23 +33,69 @@
 #include <QApplication>
 #include <QTimer>
 #include <QTcpSocket>
-#include <QtConcurrent>
 #include <QGroupBox>
 #include <QStyle>
 #include "IAppPaths.h"
 #include <opencv2/opencv.hpp>
-#include "../../utils/CustomProgressDialog.h"
+#include "IProgressDialog.h"
 
 bool AIProcessorPlugin::initialize(IAppContext *context) {
   m_ctx = context;
+  m_cleanedUp = false;
 
-  // Look up IAIService
-  m_aiSvc = m_ctx->services()->get<IAIService>();
-  if (!m_aiSvc) {
-      qWarning() << "[AIProcessorPlugin] IAIService not found in ServiceRegistry!";
+  // Mandatory services: their absence is a composition-root wiring bug, not
+  // a runtime condition. getRequired() aborts with the missing key instead of
+  // letting a null pointer propagate into menu handlers.
+  m_aiSvc = m_ctx->services()->getRequired<IAIService>();
+  m_modelLoader = m_ctx->services()->getRequired<IAIModelLoadService>();
+  // Optional: an AppCore without a prediction log still runs the plugin.
+  m_predictionLog = m_ctx->services()->get<IAIPredictionLogService>();
+  {
+      connect(m_modelLoader, &IAIModelLoadService::stageChanged, this,
+              [this](const QString& stage) {
+          if (!m_progressDialog) return;
+          QString label;
+          if (stage == QLatin1String("detection"))
+              label = m_ctx->translate("aiproc.loading_det");
+          else if (stage == QLatin1String("segmentation"))
+              label = m_ctx->translate("aiproc.loading_seg");
+          else if (stage == QLatin1String("tracking"))
+              label = m_ctx->translate("aiproc.loading_track");
+          if (label.isEmpty())
+              label = QStringLiteral("Loading %1...").arg(stage);
+          m_progressDialog->setLabelText(label);
+      });
+      connect(m_modelLoader, &IAIModelLoadService::finished, this,
+              [this](bool success, const QString& error) {
+          m_modelsLoading = false;
+          if (m_progressDialog) m_progressDialog->hide();
+          if (success) {
+              qDebug() << "[AIProcessorPlugin] Background model loading completed.";
+              if (m_aiSvc && m_aiSvc->isDetectionReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("detection");
+              if (m_aiSvc && m_aiSvc->isSegmentationReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("segmentation");
+              if (m_aiSvc && m_aiSvc->isTrackingReady())
+                  emit m_ctx->signalBus()->aiModelLoaded("tracking");
+          } else if (!error.isEmpty()) {
+              qWarning().noquote() << "[AIProcessorPlugin]" << error;
+          }
+          updateActions();
+      });
+      connect(m_modelLoader, &IAIModelLoadService::cancelled, this, [this]() {
+          m_modelsLoading = false;
+          if (m_progressDialog) m_progressDialog->hide();
+          qDebug() << "[AIProcessorPlugin] Model loading cancelled.";
+          updateActions();
+      });
   }
 
   m_progressDialog = m_ctx->shell()->getProgressDialog();
+  if (m_progressDialog) {
+      connect(m_progressDialog, &IProgressDialog::stopRequested, this, [this]() {
+          if (m_modelLoader) m_modelLoader->cancel();
+      });
+  }
   
   // Setup Dock Widget
   m_trainDock = new AITrainDockWidget(m_ctx, m_ctx->shell()->dialogParent());
@@ -63,96 +111,36 @@ bool AIProcessorPlugin::initialize(IAppContext *context) {
 }
 
 void AIProcessorPlugin::loadModelsInBackground() {
-  if (!m_aiSvc) return;
-  auto* paths = m_ctx->services()->get<IAppPaths>();
+  if (!m_aiSvc || !m_modelLoader || m_modelsLoading || m_modelLoader->isLoading())
+      return;
+
+  auto* paths = m_ctx->services()->getRequired<IAppPaths>();
   if (!paths) return;
-  QString modelsPath = paths->modelsDir();
-  QString detPath = modelsPath + "/" + AppConstants::AIProcessor::detectionModelFile();
-  QString segPath = modelsPath + "/" + AppConstants::AIProcessor::segmentationModelFile();
-  QString trackPath = modelsPath + "/" + AppConstants::AIProcessor::trackingModelFile();
-  bool detExists = QFile::exists(detPath);
-  bool segExists = QFile::exists(segPath);
-  bool trackExists = QFile::exists(trackPath);
 
-  if (detExists || segExists || trackExists) {
-      m_modelsLoading = true;
-      m_cancelModelLoad.store(false);
+  const QString modelsPath = paths->modelsDir();
+  const QString detPath = modelsPath + "/" + AppConstants::AIProcessor::detectionModelFile();
+  const QString segPath = modelsPath + "/" + AppConstants::AIProcessor::segmentationModelFile();
+  const QString trackPath = modelsPath + "/" + AppConstants::AIProcessor::trackingModelFile();
 
-      if (m_runDetAct) m_runDetAct->setEnabled(false);
-      if (m_runSegAct) m_runSegAct->setEnabled(false);
+  if (!QFile::exists(detPath) && !QFile::exists(segPath) && !QFile::exists(trackPath))
+      return;
 
-      m_modelLoadWatcher = new QFutureWatcher<void>(this);
-      connect(m_modelLoadWatcher, &QFutureWatcher<void>::finished, this, [this]() {
-          m_modelsLoading = false;
-          if (m_progressDialog) m_progressDialog->hide();
-          if (m_modelLoadStopConn) {
-              disconnect(m_modelLoadStopConn);
-              m_modelLoadStopConn = {};
-          }
-          if (m_cancelModelLoad.load()) {
-              qDebug() << "[AIProcessorPlugin] Model loading cancelled.";
-          } else {
-              qDebug() << "[AIProcessorPlugin] Background model loading completed.";
-              if (m_aiSvc && m_aiSvc->isDetectionReady())
-                  emit m_ctx->signalBus()->aiModelLoaded("detection");
-              if (m_aiSvc && m_aiSvc->isSegmentationReady())
-                  emit m_ctx->signalBus()->aiModelLoaded("segmentation");
-              if (m_aiSvc && m_aiSvc->isTrackingReady())
-                  emit m_ctx->signalBus()->aiModelLoaded("tracking");
-          }
-          updateActions(); 
-      });
+  m_modelsLoading = true;
+  if (m_runDetAct) m_runDetAct->setEnabled(false);
+  if (m_runSegAct) m_runSegAct->setEnabled(false);
 
-      if (m_progressDialog) {
-          m_modelLoadStopConn = connect(m_progressDialog, &CustomProgressDialog::stopRequested, this, [this]() {
-              m_cancelModelLoad.store(true);
-              m_modelsLoading = false;
-              if (m_progressDialog) m_progressDialog->hide();
-              updateActions();
-          });
-
-          QString firstLabel = (detExists) ? m_ctx->translate("aiproc.loading_det") : m_ctx->translate("aiproc.loading_seg");
-          if (firstLabel.isEmpty()) firstLabel = (detExists) ? "Loading Detection..." : "Loading Segmentation...";
-          m_progressDialog->setLabelText(firstLabel);
-          m_progressDialog->setRange(0, 0);
-          m_progressDialog->show();
-          m_progressDialog->centerOnWidget(m_ctx->shell()->dialogParent());
-      }
-
-      IAIService* svc   = m_aiSvc;
-      auto *dlg         = m_progressDialog;
-      auto *ctx         = m_ctx;
-      bool _detExists   = detExists;
-      bool _segExists   = segExists;
-      bool _trackExists = trackExists;
-      auto *cancelFlag  = &m_cancelModelLoad;
-
-      // Resolve progress labels on the GUI thread — IAppContext::translate()
-      // touches the ServiceRegistry, which is not thread-safe, so it must not
-      // be called from the QtConcurrent worker below.
-      QString detMsg = ctx->translate("aiproc.loading_det");
-      if (detMsg.isEmpty()) detMsg = "Loading Detection...";
-      QString segMsg = ctx->translate("aiproc.loading_seg");
-      if (segMsg.isEmpty()) segMsg = "Loading Segmentation...";
-      QString trackMsg = ctx->translate("aiproc.loading_track");
-      if (trackMsg.isEmpty()) trackMsg = "Loading Tracking...";
-
-      QFuture<void> future = QtConcurrent::run([svc, dlg, detPath, segPath, trackPath, _detExists, _segExists, _trackExists, cancelFlag, detMsg, segMsg, trackMsg]() {
-          if (_detExists && !cancelFlag->load()) {
-              QMetaObject::invokeMethod(dlg, [dlg, detMsg]() { if (dlg) dlg->setLabelText(detMsg); }, Qt::QueuedConnection);
-              svc->loadDetectionModel(detPath);
-          }
-          if (_segExists && !cancelFlag->load()) {
-              QMetaObject::invokeMethod(dlg, [dlg, segMsg]() { if (dlg) dlg->setLabelText(segMsg); }, Qt::QueuedConnection);
-              svc->loadSegmentationModel(segPath);
-          }
-          if (_trackExists && !cancelFlag->load()) {
-              QMetaObject::invokeMethod(dlg, [dlg, trackMsg]() { if (dlg) dlg->setLabelText(trackMsg); }, Qt::QueuedConnection);
-              svc->loadTrackingModel(trackPath);
-          }
-      });
-      m_modelLoadWatcher->setFuture(future);
+  QString firstLabel = m_ctx->translate("aiproc.loading_det");
+  if (firstLabel.isEmpty()) firstLabel = "Loading Detection...";
+  if (m_progressDialog) {
+      m_progressDialog->setLabelText(firstLabel);
+      m_progressDialog->setRange(0, 0);
+      m_progressDialog->show();
+      m_progressDialog->centerOnWidget(m_ctx->shell()->dialogParent());
   }
+
+  // The worker lives in AppCore (IAIModelLoadService). Keeping it out of this
+  // plugin DLL is what makes plugin unload safe while a model is loading.
+  m_modelLoader->loadModelsAsync(detPath, segPath, trackPath);
 }
 
 void AIProcessorPlugin::setupMenus() {
@@ -232,6 +220,46 @@ void AIProcessorPlugin::setupConnections() {
 }
 
 void AIProcessorPlugin::cleanup() {
+    // A GUI-triggered inference may still be running when the plugin is
+    // unloaded. Join it (bounded) BEFORE the widgets and the scene/viewer
+    // references are deleted. The task itself only calls AppCore services
+    // and values, but its completion callback belongs to this object: after
+    // cleanup the result is dropped (m_cleanedUp), not written into dead UI.
+    m_cleanedUp = true;
+    m_inferenceRunning = false;
+    const int unfinished = m_inferenceTasks.waitForFinished(3000);
+    if (unfinished > 0) {
+        qWarning() << "[AIProcessorPlugin] an inference task did not finish "
+                      "within the teardown bound; dropping its result.";
+    }
+
+    // The model-load worker belongs to AppCore and may still be running; the
+    // plugin only stops observing it. This avoids executing plugin code after
+    // QPluginLoader unloads this DLL.
+    if (m_modelLoader) {
+        disconnect(m_modelLoader, nullptr, this, nullptr);
+        m_modelLoader->cancel();
+    }
+    m_modelsLoading = false;
+
+    // The menu (and its sub-menus and actions) lives in a menu the SHELL owns.
+    // addAction() parents them to that menu, so they outlive this plugin as
+    // dead entries; the sub-menu pointers below would dangle with them.
+    if (m_ctx) {
+        if (QMenu *menu = m_ctx->shell()->getMenu(AppConstants::MenuIds::AiProcessor))
+            menu->clear();
+    }
+    m_detMenu = nullptr;
+    m_segMenu = nullptr;
+    m_trackMenu = nullptr;
+    m_runDetAct = nullptr;
+    m_hideDetAct = nullptr;
+    m_runSegAct = nullptr;
+    m_hideSegAct = nullptr;
+    m_runTrackingAct = nullptr;
+    m_pauseTrackingAct = nullptr;
+    m_stopTrackingAct = nullptr;
+
     if (m_tensorboardWaitTimer) {
         m_tensorboardWaitTimer->stop();
     }
@@ -242,11 +270,24 @@ void AIProcessorPlugin::cleanup() {
         }
     }
     if (m_trackerThread) {
-        m_trackerThread->stop();
-        m_trackerThread->wait();
+        m_trackerThread->stopAndWait();
         delete m_trackerThread;
         m_trackerThread = nullptr;
     }
+
+    // AITrainDockWidget is a plugin-defined QDockWidget. It has to be
+    // DETACHED from the main window's dock area before it is deleted —
+    // otherwise the shell keeps a stale item and the next plugin's
+    // addDockWidget() trips over it. IShellService::deleteDockWidget() does
+    // exactly that (remove + synchronous delete); the synchronous delete is
+    // deliberate, a deleteLater() may not run before the plugin DLL is
+    // unloaded.
+    if (m_trainDock) {
+        m_ctx->shell()->deleteDockWidget(m_trainDock);
+        m_trainDock = nullptr;
+    }
+    delete m_ribbonUI;
+    m_ribbonUI = nullptr;
 }
 
 void AIProcessorPlugin::onTrainModel() {
@@ -271,16 +312,11 @@ void AIProcessorPlugin::onObjectDetection() {
       ModernMessageBox::warning(m_ctx->shell()->dialogParent(), m_ctx->translate("common.error"), m_ctx->translate("aiproc.model_not_loaded_warn"));
       return;
   }
-  emit m_ctx->signalBus()->aiInferenceStarted("detection");
-  cv::Mat res = m_aiSvc->runDetection(cv::imread(currentImg.toStdString()));
-  emit m_ctx->signalBus()->aiInferenceFinished("detection");
 
-  m_ctx->viewer()->setAIMode(AIMode::Detection);
-  m_ctx->scene()->showImage(res);
-  m_ctx->scene()->render();
-  m_ctx->shell()->updateMenuStates();
-
-  AIPredictionLogger::logAsync(m_ctx->services()->get<IAppPaths>(), "detection", currentImg, res);
+  // The inference itself is dispatched to a background thread (see
+  // requestInference): running it here froze the window for the whole ONNX
+  // call. The result is applied when the future finishes.
+  requestInference(InferenceKind::Detection);
 }
 
 void AIProcessorPlugin::onSegmentation() {
@@ -299,16 +335,89 @@ void AIProcessorPlugin::onSegmentation() {
       ModernMessageBox::warning(m_ctx->shell()->dialogParent(), m_ctx->translate("common.error"), m_ctx->translate("aiproc.model_not_loaded_warn"));
       return;
   }
-  emit m_ctx->signalBus()->aiInferenceStarted("segmentation");
-  cv::Mat res = m_aiSvc->runSegmentation(cv::imread(currentImg.toStdString()));
-  emit m_ctx->signalBus()->aiInferenceFinished("segmentation");
 
-  m_ctx->viewer()->setAIMode(AIMode::Segmentation);
-  m_ctx->scene()->showImage(res);
-  m_ctx->scene()->render();
-  m_ctx->shell()->updateMenuStates();
+  requestInference(InferenceKind::Segmentation);
+}
 
-  AIPredictionLogger::logAsync(m_ctx->services()->get<IAppPaths>(), "segmentation", currentImg, res);
+const char *AIProcessorPlugin::inferenceStage(InferenceKind kind) {
+    return kind == InferenceKind::Detection ? "detection" : "segmentation";
+}
+
+QFuture<cv::Mat> AIProcessorPlugin::dispatchInference(std::function<cv::Mat()> task) {
+    // blocking::run, not the global thread pool: a pool may execute the task
+    // INLINE on the calling thread, which is exactly the GUI freeze this
+    // helper exists to prevent. run() always uses a dedicated QThread, and
+    // the task is registered with m_inferenceTasks so cleanup() can join it.
+    return blocking::run(std::move(task), &m_inferenceTasks);
+}
+
+void AIProcessorPlugin::requestInference(InferenceKind kind) {
+    if (m_cleanedUp) return;
+    // One inference at a time: the ONNX session is shared, and two results
+    // racing for the same viewer would show the older one.
+    if (m_inferenceRunning) return;
+    m_inferenceRunning = true;
+    updateActions();
+
+    const QString imagePath = m_ctx->viewer()->getCurrent2DImagePath();
+    const QString stage = QString::fromLatin1(inferenceStage(kind));
+    emit m_ctx->signalBus()->aiInferenceStarted(stage);
+
+    auto *watcher = new QFutureWatcher<cv::Mat>(this);
+    connect(watcher, &QFutureWatcher<cv::Mat>::finished, this,
+            [this, watcher, kind, imagePath]() {
+        const cv::Mat result = watcher->result();
+        watcher->deleteLater();
+        finishInference(kind, imagePath, result);
+    });
+
+    // The task captures ONLY AppCore services and values: if the plugin is
+    // unloaded while the inference is still running, the task can finish
+    // without touching this object. (The DLL itself stays mapped; see
+    // QLibrary::PreventUnloadHint.)
+    IAIService *ai = m_aiSvc;
+    watcher->setFuture(dispatchInference([ai, kind, imagePath]() -> cv::Mat {
+        const cv::Mat input = cv::imread(imagePath.toStdString());
+        if (kind == InferenceKind::Detection)
+            return ai->runDetection(input);
+        return ai->runSegmentation(input);
+    }));
+}
+
+void AIProcessorPlugin::finishInference(InferenceKind kind, const QString &imagePath,
+                                        const cv::Mat &result) {
+    // The plugin may have been cleaned up while the task was in flight: the
+    // shell and the widgets are gone, so the result must be dropped instead
+    // of written into a deleted scene/viewer.
+    if (m_cleanedUp) return;
+
+    m_inferenceRunning = false;
+    const QString stage = QString::fromLatin1(inferenceStage(kind));
+    emit m_ctx->signalBus()->aiInferenceFinished(stage);
+
+    if (result.empty()) {
+        // blocking::run() delivers a default-constructed value when the task
+        // threw: report the failure instead of rendering an empty frame.
+        updateActions();
+        ModernMessageBox::warning(m_ctx->shell()->dialogParent(),
+                                  m_ctx->translate("common.error"),
+                                  m_ctx->translate("aiproc.inference_failed"));
+        return;
+    }
+
+    m_ctx->viewer()->setAIMode(kind == InferenceKind::Detection
+                                   ? AIMode::Detection
+                                   : AIMode::Segmentation);
+    m_ctx->scene()->showImage(result);
+    m_ctx->scene()->render();
+    m_ctx->shell()->updateMenuStates();
+
+    // The prediction log lives in AppCore: the write runs on a worker the
+    // service owns and joins, so no plugin code outlives the plugin.
+    if (m_predictionLog)
+        m_predictionLog->logPrediction(stage, imagePath, result);
+
+    updateActions();
 }
 
 void AIProcessorPlugin::onHideAIResults() {
@@ -324,7 +433,7 @@ void AIProcessorPlugin::onHideAIResults() {
 }
 
 void AIProcessorPlugin::onViewCharts() {
-  auto* paths = m_ctx->services()->get<IAppPaths>();
+  auto* paths = m_ctx->services()->getRequired<IAppPaths>();
   if (!paths) return;
   QString aiComputerVisionDir = paths->aiComputerVisionDir();
   QString runsDir = QDir::cleanPath(aiComputerVisionDir + "/runs");
@@ -396,7 +505,7 @@ void AIProcessorPlugin::onViewCharts() {
           m_progressDialog->setLabelText(m_ctx->translate("aiproc.tb_seconds").arg(remainingSeconds));
       }
   });
-  connect(m_progressDialog, &CustomProgressDialog::stopRequested, waitTimer, [this, waitTimer]() {
+  connect(m_progressDialog, &IProgressDialog::stopRequested, waitTimer, [this, waitTimer]() {
       waitTimer->stop();
       waitTimer->deleteLater();
       if (m_tensorboardWaitTimer == waitTimer) m_tensorboardWaitTimer = nullptr;
@@ -451,8 +560,7 @@ void AIProcessorPlugin::onObjectTracking() {
     
     // Stop existing tracking if any
     if (m_trackerThread) {
-        m_trackerThread->stop();
-        m_trackerThread->wait();
+        m_trackerThread->stopAndWait();
         delete m_trackerThread;
         m_trackerThread = nullptr;
     }
@@ -486,8 +594,7 @@ void AIProcessorPlugin::onPauseResumeTracking() {
 
 void AIProcessorPlugin::onStopTracking() {
     if (m_trackerThread) {
-        m_trackerThread->stop();
-        m_trackerThread->wait();
+        m_trackerThread->stopAndWait();
         delete m_trackerThread;
         m_trackerThread = nullptr;
     }
@@ -503,7 +610,7 @@ void AIProcessorPlugin::onTrackingFrameReceived(const cv::Mat& frame) {
 
 void AIProcessorPlugin::onTrackingFinished() {
     if (m_trackerThread) {
-        m_trackerThread->wait();
+        m_trackerThread->stopAndWait();
         delete m_trackerThread;
         m_trackerThread = nullptr;
     }
@@ -558,18 +665,18 @@ void AIProcessorPlugin::updateActions() {
           m_ribbonUI->btnTrack()->setVisible(true);
       }
   } else {
-      m_runDetAct->setEnabled(!isTrackingMode && mode != AIMode::Detection && has2D && detReady);
-      m_runSegAct->setEnabled(!isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
-      m_runTrackingAct->setEnabled(!isTrackingMode && trackReady);
+      m_runDetAct->setEnabled(!m_inferenceRunning && !isTrackingMode && mode != AIMode::Detection && has2D && detReady);
+      m_runSegAct->setEnabled(!m_inferenceRunning && !isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
+      m_runTrackingAct->setEnabled(!m_inferenceRunning && !isTrackingMode && trackReady);
       m_pauseTrackingAct->setEnabled(isTrackingMode);
       m_stopTrackingAct->setEnabled(isTrackingMode);
       
       if (m_ribbonUI) {
           m_ribbonUI->btnDet()->setText(m_ctx->translate("ai.run_detection"));
-          m_ribbonUI->btnDet()->setEnabled(!isTrackingMode && mode != AIMode::Detection && has2D && detReady);
+          m_ribbonUI->btnDet()->setEnabled(!m_inferenceRunning && !isTrackingMode && mode != AIMode::Detection && has2D && detReady);
           m_ribbonUI->btnSeg()->setText(m_ctx->translate("ai.run_segmentation"));
-          m_ribbonUI->btnSeg()->setEnabled(!isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
-          m_ribbonUI->btnTrack()->setEnabled(!isTrackingMode && trackReady);
+          m_ribbonUI->btnSeg()->setEnabled(!m_inferenceRunning && !isTrackingMode && mode != AIMode::Segmentation && has2D && segReady);
+          m_ribbonUI->btnTrack()->setEnabled(!m_inferenceRunning && !isTrackingMode && trackReady);
           
           m_ribbonUI->btnPauseTrack()->setEnabled(isTrackingMode);
           m_ribbonUI->btnStopTrack()->setEnabled(isTrackingMode);

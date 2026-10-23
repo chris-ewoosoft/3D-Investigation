@@ -19,7 +19,7 @@ from ai_assistant.adapters.persistence import SqliteTaskStore
 from ai_assistant.application.agent_runs import AgentRunService
 from ai_assistant.application.tasks import TaskService
 from ai_assistant.application.tools import ToolExecutionService
-from ai_assistant.domain.security import Principal
+from ai_assistant.domain.security import principal_for
 from ai_assistant.domain.tasks import AgentTask, TaskStatus
 from ai_assistant.domain.tools import SideEffect, ToolSpec
 from ai_assistant.plugins.registry import PluginRegistry
@@ -27,7 +27,11 @@ from ai_assistant.plugins.registry import PluginRegistry
 
 class PlatformArchitectureTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.principal = Principal("test", frozenset({"project.read", "project.write"}))
+        # The principal's clearance follows the scopes it was granted: the
+        # specs below carry the default ``restricted`` ceiling, so a principal
+        # that may write needs the matching clearance — otherwise the
+        # classification gate would fire before the gate under test.
+        self.principal = principal_for("test", frozenset({"project.read", "project.write"}))
         self.registry = PluginRegistry(frozenset({"test.plugin"}))
 
     def test_tool_execution_has_one_policy_path(self):

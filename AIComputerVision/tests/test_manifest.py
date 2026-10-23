@@ -57,6 +57,21 @@ class ManifestRoundTripTests(unittest.TestCase):
             leftovers = [p.name for p in models_dir.iterdir() if p.name.startswith(".manifest.")]
             self.assertEqual(leftovers, [])
 
+    def test_a_non_finite_value_is_refused_instead_of_written_as_invalid_json(self) -> None:
+        # ``json.dumps`` writes bare ``NaN``/``Infinity`` by default, which is
+        # not valid JSON. Metrics are sanitised before they get here; this is
+        # the second line of defence for a hand-built entry or a future field.
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            data: manifest_mod.Manifest = {
+                "schema_version": 1,
+                "entries": {"yolo11n.onnx": {"sha256": "abc", "metrics": {"mAP": float("nan")}}},
+            }
+            with self.assertRaises(ManifestIntegrityError) as ctx:
+                manifest_mod.save_manifest(models_dir, data)
+            self.assertIn("JSON cannot represent", str(ctx.exception))
+            self.assertFalse((models_dir / MANIFEST_NAME).exists())
+
     def test_verify_detects_ok_missing_and_tampered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
@@ -167,6 +182,26 @@ class ManifestRoundTripTests(unittest.TestCase):
             self.assertIsNone(entry["trained_at"])
             self.assertNotIn("metrics", entry)
             self.assertEqual(entry["sha256"], sha256_file(target))
+
+    def test_build_from_scan_prunes_entries_for_deleted_files(self) -> None:
+        # A scan describes the directory as it is now; leaving the entry for a
+        # deleted file makes the next ``--verify-manifest`` report a ghost that
+        # the scan itself could have removed.
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            det = models_dir / MODEL_REGISTRY["det"].output
+            seg = models_dir / MODEL_REGISTRY["seg"].output
+            det.write_bytes(b"det")
+            seg.write_bytes(b"seg")
+            manifest = manifest_mod.build_from_scan(models_dir)
+            self.assertIn(seg.name, manifest["entries"])
+            manifest_mod.save_manifest(models_dir, manifest)
+
+            seg.unlink()
+            refreshed = manifest_mod.build_from_scan(models_dir)
+            self.assertNotIn(seg.name, refreshed["entries"])
+            self.assertIn(det.name, refreshed["entries"])
+            self.assertEqual(manifest_mod.verify_manifest(models_dir, refreshed), [])
 
     def test_scan_handles_a_changed_file_whose_identity_fields_are_absent(self) -> None:
         # An entry written by an older schema may carry only a digest; the scan

@@ -2,6 +2,9 @@
 enable_mcp = true
 enable_a2a = true
 allow_remote_a2a = false
+# Admission bound: A2A tasks executing at once. The refusal happens before a
+# worker thread is created; AGENT_MAX_CONCURRENT_TASKS overrides this value.
+max_concurrent_tasks = 8
 
 [api]
 # Desktop UI uses loopback requests; browser clients must be explicitly added

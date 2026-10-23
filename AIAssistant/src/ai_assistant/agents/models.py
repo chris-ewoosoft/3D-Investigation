@@ -8,7 +8,10 @@ from pydantic import BaseModel, Field
 
 class AgentExecuteRequest(BaseModel):
     task:                str   = Field(..., min_length=1, max_length=4000)
-    session_id:          str   = Field(default="")
+    #: Session ids become lock-pool keys and checkpointer thread ids.  They
+    #: are bounded at the transport boundary so an arbitrarily long id cannot
+    #: turn one request into a large retained key.
+    session_id:          str   = Field(default="", max_length=128)
     temperature:         float = Field(0.3, ge=0.0, le=1.5)
     language:            str   = Field(default="vi", pattern="^(vi|en)$")
     # The Qt client sends the whole conversation (``buildAgentPayload`` walks
@@ -24,7 +27,7 @@ class AgentExecuteRequest(BaseModel):
 class AgentApproveRequest(BaseModel):
     action_id:  str = Field(..., min_length=1)
     approved:   bool = Field(...)
-    session_id: str = Field(default="")
+    session_id: str = Field(default="", max_length=128)
 
 
 class AgentUiActionResultRequest(BaseModel):
@@ -34,5 +37,5 @@ class AgentUiActionResultRequest(BaseModel):
 
 
 class AgentCancelRequest(BaseModel):
-    session_id: str = Field(..., min_length=1)
+    session_id: str = Field(..., min_length=1, max_length=128)
     request_id: str = Field(default="")

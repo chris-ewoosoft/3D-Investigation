@@ -3,7 +3,7 @@
 from .contracts import LLMBackend, PromptBuilder
 from .hardware import release_ml_memory
 from .llama_cpp_backend import LlamaCppBackend
-from .model_loader import download_if_missing, get_backend, load_model, reload_model
+from .model_loader import download_if_missing, load_backend
 from .prompts import (
     CHARACTER_QUERY_PATTERNS,
     PROJECT_CHARACTER_NAMES,
@@ -23,9 +23,7 @@ __all__ = [
     "PromptBuilder",
     "download_if_missing",
     "estimate_tokens",
-    "get_backend",
-    "load_model",
+    "load_backend",
     "release_ml_memory",
-    "reload_model",
     "trim_history",
 ]

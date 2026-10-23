@@ -318,7 +318,12 @@ class ContextService:
         tool_registry: Any = None,
         checkpointer: Any = None,
         task_coordinator: TaskCoordinator | None = None,
+        delegate_fn: Callable[..., Any] | None = None,
+        authorise_delegation_fn: Callable[..., tuple[bool, str | None]] | None = None,
     ) -> None:
+        supervisor_policy: dict[str, Any] = {}
+        if authorise_delegation_fn is not None:
+            supervisor_policy["authorise_delegation_fn"] = authorise_delegation_fn
         self._ctx = AgentRunContext(
             llm_runtime=llm_runtime,
             pending_actions=pending_actions if pending_actions is not None else MemoryPendingStore(),
@@ -327,6 +332,8 @@ class ContextService:
             tool_registry=tool_registry,
             checkpointer=checkpointer,
             task_coordinator=TaskCoordinator() if task_coordinator is None else task_coordinator,
+            delegate_fn=delegate if delegate_fn is None else delegate_fn,
+            **supervisor_policy,
         )
 
     @property

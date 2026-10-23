@@ -17,9 +17,13 @@ PyYAML==6.0.2
 onnx==1.21.0
 onnxslim==0.1.91
 # Post-export compatibility validation (the same engine the Qt runtime uses).
-# >= 1.20.1 mirrors ONNXRUNTIME_VERSION in CMakeLists.txt, the version the
-# exported models are guaranteed to load under.
-onnxruntime>=1.20.1
+# Exactly the version CMakeLists.txt pins (ONNXRUNTIME_VERSION): the export
+# contract is validated against the engine the desktop application ships, so
+# "the artifact loads" has to mean "it loads under the runtime that ships".
+# A range would let a newer engine validate an artifact the shipped runtime
+# cannot load. The drift between this file and CMakeLists.txt is a red test
+# (tests/test_toolchain_contract.py), not a reviewer's memory.
+onnxruntime==1.20.1
 
 # Optional - only required when training with ``--tensorboard``.
 tensorboard==2.15.2

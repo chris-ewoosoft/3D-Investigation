@@ -82,7 +82,7 @@ private slots:
         QVERIFY(!registry.has<DummyService1>());
     }
 
-    void testDuplicateRegistrationReplaces() {
+    void testDuplicateRegistrationIsRefused() {
         ServiceRegistry registry;
         DummyServiceImpl1 first;
         DummyServiceImpl1 second;
@@ -90,7 +90,10 @@ private slots:
         QTest::ignoreMessage(QtWarningMsg,
             QRegularExpression("ServiceRegistry: duplicate registration of \"test\\.DummyService1\".*"));
         registry.registerService<DummyService1>(&second);
-        QCOMPARE(registry.get<DummyService1>(), static_cast<DummyService1*>(&second));
+        // The FIRST registration wins: a later one (a plugin registering a
+        // service the composition root already installed) must not silently
+        // take the service over.
+        QCOMPARE(registry.get<DummyService1>(), static_cast<DummyService1*>(&first));
     }
 
     void testGetRequiredReturnsRegistered() {

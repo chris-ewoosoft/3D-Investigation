@@ -23,10 +23,8 @@ PROTOCOLS = (
     _types.LoggerLike,
     _types.LLMModuleLike,
     _types.RAGModuleLike,
-    _types.AttachmentHelpers,
     _types.ActionManifestLike,
     _types.PluginSpecLike,
-    _types.PluginRegistryLike,
     _types.PlatformSettingsLike,
     _types.PlatformLike,
     _types.ChatbotAgentLike,
@@ -65,7 +63,7 @@ class ProtocolSurfaceTests(unittest.TestCase):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(_types.RAGModuleLike, name)))
 
-    def test_platform_like_nests_plugins_and_settings(self) -> None:
+    def test_platform_like_nests_the_tool_catalogue_port_and_settings(self) -> None:
         # The nested members are read-only ``@property`` declarations (a frozen
         # dataclass attribute is not settable, so mypy rejects a plain protocol
         # attribute — see ADR 0001); properties surface via ``getattr``, not
@@ -75,6 +73,15 @@ class ProtocolSurfaceTests(unittest.TestCase):
         for name in ("enable_mcp", "enable_a2a", "allow_remote_a2a"):
             with self.subTest(setting=name):
                 self.assertTrue(isinstance(getattr(_types.PlatformSettingsLike, name), property))
+
+    def test_the_catalogue_is_the_shared_port_not_a_local_duplicate(self) -> None:
+        """ADR 0032: the adapter used to declare its own duck-typed
+        duplicate of the catalogue. There is one contract now, in
+        ``ai_assistant.ports``."""
+        from ai_assistant.ports import ToolCatalog
+
+        self.assertIs(_types.ToolCatalog, ToolCatalog)
+        self.assertFalse(hasattr(_types, "PluginRegistryLike"))
 
     def test_chatbot_agent_like_declares_build_and_clean_contract(self) -> None:
         self.assertTrue(callable(_types.ChatbotAgentLike.build_messages))
@@ -135,10 +142,6 @@ class ConcreteFakesMatchProtocolTests(unittest.TestCase):
         for name in ("force_rebuild", "enable_reranker"):
             with self.subTest(keyword_only=name):
                 self.assertEqual(params[name].kind, inspect.Parameter.KEYWORD_ONLY)
-
-    def test_attachment_helpers_declare_both_helpers(self) -> None:
-        self.assertTrue(callable(_types.AttachmentHelpers._is_image_file))
-        self.assertTrue(callable(_types.AttachmentHelpers._image_to_data_uri))
 
 
 if __name__ == "__main__":

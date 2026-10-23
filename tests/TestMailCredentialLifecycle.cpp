@@ -24,11 +24,20 @@ class TestMailCredentialLifecycle : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase();
     void noCredentialsWithoutLogin();
     void credentialsCachedForCurrentUser();
     void credentialsInvalidatedOnLogout();
+    void signatureIsStoredPerUser();
     void blockingMailGuardWarnsOnGuiThread();
 };
+
+void TestMailCredentialLifecycle::initTestCase()
+{
+    // See TestUserManagerCrypto: the default admin credential is provisioned
+    // explicitly in tests, never hard-coded in production code.
+    qputenv("APP_ADMIN_INITIAL_PASSWORD", "1");
+}
 
 void TestMailCredentialLifecycle::blockingMailGuardWarnsOnGuiThread()
 {
@@ -106,3 +115,34 @@ void TestMailCredentialLifecycle::credentialsInvalidatedOnLogout()
 
 QTEST_GUILESS_MAIN(TestMailCredentialLifecycle)
 #include "TestMailCredentialLifecycle.moc"
+
+void TestMailCredentialLifecycle::signatureIsStoredPerUser()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QVERIFY(UserManager::instance()->loadConfig(dir.path() + "/users.ini"));
+
+    QString err;
+    QVERIFY(UserManager::instance()->login("admin", "1", err));
+
+    MailService svc(UserManager::instance());
+    // With no stored preference the signature is derived from the display
+    // name — never empty for a logged-in account.
+    QVERIFY(!svc.signature().isEmpty());
+
+    const QString signature = QStringLiteral("Đội ngũ hỗ trợ — Trân trọng");
+    svc.setSignature(signature);
+    QCOMPARE(svc.signature(), signature);
+
+    // A fresh instance reads the persisted value back — the signature is
+    // account state, not in-memory leftovers.
+    MailService fresh(UserManager::instance());
+    QCOMPARE(fresh.signature(), signature);
+    QCOMPARE(fresh.displayName(), svc.displayName());
+
+    // Logging out drops it with the rest of the account state: a stale
+    // signature must never be attached to the next user's mail.
+    UserManager::instance()->logout();
+    MailService afterLogout(UserManager::instance());
+    QVERIFY(afterLogout.signature().isEmpty());
+}

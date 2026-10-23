@@ -9,18 +9,27 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from ai_assistant.domain.tools import SideEffect, ToolSpec
+from ai_assistant.domain.tools import BUILTIN_PLUGIN_ID, SideEffect, ToolSpec
 from ai_assistant.plugins import loader as loader_module
 from ai_assistant.plugins.registry import PluginRegistry
 
 
-def _spec(name: str, plugin_id: str = "builtin") -> ToolSpec:
+def _spec(
+    name: str,
+    plugin_id: str = "builtin",
+    *,
+    side_effect: SideEffect = SideEffect.READ,
+    required_scope: str | None = None,
+    requires_approval: bool = False,
+) -> ToolSpec:
     return ToolSpec(
         name=name,
         description=f"{name} tool",
         input_schema={"type": "object"},
         timeout_seconds=5,
-        side_effect=SideEffect.READ,
+        side_effect=side_effect,
+        required_scope=required_scope,
+        requires_approval=requires_approval,
         plugin_id=plugin_id,
     )
 
@@ -52,6 +61,54 @@ class PluginRegistryTests(unittest.TestCase):
 
     def test_missing_tool_returns_none(self):
         self.assertIsNone(self.registry.tool("nope"))
+
+    def test_the_builtin_catalogue_is_always_allowed(self) -> None:
+        registry = PluginRegistry(frozenset())
+        self.assertTrue(registry.allows(BUILTIN_PLUGIN_ID))
+        registry.register_tool(_spec("own_tool", plugin_id=BUILTIN_PLUGIN_ID), object())
+        self.assertEqual([spec.name for spec in registry.specs()], ["own_tool"])
+
+    def test_registration_is_scoped_to_the_loaded_plugin(self) -> None:
+        registry = PluginRegistry(frozenset({"acme", "other"}))
+        with registry.registration_scope("acme"):
+            registry.register_tool(_spec("ok", plugin_id="acme"), object())
+            with self.assertRaises(PermissionError):
+                registry.register_tool(_spec("borrowed", plugin_id="other"), object())
+        with registry.registration_scope("other"):
+            registry.register_tool(_spec("other_tool", plugin_id="other"), object())
+        self.assertEqual(
+            {spec.name for spec in registry.specs()}, {"ok", "other_tool"},
+        )
+
+    def test_nested_scopes_restore_the_outer_plugin(self) -> None:
+        registry = PluginRegistry(frozenset({"acme", "other"}))
+        with registry.registration_scope("acme"):
+            with registry.registration_scope("other"):
+                registry.register_tool(_spec("inner", plugin_id="other"), object())
+            registry.register_tool(_spec("outer", plugin_id="acme"), object())
+        self.assertEqual({spec.name for spec in registry.specs()}, {"inner", "outer"})
+
+    def test_a_mutating_tool_without_approval_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.registry.register_tool(
+                _spec("danger", side_effect=SideEffect.WRITE, required_scope="project.write"),
+                object(),
+            )
+
+    def test_a_side_effect_without_a_scope_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.registry.register_tool(
+                _spec("desktop", side_effect=SideEffect.DESKTOP),
+                object(),
+            )
+
+    def test_a_mutating_tool_with_scope_and_approval_is_accepted(self) -> None:
+        spec = _spec(
+            "safe_write", side_effect=SideEffect.WRITE,
+            required_scope="project.write", requires_approval=True,
+        )
+        self.registry.register_tool(spec, object())
+        self.assertIs(self.registry.tool("safe_write").spec, spec)  # type: ignore[union-attr]
 
 
 class _FakePlugin:

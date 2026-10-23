@@ -68,7 +68,9 @@ class HealthRoutesTest(unittest.TestCase):
         self.assertEqual(data["rag_chunks"], 2)
         self.assertFalse(data["reranker"])
         self.assertEqual(data["embed_model"], "all-MiniLM-L6-v2")
-        self.assertEqual(data["model"], "fake-model")
+        # No backend ⇒ no model is advertised (ADR 0041: one source of truth).
+        self.assertEqual(data["model"], "")
+        self.assertFalse(data["is_vision"])
         self.assertEqual(data["chars_per_token"], 4)
         self.assertEqual(data["chunk_chars"], 1200)
         self.assertEqual(data["max_context"], 4096)
@@ -136,10 +138,15 @@ class HealthRoutesTest(unittest.TestCase):
         self.assertEqual(response.text, "# HELP fake")
 
     def test_models_lists_current_model(self) -> None:
-        client = _build_client()
+        client = _build_client(llm=object())
         data = client.get("/v1/models").json()
         self.assertEqual(data["data"][0]["id"], "fake-model")
         self.assertEqual(data["data"][0]["object"], "model")
+
+    def test_models_is_empty_after_the_model_is_released(self) -> None:
+        """A released model must not be advertised to OpenAI-compatible clients."""
+        client = _build_client(llm=None)
+        self.assertEqual(client.get("/v1/models").json(), {"data": []})
 
 
 if __name__ == "__main__":

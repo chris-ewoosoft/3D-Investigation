@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from .action_manifest import action_catalog, action_ids
@@ -55,14 +56,10 @@ class ToolRegistry:
                     new_params["action"] = {**new_params["action"], "enum": sorted(action_ids())}
                     # Replace description with dynamic catalog
                     new_desc = f"{spec.description}\n{action_catalog()}"
-                    tools_for_models.append(ToolDefinition(
-                        name=spec.name,
+                    tools_for_models.append(replace(
+                        spec,
                         description=new_desc,
                         parameters=new_params,
-                        timeout_seconds=spec.timeout_seconds,
-                        policy=spec.policy,
-                        requires_approval=spec.requires_approval,
-                        handler=spec.handler,
                     ))
                 else:
                     tools_for_models.append(spec)
@@ -86,11 +83,7 @@ class ToolRegistry:
                 new_params = dict(spec.parameters)
                 new_params["action"] = {**new_params["action"], "enum": sorted(action_ids())}
                 new_desc = f"{spec.description}\n{action_catalog()}"
-                dynamic_spec = ToolDefinition(
-                    name=spec.name, description=new_desc, parameters=new_params,
-                    timeout_seconds=spec.timeout_seconds, policy=spec.policy,
-                    requires_approval=spec.requires_approval,
-                )
+                dynamic_spec = replace(spec, description=new_desc, parameters=new_params)
                 result.append(dynamic_spec.to_openai_format())
             else:
                 result.append(spec.to_openai_format())

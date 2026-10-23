@@ -116,7 +116,17 @@ QByteArray decodeQuotedPrintableBytes(const QString &input, bool underscoreAsSpa
             }
         }
 
-        bytes.append(ch.toLatin1());
+        // A literal character is appended as the bytes it stands for. Only
+        // the U+0000..U+00FF range maps 1:1 onto bytes (the IMAP payload is
+        // byte-preserving in that range); anything above it is appended as
+        // UTF-8. The old `ch.toLatin1()` turned every such character into
+        // '?' — silently destroying the text instead of decoding it.
+        const uint code = ch.unicode();
+        if (code <= 0xFF) {
+            bytes.append(static_cast<char>(code));
+        } else {
+            bytes.append(QString(QChar(ch)).toUtf8());
+        }
     }
 
     return bytes;

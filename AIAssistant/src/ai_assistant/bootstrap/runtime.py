@@ -12,13 +12,17 @@ from __future__ import annotations
 from typing import Any
 
 from ..application.tools import ToolExecutionService
-from ..domain.security import Principal, current_principal
+from ..domain.security import Principal, current_principal, principal_for
 from ..tools.tool_contract import RUNTIME_UNCONFIGURED_RESULT
 
 # Trusted in-process desktop callers do not bind a principal; they keep the
 # historical broad scope set. Remote transports bind a least-privilege principal
 # through ``bind_principal`` before the engine runs.
-_LOCAL_PRINCIPAL = Principal(
+#: The local desktop caller is the platform's trusted user: it holds the
+#: elevated scopes, so its clearance is the highest one. The clearance is
+#: *derived* from the scopes (``principal_for``) rather than written by hand,
+#: so the two can never disagree.
+_LOCAL_PRINCIPAL = principal_for(
     "legacy-local",
     frozenset({"project.read", "project.write", "project.execute", "desktop.action"}),
 )

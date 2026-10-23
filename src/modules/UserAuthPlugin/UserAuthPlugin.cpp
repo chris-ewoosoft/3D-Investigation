@@ -67,10 +67,10 @@ static QPixmap createAvatarPixmap(const QString &username, const QString &avatar
 // ─── Initialize ───────────────────────────────────────────────────────────────
 bool UserAuthPlugin::initialize(IAppContext* context) {
     m_context = context;
-    s_lang = context->services()->get<ILanguageService>();
-    s_users = context->services()->get<IUserManager>();
+    s_lang = context->services()->getRequired<ILanguageService>();
+    s_users = context->services()->getRequired<IUserManager>();
 
-    auto* paths = context->services()->get<IAppPaths>();
+    auto* paths = context->services()->getRequired<IAppPaths>();
     QString configDir = QFileInfo(paths ? paths->configPath() : QString()).absolutePath();
     QDir().mkpath(configDir);
     QString configPath = configDir + "/Config_User.ini";
@@ -141,9 +141,43 @@ bool UserAuthPlugin::initialize(IAppContext* context) {
 }
 
 void UserAuthPlugin::cleanup() {
+    // Release everything this plugin installed into the shell FIRST: the
+    // host unloads the plugin DLL right after cleanup(), and a widget whose
+    // vtable lives in that DLL must not survive it.
+    releaseShellWidgets();
     if (s_users) s_users->saveConfig();  // flush while the binding is alive
     s_users = nullptr;
     s_lang = nullptr;
+}
+
+void UserAuthPlugin::releaseShellWidgets() {
+    // The event filter first: it is the only object of this plugin whose
+    // vtable is called by the shell (on every resize of the window).
+    releaseOverlayResizer();
+
+    // The menu bar's corner widget owns the two buttons; clear the corner
+    // before deleting it so the menu bar does not keep a dangling pointer.
+    if (m_context) {
+        if (QMenuBar *menuBar = m_context->shell()->menuBar()) {
+            if (menuBar->cornerWidget(Qt::TopRightCorner) == m_cornerWidget)
+                menuBar->setCornerWidget(nullptr, Qt::TopRightCorner);
+        }
+    }
+    // The buttons are children of the corner widget (the layout re-parents
+    // them) or of the menu bar — delete them first, then the empty corner.
+    delete m_langBtn;
+    m_langBtn = nullptr;
+    delete m_avatarBtn;
+    m_avatarBtn = nullptr;
+    delete m_cornerWidget;
+    m_cornerWidget = nullptr;
+
+    delete m_groupHelp;
+    m_groupHelp = nullptr;
+    delete m_groupSettings;
+    m_groupSettings = nullptr;
+    m_btnAbout = nullptr;
+    m_btnSettings = nullptr;
 }
 
 // ─── Authentication ───────────────────────────────────────────────────────────
@@ -196,9 +230,28 @@ void UserAuthPlugin::loadUserSettings() {
 
     // Glassmorphism: semi-transparent panels only when bg image is active
     StyleManager::setGlassmorphismEnabled(useBg);
-    ThemeSelectionDialog::applyGlobalBackground(m_context->shell()->dialogParent(), bgPath, bgOpacity, useBg);
+    applyGlobalBackground(bgPath, bgOpacity, useBg);
 
     emit m_context->signalBus()->userChanged(m_currentUser);
+}
+
+void UserAuthPlugin::applyGlobalBackground(const QString &bgPath, int bgOpacity, bool useBg)
+{
+    // The plugin is the single owner of the shell's background decoration:
+    // the overlay widget AND the event filter that keeps it in sync. The
+    // filter's vtable lives in this DLL, so it must be removed before the
+    // DLL is unloaded — one owner, one place that does it.
+    QWidget *win = m_context ? m_context->shell()->dialogParent() : nullptr;
+    OverlayResizer::applyTo(win, bgPath, bgOpacity, useBg, m_overlayResizer);
+}
+
+void UserAuthPlugin::releaseOverlayResizer()
+{
+    if (!m_overlayResizer) return;
+    if (QObject *host = m_overlayResizer->parent())
+        host->removeEventFilter(m_overlayResizer);
+    delete m_overlayResizer;
+    m_overlayResizer = nullptr;
 }
 
 void UserAuthPlugin::saveUserPref(const QString &key, const QString &value) {
@@ -312,6 +365,9 @@ void UserAuthPlugin::setupMenus() {
         cornerLayout->addWidget(m_avatarBtn);
         menuBar->setCornerWidget(cornerWidget, Qt::TopRightCorner);
         cornerWidget->show();
+        // Remember it: the plugin has to release it before the DLL is
+        // unloaded (see releaseShellWidgets()).
+        m_cornerWidget = cornerWidget;
     }
 
     // ── Avatar dropdown menu ─────────────────────────────────────────────────
@@ -390,14 +446,20 @@ void UserAuthPlugin::onLanguageChanged(const QString &/*lang*/) {
 
 // ─── Slots ────────────────────────────────────────────────────────────────────
 void UserAuthPlugin::onOpenSettings() {
-    UserInfo u = UserAuthPlugin::users()->userInfo(m_currentUser);
-    bool isAdmin = (u.role == UserRole::Admin);
+    // The role comes from the core: the core is what enforces it, so asking
+    // it is the same answer the guard layer would give.
+    const bool isAdmin = UserAuthPlugin::users()->isAdmin();
     SettingsDialog dlg(m_currentUser, isAdmin, m_context, m_context->shell()->dialogParent());
+    // The plugin owns the shell's background decoration, so the dialog asks
+    // for a change instead of applying one itself.
+    dlg.setBackgroundRequest([this](const QString &path, int opacity, bool enabled) {
+        applyGlobalBackground(path, opacity, enabled);
+    });
     dlg.exec();
 }
 
 void UserAuthPlugin::onChangeAvatar() {
-    AvatarCropperDialog dlg(m_currentUser, m_context->services()->get<IAppPaths>(),
+    AvatarCropperDialog dlg(m_currentUser, m_context->services()->getRequired<IAppPaths>(),
                             m_context->shell()->dialogParent());
     if (dlg.exec() == QDialog::Accepted) {
         setupMenus();
@@ -408,23 +470,10 @@ void UserAuthPlugin::onLogout() {
     UserAuthPlugin::users()->logout();
     m_currentUser.clear();
 
-    if (m_langBtn) {
-        m_langBtn->deleteLater();
-        m_langBtn = nullptr;
-    }
-    if (m_avatarBtn) {
-        m_avatarBtn->deleteLater();
-        m_avatarBtn = nullptr;
-    }
-
-    QMenuBar* menuBar = m_context->shell()->menuBar();
-    if (menuBar) {
-        QWidget* oldCorner = menuBar->cornerWidget(Qt::TopRightCorner);
-        if (oldCorner) {
-            menuBar->setCornerWidget(nullptr, Qt::TopRightCorner);
-            oldCorner->deleteLater();
-        }
-    }
+    // The menu bar is rebuilt from scratch after the logout: release the
+    // widgets of the previous session synchronously (a deleteLater() may not
+    // run before the plugin DLL is unloaded).
+    releaseShellWidgets();
 
     m_context->shell()->setVisible(false);
     if (!ensureAuthenticated()) {

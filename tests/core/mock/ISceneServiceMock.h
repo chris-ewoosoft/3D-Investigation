@@ -1,7 +1,7 @@
 #ifndef ISCENESERVICEMOCK_H
 #define ISCENESERVICEMOCK_H
 
-#include "core/ISceneService.h"
+#include "include/ISceneService.h"
 #include <vtkSmartPointer.h>
 #include <vtkActor.h>
 

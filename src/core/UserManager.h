@@ -2,10 +2,16 @@
 #define USER_MANAGER_H
 
 #include "IUserManager.h"
+#include "LicenseKeyLedger.h"
+#include "OtpStore.h"
+#include "UserAccountStore.h"
+#include "UserSettingsStore.h"
+
 #include <QObject>
 #include <QDateTime>
-#include <QSettings>
+#include <QHash>
 #include <shared_mutex>
+
 #include "Global.h"
 
 /**
@@ -16,6 +22,7 @@
  *   - service-locator: ctx->services()->get<IUserManager>()
  */
 class AppShell;
+class QSettings;
 class TestUserManagerCrypto; // regex test access
 class TestMailCredentialLifecycle; // credential lifecycle test access
 class TestSmtpOutbox; // SMTP outbox test access
@@ -40,6 +47,7 @@ private:
     bool isLoggedIn() const override;
     UserInfo currentUser() const override;
     QString currentUsername() const override;
+    bool isAdmin() const override;
 
     void setRememberMe(bool enable, const QString &username) override;
     bool isRememberMeEnabled() const override;
@@ -49,8 +57,11 @@ private:
     bool changePassword(const QString &username, const QString &oldPass,
                         const QString &newPass, QString &error,
                         AuthError *code = nullptr) override;
-    bool resetPassword(const QString &username, const QString &newPass) override;
-    void updateAvatar(const QString &username, const QString &path) override;
+    bool resetPassword(const QString &email, const QString &newPass,
+                        QString &error, AuthError *code = nullptr) override;
+    bool updateProfile(const QString &username, const QString &email,
+                        const QString &avatarPath, QString &error,
+                        AuthError *code = nullptr) override;
 
     // OTP
     bool sendPasswordResetOtp(const QString &email, QString &error) override;
@@ -68,17 +79,20 @@ private:
                                AuthError *code = nullptr) override;
 
     // Admin – users
-    QStringList allUsernames() const override;
-    UserInfo    userInfo(const QString &username) const override;
+    QStringList allUsernames(AuthError *code = nullptr) const override;
+    UserInfo    userInfo(const QString &username, AuthError *code = nullptr) const override;
     bool addUser(const UserInfo &info, const QString &plainPassword, QString &error,
                  AuthError *code = nullptr) override;
-    bool updateUser(const UserInfo &info, QString &error) override;
-    bool deleteUser(const QString &username, QString &error) override;
+    bool updateUser(const UserInfo &info, QString &error,
+                    AuthError *code = nullptr) override;
+    bool deleteUser(const QString &username, QString &error,
+                    AuthError *code = nullptr) override;
 
     // Admin – license keys
-    QString     generateLicenseKey() override;
-    QStringList availableLicenseKeys() const override;
-    bool        revokeLicenseKey(const QString &key, QString &error) override;
+    QString     generateLicenseKey(AuthError *code = nullptr) override;
+    QStringList availableLicenseKeys(AuthError *code = nullptr) const override;
+    bool        revokeLicenseKey(const QString &key, QString &error,
+                                 AuthError *code = nullptr) override;
 
     // SMTP config
     QString smtpSenderEmail() const override;
@@ -106,26 +120,30 @@ private:
 private:
     explicit UserManager(QObject *parent = nullptr);
 
-    QString hashPassword(const QString &password) const;
-    static bool verifyPassword(const QString &password, const QString &storedHash);
-    void    ensureDefaultAdmin();
-    void    loadUsers();
-    void    saveUsers();
-    void    loadLicenseKeys();
-    void    saveLicenseKeys();
+    /// Whether the current session holds the administrator role.
+    /// The caller must hold m_mutex.
+    bool isAdminLocked() const;
+
+    /// Refuse an administrator-only operation when the session is not an
+    /// administrator. Writes the error message and the AuthError code.
+    /// The caller must hold m_mutex.
+    bool refuseUnlessAdmin(QString &error, AuthError *code) const;
 
     mutable std::shared_mutex m_mutex;
     QString m_configPath;
     QSettings *m_settings = nullptr;
     QString    m_currentUsername;
 
-    QMap<QString, UserInfo> m_users;
-    QMap<QString, QString>  m_passwordHashes; // username -> PBKDF2/legacy hash (never leaves the manager)
-    QMap<QString, bool>     m_licenseKeys; // key -> isUsed
-    QMap<QString, QString>  m_keyOwners;   // key -> username
+    UserAccountStore  m_accounts;
+    LicenseKeyLedger  m_licenseLedger;
+    OtpStore          m_otpStore;
+    UserSettingsStore m_userSettings;
 
-    struct OtpEntry { QString otp; QDateTime expiry; };
-    QMap<QString, OtpEntry> m_otpStore; // email -> entry
+    /// Proofs of ownership granted by a successful verifyOtp(): e-mail (lower
+    /// case) -> expiry. A reset consumes its proof, so a single OTP can change
+    /// a password exactly once and no holder of this service can reset a
+    /// password without having proven ownership first.
+    QHash<QString, QDateTime> m_authorizedResets;
 
     IOutgoingMail *m_outgoingMail = nullptr; ///< injected, not owned
 };

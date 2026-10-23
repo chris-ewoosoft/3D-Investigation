@@ -16,8 +16,9 @@ because ``exist_ok``/``deterministic`` are Ultralytics' names — a second
 backend would spell its own, and a leaf must not know them.
 
 The exported file names are a contract with the Qt application. Keep them in
-sync with ``src/core/AppConstants.h``; ``tests/test_contract.py`` enforces the
-match so the two sides cannot silently drift apart.
+sync with ``src/include/AIConstants.h`` (the constants live there — ``AppConstants.h``
+only includes it); ``tests/test_contract.py`` enforces the match so the two
+sides cannot silently drift apart.
 """
 
 from __future__ import annotations
@@ -36,6 +37,15 @@ DEFAULT_WEIGHTS_DIR = BASE_DIR
 DEFAULT_DATA_YAML = PROJECT_ROOT / "Dataset" / "data.yaml"
 MANIFEST_NAME = "manifest.json"
 
+RUN_DIR_PREFIX = "train-"
+"""Prefix of every training run directory under ``runs/<model>/``.
+
+One spelling, two readers: the backend names a run with it
+(``UltralyticsBackend.train``) and the pruner recognises a run by it
+(``fsio.prune_run_directories``). Two spellings would let the pruner keep
+everything it should have deleted — or delete something that is not a run.
+"""
+
 DEFAULT_EPOCHS = 5
 DEFAULT_IMGSZ = 640
 DEFAULT_BATCH = 16
@@ -51,6 +61,17 @@ MAX_IMGSZ = 4096
 
 MAX_WORKERS = 64
 """Fail-fast ceiling: beyond this the loader only adds contention."""
+
+SUPPORTED_ROLES = frozenset({"detection", "segmentation", "tracking"})
+"""Semantic roles the ONNX contract (and therefore the Qt loader) understands.
+
+A ``ModelSpec`` may carry any role string, but only these three have a tensor
+contract in :mod:`cvtrain.onnx_contract` and a parser in
+``src/services/ai``. Preflight rejects anything else before training starts, so
+an unsupported family fails in seconds instead of after an expensive run —
+``tests/test_contract.py`` cross-checks this set against the contract factory so
+the two cannot drift apart.
+"""
 
 
 @dataclass(frozen=True)
@@ -209,16 +230,37 @@ def resolve_models(
 ) -> tuple[str, ...]:
     """Normalise a user selection into a canonical, ordered tuple of keys.
 
-    An empty selection falls back to :data:`DEFAULT_MODELS` so ``python
-    TrainModel.py --yes`` keeps behaving like the legacy script, while the Qt
-    dialog (which always passes explicit ``--det/--seg/--track`` flags) gets
-    exactly what the user ticked.
+    An empty selection falls back to :data:`DEFAULT_MODELS` (filtered to the
+    keys this registry actually has) so ``python TrainModel.py --yes`` keeps
+    behaving like the legacy script, while the Qt dialog (which always passes
+    explicit ``--det/--seg/--track`` flags) gets exactly what the user ticked.
+
+    Unknown keys are a *rejection*, not a fallback: silently training the
+    default set because the caller typo'd a model key would hide the mistake
+    behind a plausible-looking run. A registry with no default key left is the
+    same class of error (there is nothing the caller asked for we can run), so
+    it is named rather than replaced by a guess.
     """
 
     reg = registry or MODEL_REGISTRY
-    chosen = {str(item) for item in selected} if selected else set()
-    ordered = tuple(key for key in reg.keys() if key in chosen)
-    return ordered or DEFAULT_MODELS
+    requested = tuple(str(item) for item in selected or ())
+    if requested:
+        unknown = [key for key in requested if key not in reg]
+        if unknown:
+            available = ", ".join(reg.keys()) or "none"
+            raise ValueError(
+                f"unknown model key(s): {', '.join(unknown)} (choose from {available})"
+            )
+        chosen = set(requested)
+        return tuple(key for key in reg.keys() if key in chosen)
+    defaults = tuple(key for key in DEFAULT_MODELS if key in reg)
+    if not defaults:
+        available = ", ".join(reg.keys()) or "none"
+        raise ValueError(
+            f"no model selected and none of the legacy default models "
+            f"({', '.join(DEFAULT_MODELS)}) exist in this registry (available: {available})"
+        )
+    return defaults
 
 
 @dataclass
@@ -242,6 +284,21 @@ class TrainConfig:
     workers: int = DEFAULT_WORKERS
     seed: int = DEFAULT_SEED
     device: str | None = None
+    device_resolved: str | None = None
+    """The concrete device this run trains on, resolved *before* training.
+
+    ``device`` is what the operator asked for; ``auto`` is a request, not a
+    fact — "let the framework choose" answers differently on a machine with a
+    GPU and on one without, and differently again if the GPU is busy. The
+    pipeline therefore resolves it itself, before any weight is touched, and
+    records the answer next to the request.
+
+    Two consequences, both wanted: the provenance names a device that can be
+    *compared* with the next run's (a CPU run can no longer pass for a GPU
+    run), and the framework is told which device to use instead of choosing
+    for itself. Left ``None`` when the caller did not resolve it (a
+    programmatic call that never reached the orchestrator).
+    """
     opset: int = DEFAULT_OPSET
 
     auto_confirm: bool = False
@@ -254,6 +311,16 @@ class TrainConfig:
 
     Makes a run idempotent: re-running the same command trains nothing. See
     :func:`cvtrain.gate.already_current` for what "satisfies" means."""
+
+    resume: bool = False
+    """Continue the most recent run of each model instead of starting a new one.
+
+    A training run is hours of work; an interrupted one should not have to
+    start over. The framework writes ``weights/last.pt`` after every epoch, so
+    ``--resume`` picks the newest checkpoint of the model and continues from
+    it — with the hyper-parameters that run was started with, not with the
+    ones this invocation happens to pass. Off by default: a fresh run is the
+    reproducible one."""
 
     min_metrics: tuple[tuple[str, float], ...] = ()
     """Quality gate: ``(metric_name, minimum)`` pairs that a model must meet.
@@ -284,14 +351,17 @@ class TrainConfig:
 
     @property
     def device_class(self) -> str:
-        """The canonical spelling of ``device`` used as provenance.
+        """The canonical spelling of the *requested* device, used as provenance.
 
         ``None``/blank means "let the framework choose" and is normalised to
         ``auto``; anything else is lower-cased and whitespace-stripped around
         commas, so ``"0, 1"`` and ``"0,1"`` describe the same experiment. Both
         the recording half (``trainer``) and the comparing half
         (``gate.already_current``) read this one property, so a re-run can never
-        disagree with itself about which device trained an artifact.
+        disagree with itself about which device was asked for.
+
+        The *answer* lives in :attr:`device_resolved`: ``auto`` says nothing
+        about the machine, the resolution says exactly what ran.
         """
 
         raw = (self.device or "").strip()

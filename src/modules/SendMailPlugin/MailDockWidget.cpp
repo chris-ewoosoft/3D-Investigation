@@ -1,3 +1,5 @@
+#include "BlockingCall.h"
+#include "IMailService.h"
 #include "MailDockWidget.h"
 
 #include "MailFilterDialog.h"
@@ -6,9 +8,10 @@
 #include "MailSettingsDialog.h"
 #include "IAppContext.h"
 #include "IShellService.h"
-#include "CustomProgressDialog.h"
+#include "IProgressDialog.h"
 #include "ModernMessageBox.h"
-#include "IUserManager.h"
+#include "IAuthService.h"
+#include "IUserPreferences.h"
 
 #include <QAction>
 #include <QApplication>
@@ -18,7 +21,9 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QFutureWatcher>
+#include <QDebug>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -37,9 +42,22 @@
 MailDockWidget::MailDockWidget(IAppContext *ctx, QObject *parent)
     : QObject(parent), m_ctx(ctx)
 {
-    m_mail = m_ctx->services()->get<IMailService>();
+    m_mail = m_ctx->services()->getRequired<IMailService>();
     loadFilterSettings();
     setupUi();
+}
+
+MailDockWidget::~MailDockWidget()
+{
+    // The background tasks must not outlive the mail service they call: the
+    // service is destroyed when the shell tears down, and a task that is
+    // still running would call into a destroyed object. The wait is bounded
+    // (a hung SMTP call must not freeze the shutdown).
+    const int unfinished = m_tasks.waitForFinished(3000);
+    if (unfinished > 0) {
+        qWarning() << "MailDockWidget:" << unfinished
+                   << "background task(s) did not finish within 3 s";
+    }
 }
 
 void MailDockWidget::setupUi()
@@ -287,11 +305,11 @@ void MailDockWidget::sendCurrentMail()
             ModernMessageBox::warning(m_dock, m_ctx->translate("common.error"), result.second);
         }
     });
-    watcher->setFuture(QtConcurrent::run([mail = m_mail, msg]() {
+    watcher->setFuture(blocking::run([mail = m_mail, msg]() {
         QString error;
         const bool ok = mail->sendMail(msg, error);
         return qMakePair(ok, error);
-    }));
+    }, &m_tasks));
 }
 
 void MailDockWidget::refreshInbox()
@@ -302,7 +320,7 @@ void MailDockWidget::refreshInbox()
     auto *progress = m_ctx->shell()->getProgressDialog();
     progress->setLabelText(m_ctx->translate("mail.loading_inbox"));
     progress->setRange(0, 0);
-    connect(progress, &CustomProgressDialog::stopRequested, progress, &CustomProgressDialog::hide, Qt::UniqueConnection);
+    connect(progress, &IProgressDialog::stopRequested, progress, &IProgressDialog::hide, Qt::UniqueConnection);
     progress->show();
     progress->centerOnWidget(m_dock);
     // Repaint without re-entering user input (see ViewerPlugin).
@@ -357,11 +375,11 @@ void MailDockWidget::refreshInbox()
         }
     });
     IMailService *mail = m_mail;
-    watcher->setFuture(QtConcurrent::run([mail]() {
+    watcher->setFuture(blocking::run([mail]() {
         QString error;
         const QList<MailMessage> list = mail ? mail->fetchInbox(30, error) : QList<MailMessage>{};
         return qMakePair(list, error);
-    }));
+    }, &m_tasks));
 }
 
 void MailDockWidget::onInboxSelectionChanged()
@@ -469,10 +487,11 @@ void MailDockWidget::loadFilterSettings()
 {
     m_filterKeywords.clear();
 
-    auto *um = m_ctx->services()->get<IUserManager>();
-    if (um) {
-        QString username = um->currentUsername();
-        QString customFilters = um->getUserPref(username, "mail_filter_keywords", "");
+    auto *prefs = m_ctx->services()->get<IUserPreferences>();
+    auto *auth = m_ctx->services()->get<IAuthService>();
+    if (prefs && auth) {
+        QString username = auth->currentUsername();
+        QString customFilters = prefs->getUserPref(username, "mail_filter_keywords", "");
         if (!customFilters.isEmpty()) {
             QStringList custom = customFilters.split("|", Qt::SkipEmptyParts);
             for (const QString &kw : custom) {
@@ -486,8 +505,9 @@ void MailDockWidget::loadFilterSettings()
 
 void MailDockWidget::saveFilterSettings()
 {
-    auto *um = m_ctx->services()->get<IUserManager>();
-    if (!um) return;
+    auto *prefs = m_ctx->services()->get<IUserPreferences>();
+    auto *auth = m_ctx->services()->get<IAuthService>();
+    if (!prefs || !auth) return;
 
     QStringList customKeywords;
     for (const QString &kw : m_filterKeywords) {
@@ -498,8 +518,8 @@ void MailDockWidget::saveFilterSettings()
         }
     }
 
-    QString username = um->currentUsername();
-    um->setUserPref(username, "mail_filter_keywords", customKeywords.join("|"));
+    QString username = auth->currentUsername();
+    prefs->setUserPref(username, "mail_filter_keywords", customKeywords.join("|"));
 }
 
 void MailDockWidget::showFilterDialog()

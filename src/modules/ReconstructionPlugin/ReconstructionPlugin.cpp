@@ -7,11 +7,9 @@
 #include "ISceneService.h"
 #include "IReconstructionService.h"
 #include "SignalBus.h"
-// Architecture note: CustomProgressDialog is exposed via IShellService.
-// Direct include is permitted here only because plugin connects to concrete
-// dialog signals (stopRequested); all other plugins should resolve through
-// ctx->shell()->getProgressDialog() without including this header.
-#include "../../utils/CustomProgressDialog.h"
+// Architecture note: the progress dialog is consumed through IProgressDialog
+// via IShellService; the concrete AppCore widget stays out of the plugin ABI.
+#include "IProgressDialog.h"
 #include "../../utils/ModernMessageBox.h"
 #include <QMessageBox>
 #include <QFileDialog>
@@ -32,19 +30,20 @@
 #include <QStyle>
 #include "ReconstructionRibbonUI.h"
 #include "IAppPaths.h"
-#include "IUserManager.h"
+#include "IAuthService.h"
+#include "IUserPreferences.h"
 
 bool ReconstructionPlugin::initialize(IAppContext* context) {
     m_ctx = context;
 
     // Look up IReconstructionService từ ServiceRegistry — không dùng concrete type
-    m_reconSvc = m_ctx->services()->get<IReconstructionService>();
+    m_reconSvc = m_ctx->services()->getRequired<IReconstructionService>();
     if (!m_reconSvc) {
         qWarning() << "[ReconstructionPlugin] IReconstructionService not found in ServiceRegistry!";
     }
 
     m_progressDialog = m_ctx->shell()->getProgressDialog();
-    connect(m_progressDialog, &CustomProgressDialog::stopRequested,
+    connect(m_progressDialog, &IProgressDialog::stopRequested,
             this, &ReconstructionPlugin::onProgressStopped);
 
     // Reconstruction now runs inside the service's own worker; the plugin
@@ -132,6 +131,21 @@ bool ReconstructionPlugin::initialize(IAppContext* context) {
 void ReconstructionPlugin::cleanup() {
     // Service owns the worker thread now; just make it stop.
     if (m_reconSvc) m_reconSvc->stopReconstruction();
+    // The ribbon group lives in the shell's tab panel, not in this QObject:
+    // it has to be destroyed here, synchronously, before the plugin DLL is
+    // unloaded. AbstractRibbonPanel's destructor removes the group it
+    // created in the shell's widget tree.
+    delete m_ribbonUI;
+    m_ribbonUI = nullptr;
+
+    // The menu actions live in a menu the SHELL owns: addAction() makes the
+    // menu their parent, so they survive this plugin as dead entries. Remove
+    // them while this DLL is still the one that can delete them.
+    if (m_ctx) {
+        if (QMenu *menu = m_ctx->shell()->getMenu(AppConstants::MenuIds::Reconstruction))
+            menu->clear();
+    }
+    m_toggleCloudAct = nullptr;
 }
 void ReconstructionPlugin::onLoadMultipleImages() {
     QString folderPath = m_agentImageFolder;
@@ -271,12 +285,13 @@ void ReconstructionPlugin::onRunReconstruction() {
     if (!m_reconSvc) return;
 
     // Apply configuration from Settings
-    auto* um = m_ctx->services()->get<IUserManager>();
-    if (um) {
-        QString username = um->currentUsername();
-        int density = um->getUserPref(username, "recon_density", "1").toInt();
-        bool autoClean = um->getUserPref(username, "recon_auto_clean", "true") == "true";
-        int maxFeatures = um->getUserPref(username, "recon_max_features", "10000").toInt();
+    auto* prefs = m_ctx->services()->get<IUserPreferences>();
+    auto* auth = m_ctx->services()->get<IAuthService>();
+    if (prefs && auth) {
+        QString username = auth->currentUsername();
+        int density = prefs->getUserPref(username, "recon_density", "1").toInt();
+        bool autoClean = prefs->getUserPref(username, "recon_auto_clean", "true") == "true";
+        int maxFeatures = prefs->getUserPref(username, "recon_max_features", "10000").toInt();
         m_reconSvc->configure(density, maxFeatures, autoClean);
     }
 
@@ -301,16 +316,17 @@ void ReconstructionPlugin::onTogglePointCloud(bool forceShow) {
 
 void ReconstructionPlugin::onShowPointCloud() {
     if (!m_reconSvc) return;
-    const auto& pts    = m_reconSvc->getPointCloud();
-    const auto& colors = m_reconSvc->getPointColors();
-    if (pts.empty()) {
+    const auto snapshot = m_reconSvc->pointCloudSnapshot();
+    if (!snapshot || snapshot->points.empty()) {
         QMessageBox::warning(m_ctx->shell()->dialogParent(), 
                              m_ctx->translate("recon.failed_title"), 
                              m_ctx->translate("recon.no_model_error"));
         return;
     }
 
-    m_ctx->scene()->setPointCloudData(pts, colors);
+    // The snapshot keeps points and colours from the same run alive for the
+    // duration of the call, even if a new reconstruction starts concurrently.
+    m_ctx->scene()->setPointCloudData(snapshot->points, snapshot->colors);
     m_ctx->shell()->updateMenuStates();
 }
 

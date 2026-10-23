@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 from ai_assistant.config.model_registry import ModelDefinition, ModelRegistry
 from ai_assistant.llm import model_loader
 from ai_assistant.llm.llama_cpp_backend import LlamaCppBackend
-from ai_assistant.llm.model_loader import get_backend, load_model
 
 # Stand-in for the optional ``llama_cpp`` package so ``mock.patch`` targets
 # like "llama_cpp.Llama" resolve in the offline CI environment as well.
@@ -209,26 +208,18 @@ class LlamaCppBackendTests(unittest.TestCase):
             self.assertIn("Test model", backend.model_description)
 
 
-# ── Backend singleton lifecycle (moved from test_coverage_boost) ──
+# ── Backend factory lifecycle (ADR 0041: no process-wide owner) ──
 
 class ModelLoaderBackendStateTests(unittest.TestCase):
-    """Backend singleton accessors: ``get_backend`` before/after publish."""
+    """The loader builds a backend; the caller owns it."""
 
-    def test_get_backend_returns_none_when_not_loaded(self) -> None:
-        """get_backend returns None when no model is loaded."""
-        with patch("ai_assistant.llm.model_loader._global_backend", None):
-            backend = get_backend()
-            self.assertIsNone(backend)
+    def test_loader_exposes_no_process_wide_backend(self) -> None:
+        """A module-global second owner is what made ``release-vram`` a no-op."""
+        self.assertFalse(hasattr(model_loader, "_global_backend"))
+        self.assertFalse(hasattr(model_loader, "get_backend"))
+        self.assertFalse(hasattr(model_loader, "load_model"))
 
-    def test_get_backend_returns_loaded_backend(self) -> None:
-        """get_backend returns the loaded backend."""
-        mock_backend = MagicMock()
-        with patch("ai_assistant.llm.model_loader._global_backend", mock_backend):
-            backend = get_backend()
-            self.assertIs(backend, mock_backend)
-
-    def test_load_model_publishes_global_backend(self) -> None:
-        """load_model publishes the backend as global."""
+    def test_load_backend_returns_the_constructed_backend(self) -> None:
         # A real ModelDefinition, not a MagicMock: the pin fields are part of
         # the dataclass contract the loader reads (ADR 0023), and an
         # auto-attribute MagicMock would fake a pin that nothing verifies.
@@ -236,29 +227,21 @@ class ModelLoaderBackendStateTests(unittest.TestCase):
         mock_registry = ModelRegistry(models=(mock_model,), fallback=mock_model)
 
         with patch("ai_assistant.llm.model_loader.LlamaCppBackend") as mock_backend_class:
-            mock_backend = MagicMock()
-            mock_backend_class.return_value = mock_backend
-
             with tempfile.TemporaryDirectory() as tmpdir:
                 # Create a fake model file so download is skipped
                 model_file = Path(tmpdir) / "test.gguf"
                 model_file.write_text("fake")
 
-                backend = load_model(mock_registry, tmpdir, model_idx=0, enable_vision=False)
-                self.assertIsNotNone(backend)
+                backend = model_loader.load_backend(
+                    mock_registry, tmpdir, model_idx=0, enable_vision=False)
+        self.assertIs(backend, mock_backend_class.return_value)
 
 
 
-# ── Singleton lifecycle (moved from test_coverage_boost4) ──────
+# ── Factory lifecycle (moved from test_coverage_boost4) ──────
 
 class ModelLoaderLifecycleTests(unittest.TestCase):
-    """Coverage for download/load/reload singleton lifecycle."""
-
-    def setUp(self) -> None:
-        self._original = model_loader._global_backend
-
-    def tearDown(self) -> None:
-        model_loader._global_backend = self._original
+    """Coverage for download/load lifecycle; the module keeps no state."""
 
     def _registry(self, *, vision: bool = False) -> ModelRegistry:
         primary = ModelDefinition(
@@ -282,68 +265,37 @@ class ModelLoaderLifecycleTests(unittest.TestCase):
             model_loader.download_if_missing(ModelDefinition("repo", "m.gguf", "desc"), tmpdir)
         mock_download.assert_called_once()
 
-    def test_load_model_publishes_backend(self) -> None:
+    def test_load_backend_builds_from_the_selected_entry(self) -> None:
         registry = self._registry()
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             model_loader, "download_if_missing", return_value="primary.gguf"
-        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls, patch.object(
-            model_loader, "release_ml_memory"
-        ):
-            backend = model_loader.load_model(registry, tmpdir, model_idx=0, enable_vision=True)
+        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls:
+            backend = model_loader.load_backend(registry, tmpdir, model_idx=0, enable_vision=True)
 
-        self.assertIs(model_loader.get_backend(), backend)
+        self.assertIs(backend, backend_cls.return_value)
         backend_cls.assert_called_once()
 
-    def test_load_model_vision_disabled_uses_fallback(self) -> None:
+    def test_load_backend_vision_disabled_uses_fallback(self) -> None:
         registry = self._registry(vision=True)
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             model_loader, "download_if_missing", return_value="fallback.gguf"
-        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls, patch.object(
-            model_loader, "release_ml_memory"
-        ):
-            model_loader.load_model(registry, tmpdir, enable_vision=False)
+        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls:
+            model_loader.load_backend(registry, tmpdir, enable_vision=False)
 
         self.assertFalse(backend_cls.call_args.kwargs["is_vision"])
         self.assertEqual(backend_cls.call_args.kwargs["desc"], "Fallback")
 
-    def test_load_model_replaces_existing_backend(self) -> None:
-        model_loader._global_backend = MagicMock()
-        registry = self._registry()
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            model_loader, "download_if_missing", return_value="primary.gguf"
-        ), patch.object(model_loader, "LlamaCppBackend"), patch.object(
-            model_loader, "release_ml_memory"
-        ) as mock_release:
-            model_loader.load_model(registry, tmpdir)
-        mock_release.assert_called()
-
-    def test_load_model_downloads_mmproj_for_vision(self) -> None:
+    def test_load_backend_downloads_mmproj_for_vision(self) -> None:
         registry = self._registry(vision=True)
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             model_loader, "download_if_missing", return_value="primary.gguf"
-        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls, patch.object(
-            model_loader, "release_ml_memory"
-        ), patch("huggingface_hub.hf_hub_download") as mock_download:
-            model_loader.load_model(registry, tmpdir, enable_vision=True)
+        ), patch.object(model_loader, "LlamaCppBackend") as backend_cls, patch(
+            "huggingface_hub.hf_hub_download"
+        ) as mock_download:
+            model_loader.load_backend(registry, tmpdir, enable_vision=True)
 
         mock_download.assert_called_once()
         self.assertTrue(backend_cls.call_args.kwargs["is_vision"])
-
-    def test_reload_model_without_backend_raises(self) -> None:
-        model_loader._global_backend = None
-        with self.assertRaises(RuntimeError):
-            model_loader.reload_model(self._registry(), "models_dir")
-
-    def test_reload_model_delegates(self) -> None:
-        model_loader._global_backend = MagicMock()
-        with patch.object(model_loader, "load_model", return_value="new-backend") as mock_load:
-            result = model_loader.reload_model(self._registry(), "models_dir")
-        self.assertEqual(result, "new-backend")
-        mock_load.assert_called_once()
-
-    def test_get_backend_initially_none(self) -> None:
-        model_loader._global_backend = None
-        self.assertIsNone(model_loader.get_backend())
 
 
 class PinnedArtifactTests(unittest.TestCase):
@@ -418,6 +370,13 @@ class PinnedArtifactTests(unittest.TestCase):
             Path(target).write_bytes(content)
             self.assertTrue(model_loader._matches_pin(target, sha.upper()))
             self.assertFalse(model_loader._matches_pin(target, "0" * 64))
+
+    def test_an_unpinned_artifact_is_accepted(self) -> None:
+        """An empty pin means "no pin"; it must not compare against ""."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = str(Path(tmpdir, "m.gguf"))
+            Path(target).write_bytes(b"weights")
+            self.assertTrue(model_loader._matches_pin(target, ""))
 
 
 class MmprojRevisionTests(unittest.TestCase):

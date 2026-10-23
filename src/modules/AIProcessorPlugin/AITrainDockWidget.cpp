@@ -1,6 +1,7 @@
 #include "AITrainDockWidget.h"
 #include "IAppContext.h"
 #include "IAppPaths.h"
+#include "IShellService.h"
 #include "AppConstants.h"
 #include "../../utils/ModernMessageBox.h"
 #include <QVBoxLayout>
@@ -75,7 +76,9 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     setFeatures(QDockWidget::NoDockWidgetFeatures);
     setTitleBarWidget(new QWidget());
 
-    m_ctx->shell()->addDockWidget(Qt::RightDockWidgetArea, this);
+    // The plugin owns the dock and adds it to the shell exactly once (see
+    // AIProcessorPlugin::initialize) — adding it here as well would put two
+    // entries in the dock area and leave a stale item behind on teardown.
     hide();
 
     trainProcess = new QProcess(this);
@@ -115,7 +118,7 @@ void AITrainDockWidget::retranslate() {
 void AITrainDockWidget::startTraining(bool autoConfirm) {
     show();
     if (trainProcess->state() == QProcess::NotRunning) {
-        auto* paths = m_ctx->services()->get<IAppPaths>();
+        auto* paths = m_ctx->services()->getRequired<IAppPaths>();
         if (!paths) return;
         QString scriptPath = paths->aiComputerVisionDir() + "/" + AppConstants::AIProcessor::trainScript();
         QString modelsPath = paths->modelsDir();
@@ -168,7 +171,7 @@ void AITrainDockWidget::startTraining(bool autoConfirm) {
         }
 
         if (modelExists && !autoConfirm) {
-            if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
+            if (!ModernMessageBox::question(m_ctx->services()->getRequired<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("aiproc.confirm"), m_ctx->translate("aiproc.model_exists_retrain"))) {
                 return;
             }
         }
@@ -212,7 +215,7 @@ void AITrainDockWidget::onStopTrain() {
 
 void AITrainDockWidget::closeTrainDock() {
     if (trainProcess->state() != QProcess::NotRunning) {
-        if (!ModernMessageBox::question(m_ctx->services()->get<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("common.warning"), m_ctx->translate("aiproc.train_running_warn"))) {
+        if (!ModernMessageBox::question(m_ctx->services()->getRequired<ILanguageService>(), m_ctx->shell()->dialogParent(), m_ctx->translate("common.warning"), m_ctx->translate("aiproc.train_running_warn"))) {
             return;
         }
         trainProcess->kill();

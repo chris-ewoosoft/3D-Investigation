@@ -32,7 +32,7 @@ public:
     /// Session with @p id, or nullptr. Any mutation invalidates the pointer.
     ChatSession *find(const QString &id);
     ChatSession *current();
-    QList<QJsonObject> currentMessages() const;
+    QList<ChatMessage> currentMessages() const;
 
     // ── Mutations ────────────────────────────────────────────────────────────
     /// Appends a new session (id + createdAt filled) and makes it current.
@@ -42,8 +42,16 @@ public:
     /// Removes the session together with its attachment files and updates the
     /// current selection. Returns false when the id is unknown.
     bool remove(const QString &id);
+    /// Sets a user-chosen title. A blank title or an unknown id is rejected.
+    /// The session stops being "default titled", so a later prompt cannot
+    /// overwrite the name the user chose.
+    bool rename(const QString &id, const QString &title);
     /// Replaces the whole list (persistence load); makes the last one current.
     void replaceAll(QList<ChatSession> sessions);
+    /// Gives every placeholder-titled session that already holds a user prompt
+    /// the title of that prompt (data written before auto-title cleared the
+    /// flag). Returns true when at least one title was repaired.
+    bool adoptPromptTitles();
 
     // ── Persistence (delegates to ChatSessionStore) ──────────────────────────
     void load(const QString &username, const QString &configFilePath);

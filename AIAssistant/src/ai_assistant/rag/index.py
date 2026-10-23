@@ -7,56 +7,153 @@ import logging
 import os
 import pickle
 import time
+from collections.abc import Iterator
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ai_assistant.config.paths import AppPaths
 from ai_assistant.config.rag_config import RAGSettings
 from ai_assistant.image_utils import load_image_for_embedding
 from ai_assistant.llm.hardware import release_ml_memory
+from ai_assistant.path_policy import canonical_path, is_blocked_dir, is_secret_name
+from ai_assistant.ports import FieldCipher, StorageCryptoError
 
-from .cache_integrity import recorded_digest, seal_payload, signing_key, verify_cache
+from .cache_seal import (
+    BM25_CONTEXT,
+    CHUNKS_CONTEXT,
+    INDEX_CONTEXT,
+    is_sealed_metadata,
+    read_metadata,
+    seal_metadata,
+)
 from .domain import ChunkResult
 from .nlp_utils import tokenize_vn
 
 logger = logging.getLogger("ai_assistant.rag.index")
 
+#: The directories the corpus adds to the **shared** blocked-directory rule
+#: (``path_policy.BLOCKED_DIR_NAMES``): they hold artifacts — build output,
+#: datasets, run logs — rather than documents. The shared entries are not
+#: repeated here: the corpus builder is a second reader of the same tree as
+#: the agent's read tools, and it used to carry its own list that *omitted*
+#: two of them (``node_modules`` and ``.vs``), so the two readers disagreed
+#: about what may be read.
 EXCLUDED_DIRS = {
-    ".git", "build", "__pycache__", ".qtcreator", ".cache", "Cache",
-    "runs", "Dicom", "Predict", "3DModels", "Dataset", "logs",
-    ".github", ".prompts", ".review", ".tasks", "scripts"
+    ".qtcreator", ".cache", "Cache", "runs", "Dicom", "Predict", "3DModels",
+    "Dataset", "logs", ".github", ".prompts", ".review", ".tasks", "scripts",
 }
+#: The source-ish files the project walk indexes.
 SCANNABLE_EXTS = {".cpp", ".h", ".py", ".md", ".cmake", ".jpg", ".jpeg", ".png", ".webp"}
-DOC_EXTS = {".docx", ".pdf", ".txt", ".eml", ".jpg", ".jpeg", ".png", ".webp"}
+#: What a docs directory may hold: everything the project walk would index,
+#: **plus** the document types. The project walk *skips* the docs directories
+#: (they have their own walk, because a docs directory is not necessarily
+#: inside the project root), so the docs walk has to cover the same files —
+#: otherwise a ``.md`` under ``Docs/`` would simply stop being indexed.
+#:
+#: The two sets used to overlap on the image extensions *and* the docs
+#: directories were walked twice, so an image under ``Docs/`` was chunked
+#: twice: the corpus (and the sealed cache) held it twice, and a retrieval
+#: could return it twice.
+DOC_EXTS = SCANNABLE_EXTS | {".docx", ".pdf", ".txt", ".eml"}
+
+
+def _is_excluded_dir(name: str) -> bool:
+    """Whether the walk must not descend into this directory.
+
+    The shared rule (``path_policy.is_blocked_dir``) owns "never descend into
+    this"; the corpus adds the artifact directories. Neither list may omit
+    the other's entries.
+    """
+    return is_blocked_dir(name) or name in EXCLUDED_DIRS
+
+
+def _stays_inside(root: Path, candidate: Path) -> bool:
+    """Whether the file's **real** target stays inside ``root``.
+
+    A junction (on Windows: created without any privilege) or a symbolic link
+    inside the tree points somewhere else. The corpus builder followed it and
+    indexed the target as if it were part of the project — so a private
+    document, or a ``secrets.py`` with an API key, reached the model and the
+    sealed cache. The agent read gate has refused this since ADR 0033; the
+    corpus builder is a second reader and needs the same rule.
+    """
+    try:
+        canonical_path(candidate).relative_to(canonical_path(root))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _indexable_files(
+    root: Path,
+    extensions: set[str],
+    *,
+    exclude: tuple[Path, ...] = (),
+) -> Iterator[str]:
+    """Yield the files under ``root`` the corpus may read.
+
+    One rule, one owner: the *agent* read gate already answers "may this file
+    be read" (:mod:`ai_assistant.path_policy`), and the corpus builder is a
+    second reader of the same filesystem. The extension list, the directory
+    list, the secret names and the link rule all come from one place now —
+    and the **same** walk feeds the cache hash, so "has the corpus changed?"
+    is asked over exactly the files that were indexed.
+
+    ``exclude`` names the roots another walk owns. Every file is walked
+    **once**: the docs directories are inside the project root in a source
+    checkout, and walking them twice indexed every image under them twice.
+    """
+    excluded = tuple(canonical_path(path) for path in exclude)
+    for dirpath, dirnames, filenames in os.walk(root):
+        kept = []
+        for name in sorted(dirnames):
+            if _is_excluded_dir(name):
+                continue
+            candidate = Path(dirpath) / name
+            if excluded and canonical_path(candidate) in excluded:
+                continue
+            # Do not descend into a directory that points out of the tree: a
+            # junction (creatable on Windows without any privilege) would
+            # otherwise make the walk traverse an entire volume — every file
+            # it finds is refused afterwards, but the *walk* already paid
+            # for it.
+            if not _stays_inside(root, candidate):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for filename in sorted(filenames):
+            if os.path.splitext(filename)[1].lower() not in extensions:
+                continue
+            if is_secret_name(filename):
+                continue
+            path = Path(dirpath) / filename
+            if not _stays_inside(root, path):
+                continue
+            yield str(path)
 
 
 def get_file_system_hash(paths: AppPaths, settings: RAGSettings) -> str:
     """Compute a hash of all scanned files to determine if cache is valid."""
     entries = []
-    
-    for docs_dir in dict.fromkeys(paths.docs_dirs):
+    docs_dirs = tuple(dict.fromkeys(paths.docs_dirs))
+
+    for docs_dir in docs_dirs:
         if not docs_dir.is_dir():
             continue
-        for root, _, files in os.walk(docs_dir):
-            for f in sorted(files):
-                path = os.path.join(root, f)
-                try:
-                    st = os.stat(path)
-                    entries.append(f"{path}:{st.st_mtime:.3f}:{st.st_size}")
-                except OSError:
-                    pass
-
-    for root, dirs, files in os.walk(paths.project_root):
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS)
-        for f in sorted(files):
-            if os.path.splitext(f)[1].lower() not in SCANNABLE_EXTS:
-                continue
-            path = os.path.join(root, f)
+        for path in _indexable_files(docs_dir, DOC_EXTS):
             try:
                 st = os.stat(path)
                 entries.append(f"{path}:{st.st_mtime:.3f}:{st.st_size}")
             except OSError:
                 pass
+
+    for path in _indexable_files(paths.project_root, SCANNABLE_EXTS, exclude=docs_dirs):
+        try:
+            st = os.stat(path)
+            entries.append(f"{path}:{st.st_mtime:.3f}:{st.st_size}")
+        except OSError:
+            pass
 
     entries.append(f"embed_model={settings.embed_model_name}")
     entries.append(f"chunk_chars={settings.chunk_chars}")
@@ -71,14 +168,14 @@ def is_cache_valid(paths: AppPaths, settings: RAGSettings) -> bool:
     if not all(p.exists() for p in required):
         logger.debug("Cache miss: files missing")
         return False
-        
+
     try:
-        with paths.cache_metadata.open("r", encoding="utf-8") as f:
-            meta = json.load(f)
+        meta = read_metadata(paths.cache_metadata)
         current_hash = get_file_system_hash(paths, settings)
         valid: bool = (meta.get("fs_hash") == current_hash
-                       and meta.get("embedding_dimension") == settings.embedding_dimension)
-                 
+                       and meta.get("embedding_dimension") == settings.embedding_dimension
+                       and is_sealed_metadata(meta))
+
         if not valid:
             logger.info("Cache stale (built_at=%s)", meta.get("built_at", "?"))
         else:
@@ -91,21 +188,43 @@ def is_cache_valid(paths: AppPaths, settings: RAGSettings) -> bool:
         return valid
 
 
-def save_cache(index: Any, chunks: list[ChunkResult], bm25: Any, paths: AppPaths, settings: RAGSettings, model_idx: int = 0) -> None:
+def _serialize_index(faiss_module: Any, index: Any) -> bytes:
+    """The index as bytes, so it can be sealed before it reaches the disk.
+
+    ``faiss.write_index`` would put the vectors on disk in the clear first;
+    serializing in memory keeps the plaintext index out of the file system
+    entirely.
+    """
+    return bytes(faiss_module.serialize_index(index))
+
+
+def _deserialize_index(faiss_module: Any, payload: bytes) -> Any:
+    """Rebuild the index from sealed bytes."""
+    import numpy as np
+
+    return faiss_module.deserialize_index(np.frombuffer(payload, dtype="uint8"))
+
+
+def save_cache(index: Any, chunks: list[ChunkResult], bm25: Any, paths: AppPaths,
+               settings: RAGSettings, model_idx: int = 0, *,
+               cipher: FieldCipher) -> None:
     import faiss as _faiss
     t = time.monotonic()
-    
+
     # The cache directory may not exist yet (first run on a fresh data dir, or
     # a hand-built AppPaths in tests) — create it before writing.
     paths.cache_index.parent.mkdir(parents=True, exist_ok=True)
-    _faiss.write_index(index, str(paths.cache_index))
-    
-    with paths.cache_chunks.open("wb") as f:
-        pickle.dump(chunks, f, protocol=pickle.HIGHEST_PROTOCOL)
-        
-    with paths.cache_bm25.open("wb") as f:
-        pickle.dump(bm25, f, protocol=pickle.HIGHEST_PROTOCOL)
-        
+    # Every artifact is sealed before it is written (ADR 0028): the chunk
+    # corpus and the BM25 model hold the user's document text, so a copy of
+    # the data volume must not hand over a readable copy of it.
+    artifacts = (
+        (paths.cache_index, _serialize_index(_faiss, index), INDEX_CONTEXT),
+        (paths.cache_chunks, pickle.dumps(chunks, protocol=pickle.HIGHEST_PROTOCOL), CHUNKS_CONTEXT),
+        (paths.cache_bm25, pickle.dumps(bm25, protocol=pickle.HIGHEST_PROTOCOL), BM25_CONTEXT),
+    )
+    for path, payload, context in artifacts:
+        path.write_bytes(cipher.seal_bytes(payload, context=context))
+
     meta = {
         "fs_hash": get_file_system_hash(paths, settings),
         "chunk_count": len(chunks),
@@ -115,45 +234,53 @@ def save_cache(index: Any, chunks: list[ChunkResult], bm25: Any, paths: AppPaths
         "embedding_dimension": settings.embedding_dimension,
         "chunk_chars": settings.chunk_chars,
         "cache_version": settings.cache_version,
+        # Records that the artifacts on disk are sealed; a cache without this
+        # block is a miss (see ``is_sealed_metadata``).
+        "sealed": seal_metadata(),
     }
-    # Seal the three artifacts just written: ``load_cache`` refuses to unpickle
-    # a cache whose digest does not match (see rag/cache_integrity.py).
-    key = signing_key(paths)
-    if key is not None:
-        meta["integrity"] = seal_payload(key, paths)
-    else:
-        logger.warning("RAG cache written unsigned — no key could be minted")
-    
     with paths.cache_metadata.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-        
+
     total_mb = sum(p.stat().st_size for p in [paths.cache_index, paths.cache_chunks, paths.cache_bm25]) / 1024**2
     logger.info("Cache saved: %.1fs | %.1fMB | %d chunks", time.monotonic()-t, total_mb, len(chunks))
 
 
-def load_cache(paths: AppPaths, settings: RAGSettings) -> tuple[Any, list[ChunkResult], Any]:
+def load_cache(paths: AppPaths, settings: RAGSettings, *,
+               cipher: FieldCipher) -> tuple[Any, list[ChunkResult], Any]:
     import faiss as _faiss
     t = time.monotonic()
 
     def _read() -> tuple[Any, list[ChunkResult], Any]:
-        if not verify_cache(signing_key(paths), paths, recorded_digest(paths)):
-            # Tampered, truncated or written before sealing existed. Refuse
-            # *before* unpickling anything and let the caller rebuild; a cache
-            # is data, never code.
-            logger.warning("RAG cache integrity check failed — refusing to unpickle %s",
+        meta = read_metadata(paths.cache_metadata)
+        if not is_sealed_metadata(meta):
+            # Written before sealing existed, or by another version: the
+            # artifacts cannot be trusted, so the cache is a miss and the
+            # caller rebuilds it (the corpus is derived, so this is cheap).
+            logger.warning("RAG cache is not sealed — refusing to load %s",
                            paths.cache_chunks)
             return None, [], None
+        try:
+            index_payload = cipher.open_bytes(
+                paths.cache_index.read_bytes(), context=INDEX_CONTEXT)
+            chunks_payload = cipher.open_bytes(
+                paths.cache_chunks.read_bytes(), context=CHUNKS_CONTEXT)
+            bm25_payload = cipher.open_bytes(
+                paths.cache_bm25.read_bytes(), context=BM25_CONTEXT)
+        except (OSError, StorageCryptoError) as error:
+            # Unreadable or not authentic (wrong key, tampered, planted): a
+            # miss — never an unpickled payload.
+            logger.warning("RAG cache could not be opened: %s", error)
+            return None, [], None
 
-        index = _faiss.read_index(str(paths.cache_index))
+        index = _deserialize_index(_faiss, index_payload)
         if index.d != settings.embedding_dimension:
             msg = f"FAISS dimension {index.d} does not match {settings.embedding_dimension}"
             raise ValueError(msg)
 
-        with paths.cache_chunks.open("rb") as f:
-            chunks = pickle.load(f)  # noqa: S301
-
-        with paths.cache_bm25.open("rb") as f:
-            bm25 = pickle.load(f)  # noqa: S301
+        # The bytes were authenticated by the AEAD above: a payload that does
+        # not verify is never unpickled, so this cannot run planted code.
+        chunks = pickle.loads(chunks_payload)  # noqa: S301
+        bm25 = pickle.loads(bm25_payload)  # noqa: S301
 
         logger.info("Cache loaded: %.1fs | chunks=%d", time.monotonic()-t, len(chunks))
         logger.debug(f"       chunks={len(chunks)}  (from Cache/)")
@@ -314,18 +441,18 @@ def build_index_from_scratch(chunks: list[ChunkResult], embed_model: Any, settin
     return index, chunks, bm25
 
 
-def load_or_build_index(chunks: list[ChunkResult], embed_model: Any, paths: AppPaths, settings: RAGSettings, force_rebuild: bool = False, model_idx: int = 0) -> tuple[Any, list[ChunkResult], Any]:
+def load_or_build_index(chunks: list[ChunkResult], embed_model: Any, paths: AppPaths, settings: RAGSettings, force_rebuild: bool = False, model_idx: int = 0, *, cipher: FieldCipher) -> tuple[Any, list[ChunkResult], Any]:
     if not force_rebuild and is_cache_valid(paths, settings):
         logger.debug("       [CACHE HIT]")
-        index, chunks_loaded, bm25 = load_cache(paths, settings)
+        index, chunks_loaded, bm25 = load_cache(paths, settings, cipher=cipher)
         if index is not None:
             return index, chunks_loaded, bm25
         logger.debug(" load failed, rebuilding...")
     logger.debug("       [CACHE MISS] Building index...")
     logger.info("Cache miss — rebuilding")
-    
+
     index, chunks_loaded, bm25 = build_index_from_scratch(chunks, embed_model, settings)
-    save_cache(index, chunks_loaded, bm25, paths, settings, model_idx)
+    save_cache(index, chunks_loaded, bm25, paths, settings, model_idx, cipher=cipher)
     return index, chunks_loaded, bm25
 
 
@@ -336,35 +463,31 @@ def scan_documents(paths: AppPaths, registry: Any) -> list[ChunkResult]:
 
     for docs_dir in paths.docs_dirs:
         if docs_dir.is_dir():
-            for root, _, files in os.walk(docs_dir):
-                for filename in sorted(files):
-                    if os.path.splitext(filename)[1].lower() not in DOC_EXTS:
-                        continue
-                    fp = os.path.join(root, filename)
-                    stats["files"] += 1
-                    results = registry.load_file(fp, str(paths.project_root))
-                    if not results:
-                        stats["errors"] += 1
-                        continue
-                    for r in results:
-                        all_chunks.append(r)
-                        ext = os.path.splitext(fp)[1].lower().lstrip(".")
-                        if ext in stats:
-                            stats[ext] += 1
+            for fp in _indexable_files(docs_dir, DOC_EXTS):
+                if os.path.basename(fp).startswith("~") or fp.endswith(".user"):
+                    continue
+                stats["files"] += 1
+                results = registry.load_file(fp, str(paths.project_root))
+                if not results:
+                    stats["errors"] += 1
+                    continue
+                for r in results:
+                    all_chunks.append(r)
+                    ext = os.path.splitext(fp)[1].lower().lstrip(".")
+                    if ext in stats:
+                        stats[ext] += 1
 
-    for root, dirs, files in os.walk(paths.project_root):
-        dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS)
-        for filename in sorted(files):
-            if filename.startswith("~") or filename.endswith(".user"):
-                continue
-            ext = os.path.splitext(filename)[1].lower()
-            if ext not in SCANNABLE_EXTS:
-                continue
-            fp = os.path.join(root, filename)
-            stats["files"] += 1
-            for r in registry.load_file(fp, str(paths.project_root)):
-                all_chunks.append(r)
-                stats["md" if r.loader_type == "md" else "source"] += 1
+    # The docs directories have their own walk (they may live outside the
+    # project root), so the project walk skips them: every file is walked
+    # once, and an image under ``Docs/`` is not chunked twice.
+    docs_dirs = tuple(dict.fromkeys(paths.docs_dirs))
+    for fp in _indexable_files(paths.project_root, SCANNABLE_EXTS, exclude=docs_dirs):
+        if os.path.basename(fp).startswith("~") or fp.endswith(".user"):
+            continue
+        stats["files"] += 1
+        for r in registry.load_file(fp, str(paths.project_root)):
+            all_chunks.append(r)
+            stats["md" if r.loader_type == "md" else "source"] += 1
 
     logger.info(
         "Scanned: %d files → %d chunks (docx=%d pdf=%d txt=%d md=%d src=%d err=%d)",

@@ -94,6 +94,19 @@ bool AIProcessor::loadDetectionModel(const QString &modelPath) {
     qWarning() << "ORT Exception during loading detection model:" << e.what();
     isDetModelLoaded = false;
     return false;
+  } catch (const std::exception &e) {
+    // Anything else the allocator or the runtime can throw (std::bad_alloc
+    // when the machine is short of memory for a multi-hundred-MB session) must
+    // NOT escape: the caller is a UI thread and an escaping exception would
+    // take the whole application down instead of reporting "model not
+    // loaded".
+    qWarning() << "Exception during loading detection model:" << e.what();
+    isDetModelLoaded = false;
+    return false;
+  } catch (...) {
+    qWarning() << "Unknown exception during loading detection model.";
+    isDetModelLoaded = false;
+    return false;
   }
 }
 
@@ -113,6 +126,15 @@ bool AIProcessor::loadSegmentationModel(const QString &modelPath) {
                << e.what();
     isSegModelLoaded = false;
     return false;
+  } catch (const std::exception &e) {
+    // See loadDetectionModel(): an escaping exception would take the app down.
+    qWarning() << "Exception during loading segmentation model:" << e.what();
+    isSegModelLoaded = false;
+    return false;
+  } catch (...) {
+    qWarning() << "Unknown exception during loading segmentation model.";
+    isSegModelLoaded = false;
+    return false;
   }
 }
 
@@ -129,6 +151,15 @@ bool AIProcessor::loadTrackingModel(const QString &modelPath) {
     return true;
   } catch (const Ort::Exception &e) {
     qWarning() << "ORT Exception during loading tracking model:" << e.what();
+    isTrackingLoaded = false;
+    return false;
+  } catch (const std::exception &e) {
+    // See loadDetectionModel(): an escaping exception would take the app down.
+    qWarning() << "Exception during loading tracking model:" << e.what();
+    isTrackingLoaded = false;
+    return false;
+  } catch (...) {
+    qWarning() << "Unknown exception during loading tracking model.";
     isTrackingLoaded = false;
     return false;
   }

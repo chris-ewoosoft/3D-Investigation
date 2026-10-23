@@ -7,6 +7,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QLibrary>
+#include <QObject>
 #include <QPluginLoader>
 #include <QStringList>
 
@@ -43,6 +44,15 @@ int PluginHost::discover(const QString &directory, const QString &nameFilter) {
                                 .arg(fileName)
                                 .arg(plugin->apiVersion())
                                 .arg(IPlugin::kApiVersion);
+                continue;
+            }
+            if (plugin->abiFingerprint() != IPlugin::kAbiFingerprint) {
+                m_errors << QStringLiteral(
+                                "Plugin %1: incompatible ABI fingerprint 0x%2 (host 0x%3) — "
+                                "rebuild it with the same Qt/MSVC/configuration")
+                                .arg(fileName)
+                                .arg(plugin->abiFingerprint(), 0, 16)
+                                .arg(IPlugin::kAbiFingerprint, 0, 16);
                 continue;
             }
             m_plugins.append(plugin);
@@ -90,6 +100,10 @@ bool PluginHost::initializeAll(IAppContext *context) {
         if (!plugin->initialize(context)) {
             m_errors << QStringLiteral("Plugin %1 failed to initialize; aborting plugin loading.")
                             .arg(plugin->pluginName());
+            // The failing plugin is cleaned up as well: it may already have
+            // installed widgets into the shell, and its DLL is released right
+            // after the rollback below.
+            plugin->cleanup();
             for (auto it = m_initialized.rbegin(); it != m_initialized.rend(); ++it) {
                 (*it)->cleanup();
             }
@@ -142,11 +156,36 @@ IPlugin *PluginHost::loadWithQPluginLoader(const QString &filePath, QString *err
         return nullptr;
     }
     m_loaders.push_back(loader);
+    m_pluginRoots.push_back(object);
+    // The root component has no parent: it is destroyed by the loader's
+    // unload(), not by the loader's destructor. The counter makes the
+    // release observable — a plugin whose root survives the shutdown keeps
+    // its whole QObject tree alive.
+    auto counter = std::make_shared<int>(0);
+    QObject::connect(object, &QObject::destroyed, [counter]() { ++*counter; });
+    m_releaseCounters.push_back(counter);
     qDebug() << "Loaded plugin:" << plugin->pluginName();
     return plugin;
 }
 
 void PluginHost::clearLoaders() {
-    for (QPluginLoader *loader : m_loaders) delete loader;
+    for (QPluginLoader *loader : m_loaders) {
+        // unload() destroys the plugin's root component, so the plugin's
+        // QObject tree goes with it. The plugin's cleanup() must already have
+        // run: the shell outlives the plugin, and an object the plugin
+        // installed there would stay behind as dead UI.
+        //
+        // The LIBRARY stays mapped for the rest of the session — Qt's
+        // QPluginLoader pins it with QLibrary::PreventUnloadHint and the
+        // hints can only be OR-ed, never cleared. That is a Qt constraint,
+        // not a defect of the host, and it is why the widget-ownership
+        // contract (not the unload) is the one that matters.
+        if (!loader->unload()) {
+            m_errors << QStringLiteral("Plugin %1: the plugin object could not be released (%2)")
+                            .arg(loader->fileName(), loader->errorString());
+        }
+        delete loader;
+    }
     m_loaders.clear();
+    m_pluginRoots.clear();
 }

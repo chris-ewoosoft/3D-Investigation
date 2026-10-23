@@ -3,8 +3,6 @@
 add_library(AIProcessorPlugin SHARED
     AIProcessorPlugin.h
     AIProcessorPlugin.cpp
-    AIPredictionLogger.h
-    AIPredictionLogger.cpp
     AITrainDockWidget.h
     AITrainDockWidget.cpp
     AIProcessorRibbonUI.h
@@ -15,7 +13,7 @@ add_library(AIProcessorPlugin SHARED
 
 target_include_directories(AIProcessorPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/core
+    ${PROJECT_SOURCE_DIR}/src/include
     ${PROJECT_SOURCE_DIR}/src/utils
     ${OpenCV_INCLUDE_DIRS}
 )

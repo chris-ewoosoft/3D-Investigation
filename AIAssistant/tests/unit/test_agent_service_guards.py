@@ -19,16 +19,49 @@ from unittest.mock import MagicMock, patch
 
 from ai_assistant.adapters.persistence import PendingActionStore
 from ai_assistant.agents import context as agents_context
-from ai_assistant.agents.models import AgentApproveRequest, AgentCancelRequest, AgentExecuteRequest
+from ai_assistant.agents.models import (
+    AgentApproveRequest,
+    AgentCancelRequest,
+    AgentExecuteRequest,
+    AgentUiActionResultRequest,
+)
 from ai_assistant.agents.service import AgentService
 from ai_assistant.application.coordination import TaskCoordinator
 from ai_assistant.domain.errors import ModelNotLoadedError, NotFoundError
 from ai_assistant.tools.factory import create_tool_registry, platform_executors
 
 
+class _Gate:
+    """A context manager that records whether it was entered and left."""
+
+    def __init__(self) -> None:
+        self.entered = False
+        self.exited = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.exited = True
+        return False
+
+
+class _LeasedRuntime:
+    """A runtime that honours the ``LLMRuntime`` port (ADR 0032)."""
+
+    def __init__(self) -> None:
+        self.llm = object()
+        self.llm_lock = threading.RLock()
+        self.gate = _Gate()
+
+    def model_lease(self):
+        return self.gate
+
+
 def _service(**overrides) -> AgentService:
     kwargs = {
-        "llm_runtime": SimpleNamespace(llm=object()),
+        "llm_runtime": _LeasedRuntime(),
         "pending_actions": MagicMock(),
         "pending_lock": threading.Lock(),
         "task_coordinator": MagicMock(),
@@ -179,6 +212,100 @@ class AgentServiceFacadeTests(unittest.TestCase):
         service = AgentService(llm_runtime=None)
         with self.assertRaises(ModelNotLoadedError):
             service.execute(AgentExecuteRequest(task="do something"))
+
+    def test_authorise_delegation_reaches_the_context_and_both_subservices(self) -> None:
+        """The composition root's live plugin policy must reach every resume path."""
+        def authorise(_delegation, _needs_approval):
+            return True, None
+
+        service = AgentService(authorise_delegation_fn=authorise)
+        self.assertIs(service._ctx.authorise_delegation_fn, authorise)
+        self.assertIs(service._approval_service._ctx.authorise_delegation_fn, authorise)
+        self.assertIs(service._ui_action_service._ctx.authorise_delegation_fn, authorise)
+
+    def test_model_lease_uses_the_runtime_gate(self) -> None:
+        leased = _LeasedRuntime()
+        service = AgentService(llm_runtime=leased)
+        with service._model_lease():
+            pass
+        self.assertTrue(leased.gate.entered)
+        self.assertTrue(leased.gate.exited)
+
+    def test_execute_holds_the_lease_across_the_run(self) -> None:
+        """ADR 0040: the fresh run pins the backend for its whole length."""
+        runtime = _LeasedRuntime()
+        service = _service(llm_runtime=runtime)
+        seen: dict[str, bool] = {}
+
+        def _run(**_kwargs):
+            seen["entered"] = runtime.gate.entered
+            seen["exited"] = runtime.gate.exited
+            return {"status": "completed"}
+
+        with _run_context() as run:
+            run.side_effect = _run
+            service.execute(_execute("leased run"))
+        self.assertEqual(seen, {"entered": True, "exited": False})
+        self.assertTrue(runtime.gate.exited)
+
+    def test_approve_holds_the_lease_across_the_resume(self) -> None:
+        """A resume is a run: it must not execute while a reload can free the
+        backend. ``approve`` was the unguarded sibling of ``execute``."""
+        runtime = _LeasedRuntime()
+        service = _service(llm_runtime=runtime)
+        seen: dict[str, bool] = {}
+
+        def _approve(_request):
+            seen["entered"] = runtime.gate.entered
+            seen["exited"] = runtime.gate.exited
+            return {"status": "approved"}
+
+        service._approval_service = MagicMock()
+        service._approval_service.approve.side_effect = _approve
+        service.approve(AgentApproveRequest(action_id="act-1", approved=True))
+        self.assertEqual(seen, {"entered": True, "exited": False})
+        self.assertTrue(runtime.gate.exited)
+
+    def test_ui_action_result_holds_the_lease_across_the_resume(self) -> None:
+        """The desktop ack resumes the graph through the same shared context."""
+        runtime = _LeasedRuntime()
+        service = _service(llm_runtime=runtime)
+        seen: dict[str, bool] = {}
+
+        def _resume(_request):
+            seen["entered"] = runtime.gate.entered
+            seen["exited"] = runtime.gate.exited
+            return {"status": "completed"}
+
+        service._ui_action_service = MagicMock()
+        service._ui_action_service.ui_action_result.side_effect = _resume
+        service.ui_action_result(AgentUiActionResultRequest(request_id="req-1", success=True))
+        self.assertEqual(seen, {"entered": True, "exited": False})
+        self.assertTrue(runtime.gate.exited)
+
+    def test_a_runtime_without_the_lease_is_a_contract_violation(self) -> None:
+        """ADR 0032: the drain contract is part of the ``LLMRuntime`` port.
+
+        It used to be duck-typed with a ``getattr`` probe, so a runtime that
+        forgot the method silently lost the guarantee — the admin reload
+        could swap the model in the middle of a run, with no type error and
+        no log. The probe is gone: a runtime that does not honour the port
+        fails loudly.
+        """
+        legacy = AgentService(llm_runtime=SimpleNamespace(
+            llm=object(), llm_lock=threading.RLock(),
+        ))
+        with self.assertRaises(AttributeError):
+            with legacy._model_lease():
+                pass
+
+    def test_a_missing_runtime_is_refused_before_the_lease(self) -> None:
+        """``execute`` refuses a run without a model; the lease must not
+        reach for one either."""
+        service = AgentService(llm_runtime=None)
+        with self.assertRaises(ModelNotLoadedError):
+            with service._model_lease():
+                pass
 
     def test_execute_delegates_to_agent_runner(self) -> None:
         mock_llm = MagicMock()

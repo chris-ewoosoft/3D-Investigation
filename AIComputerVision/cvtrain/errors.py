@@ -22,6 +22,7 @@ __all__ = [
     "ExportContractError",
     "ManifestIntegrityError",
     "QualityGateError",
+    "ResumeError",
     "StorageError",
 ]
 
@@ -107,6 +108,21 @@ class ManifestIntegrityError(CvTrainError):
     (re-export, re-adopt with ``--write-manifest``, or restore the missing
     file), and reporting a clean run for an inconsistent manifest is the one
     outcome this pipeline must never produce.
+    """
+
+    exit_code: ExitCode = ExitCode.PREFLIGHT
+
+
+class ResumeError(CvTrainError):
+    """``--resume`` cannot continue the checkpoint it found.
+
+    Resuming is not "start over if anything is odd": the framework restores the
+    experiment recorded in the checkpoint, so a checkpoint that is already
+    complete, carries no training arguments or was produced from a different
+    dataset is a request this pipeline cannot honour. The alternative —
+    silently falling back to a fresh run or to another dataset — would make
+    ``--resume`` describe a run that never happened. Exit code ``2``: the
+    checkpoint is part of the environment, and the operator has to fix it.
     """
 
     exit_code: ExitCode = ExitCode.PREFLIGHT

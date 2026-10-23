@@ -1,12 +1,37 @@
 #include "ChatMessageRenderer.h"
 #include "ChatTemplates.h"
+#include "FileUtilities.h"
 #include "../../utils/HtmlUtilities.h"
+#include <QHash>
 #include <QTextBrowser>
 #include <QUrl>
 #include <QFileInfo>
 #include <QStringList>
 
 namespace {
+
+/// The chat history embeds the attachment image as a data: URL: the file on
+/// disk is sealed, so the HTML renderer cannot read it from the file system
+/// any more. The result is cached because the history is re-rendered on every
+/// streamed answer.
+QString attachmentImageDataUrl(const QString &path) {
+    static QHash<QString, QString> cache;
+    const auto cached = cache.constFind(path);
+    if (cached != cache.constEnd()) return cached.value();
+
+    const QByteArray bytes =
+        FileUtilities::readAttachment(path, QString::fromLatin1(FileUtilities::AttachmentContext));
+    if (bytes.isEmpty()) return {};
+
+    const bool isJpeg = path.endsWith(".jpg") || path.endsWith(".jpeg");
+    const QString mimeType = isJpeg ? QStringLiteral("image/jpeg") : QStringLiteral("image/png");
+    const QString url = QStringLiteral("data:") + mimeType + QStringLiteral(";base64,")
+                        + QString::fromLatin1(bytes.toBase64());
+    if (cache.size() >= 24) cache.clear();
+    cache.insert(path, url);
+    return url;
+}
+
 int commonStepPrefixLength(const QJsonArray& previous, const QJsonArray& current) {
     const int limit = qMin(previous.size(), current.size());
     int index = 0;
@@ -79,16 +104,16 @@ QString formatToolResult(const QString& toolName, const QJsonObject& result, IAp
 }
 }
 
-void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* ctx, const QList<QJsonObject>& history, bool isThinking, int thinkingInsertIndex) {
+void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* ctx, const QList<ChatMessage>& history, bool isThinking, int thinkingInsertIndex) {
     if (!browser) return;
     
     QString h = ChatTemplates::CSS;
     h += QString("<div class='chat-start'>%1</div>").arg(ctx->translate("ai.new_chat_start"));
     
     QSet<QString> resolvedActions;
-    for (const QJsonObject& message : history) {
-        if (message["role"].toString() != "assistant_agent") continue;
-        const QJsonArray steps = QJsonDocument::fromJson(message["content"].toString().toUtf8()).object()["steps"].toArray();
+    for (const ChatMessage& message : history) {
+        if (message.role != ChatRole::AgentTrace) continue;
+        const QJsonArray steps = message.agentTrace()["steps"].toArray();
         for (const QJsonValue& value : steps) {
             const QJsonObject step = value.toObject();
             if (step["type"].toString() == "tool_result" && !step["action_id"].toString().isEmpty()) {
@@ -100,10 +125,9 @@ void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* 
     QJsonArray previousAgentSteps;
     for (int i = 0; i < history.size(); ++i) {
         const auto &m = history[i];
-        const QString role = m["role"].toString();
         int skipSteps = -1;
-        if (role == "assistant_agent") {
-            const QJsonObject envelope = QJsonDocument::fromJson(m["content"].toString().toUtf8()).object();
+        if (m.role == ChatRole::AgentTrace) {
+            const QJsonObject envelope = m.agentTrace();
             const QJsonArray currentSteps = envelope["steps"].toArray();
             // Server responses are snapshots.  Use the explicit cursor when
             // present and also derive the common prefix for older responses
@@ -114,8 +138,10 @@ void ChatMessageRenderer::renderChatHistory(QTextBrowser* browser, IAppContext* 
         } else {
             previousAgentSteps = QJsonArray();
         }
-        h += buildMessageHtml(m["role"].toString(), m["content"].toString(), m["attachments"].toArray(),
-                              m["timestamp"].toString(), i, ctx, resolvedActions, skipSteps);
+        QJsonArray attachments;
+        for (const QString &attachment : m.attachments) attachments.append(attachment);
+        h += buildMessageHtml(m.roleName(), m.content, attachments,
+                              m.timestamp, i, ctx, resolvedActions, skipSteps);
         
         if (isThinking && thinkingInsertIndex == i) {
             h += QString("<div class='typing'>%1</div>").arg(ctx->translate("ai.thinking"));
@@ -262,7 +288,21 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
             for (const auto &v : attachments) {
                 QString path = v.toString();
                 if (path.endsWith(".png") || path.endsWith(".jpg") || path.endsWith(".jpeg")) {
-                    innerAtt += ChatTemplates::IMAGE_ATTACHMENT.arg(path).arg(QUrl::fromLocalFile(path).toString());
+                    const QString imageUrl = attachmentImageDataUrl(path);
+                    if (imageUrl.isEmpty()) {
+                        // The attachment could not be unsealed: show its name
+                        // instead of a broken image.
+                        innerAtt += ChatTemplates::FILE_ATTACHMENT
+                                    .arg(QUrl::fromLocalFile(path).toString())
+                                    .arg(QFileInfo(path).fileName());
+                    } else {
+                        innerAtt += ChatTemplates::IMAGE_ATTACHMENT.arg(path).arg(imageUrl);
+                    }
+                } else if (FileUtilities::isSealedAttachment(path)) {
+                    // A sealed file is ciphertext on disk: a "file://" link
+                    // would hand the OS handler garbage, so the name is shown
+                    // without a link.
+                    innerAtt += ChatTemplates::FILE_ATTACHMENT_SEALED.arg(QFileInfo(path).fileName());
                 } else {
                     innerAtt += ChatTemplates::FILE_ATTACHMENT
                                 .arg(QUrl::fromLocalFile(path).toString())

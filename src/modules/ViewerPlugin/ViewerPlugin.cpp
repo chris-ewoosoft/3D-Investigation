@@ -20,7 +20,7 @@
 #include <QStyle>
 #include <QPainter>
 #include <QLinearGradient>
-#include "../../utils/CustomProgressDialog.h"
+#include "IProgressDialog.h"
 #include <QApplication>
 #include <QListWidget>
 
@@ -115,6 +115,41 @@ bool ViewerPlugin::initialize(IAppContext* context) {
 }
 
 void ViewerPlugin::cleanup() {
+    // The image list and the navigator are installed into the shell's central
+    // widget, so they are NOT owned by this QObject: they have to be
+    // destroyed here, synchronously, before QPluginLoader unloads this DLL.
+    // Otherwise Qt would delete them later — with their vtable pointing into
+    // unloaded code — and the application would die while quitting.
+    if (m_listUI) {
+        delete m_listUI->widget();
+        delete m_listUI;
+        m_listUI = nullptr;
+    }
+    if (m_navUI) {
+        delete m_navUI->widget();
+        delete m_navUI;
+        m_navUI = nullptr;
+    }
+    // m_viewModel is a child of this plugin: it dies with the plugin object.
+    m_viewModel = nullptr;
+    // The ribbon group lives in the shell's tab panel, not in this QObject:
+    // it has to be destroyed here, synchronously, before the plugin DLL is
+    // unloaded. AbstractRibbonPanel's destructor removes the group it
+    // created in the shell's widget tree.
+    delete m_ribbonUI;
+    m_ribbonUI = nullptr;
+
+    // The menu actions live in a menu the SHELL owns: addAction() makes the
+    // menu their parent, so they survive this plugin as dead entries (the
+    // connection dies with the receiver, the menu item does not). Remove them
+    // while this DLL is still the one that can delete them.
+    if (m_ctx) {
+        if (QMenu *menu = m_ctx->shell()->getMenu(AppConstants::MenuIds::Viewer))
+            menu->clear();
+    }
+    m_load2DAct = nullptr;
+    m_load3DAct = nullptr;
+    m_loadDicomAct = nullptr;
 }
 
 void ViewerPlugin::onLoad2DImages() {

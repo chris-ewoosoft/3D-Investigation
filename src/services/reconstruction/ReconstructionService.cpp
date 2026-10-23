@@ -1,6 +1,7 @@
 #include "ReconstructionService.h"
 #include "ReconstructionWorker.h"
 #include <QDir>
+#include <opencv2/core.hpp>
 
 ReconstructionService::ReconstructionService()
     : m_pipeline(std::make_unique<ReconstructionPipeline>())
@@ -36,25 +37,64 @@ ReconstructionService::~ReconstructionService()
 }
 
 void ReconstructionService::setImages(const QStringList& paths) {
-    if (m_running) return;
     std::vector<QString> stdPaths;
     stdPaths.reserve(static_cast<size_t>(paths.size()));
     for (const QString& p : paths)
         stdPaths.push_back(QDir::toNativeSeparators(p));
-    
-    std::unique_lock lock(m_mutex);
+
+    // The pipeline lock is held by the worker for the WHOLE reconstruction.
+    // Blocking on it here would freeze the GUI for the entire run — the very
+    // defect the published/pipeline split exists to prevent. The call is
+    // REFUSED instead: the same intent as the old `if (m_running) return;`,
+    // but without waiting for the run to end first.
+    std::unique_lock<std::shared_mutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        qWarning() << "ReconstructionService: the pipeline is busy — the image list was not changed.";
+        return;
+    }
+    // Re-check UNDER the lock: the worker may have started between the check
+    // and the acquisition (check-then-act). m_running is only a hint — the
+    // lock is the authority.
+    if (m_running) {
+        qWarning() << "ReconstructionService: a reconstruction is running — the image list was not changed.";
+        return;
+    }
     m_pipeline->setImages(stdPaths);
+    // Publish under the published lock only: the pipeline lock (held above) is
+    // released on return, and the UI must never contend with the worker.
+    std::lock_guard pub(m_publishedMutex);
+    m_snapshot.reset();
+    m_publishedPointCount = 0;
+    m_imageList.clear();
+    for (const auto &path : m_pipeline->getImages())
+        m_imageList.append(QString::fromStdString(path.toStdString()));
 }
 
 bool ReconstructionService::loadCameraParams(const QString& filePath) {
+    std::unique_lock<std::shared_mutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        qWarning() << "ReconstructionService: the pipeline is busy — the camera parameters were not loaded.";
+        return false;
+    }
     if (m_running) return false;
-    std::unique_lock lock(m_mutex);
-    return m_pipeline->loadCameraParams(filePath);
+    const bool ok = m_pipeline->loadCameraParams(filePath);
+    if (ok) {
+        std::lock_guard pub(m_publishedMutex);
+        m_snapshot.reset();
+        m_publishedPointCount = 0;
+    }
+    return ok;
 }
 
 void ReconstructionService::configure(int densityLevel, int maxFeatures, bool autoClean) {
+    // Non-blocking, like setImages(): the GUI must not wait for a running
+    // reconstruction to release the pipeline lock.
+    std::unique_lock<std::shared_mutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        qWarning() << "ReconstructionService: the pipeline is busy — the configuration was not applied.";
+        return;
+    }
     if (m_running) return;
-    std::unique_lock lock(m_mutex);
     
     ReconstructionConfig cfg = m_pipeline->config();
     cfg.sift.nfeatures = maxFeatures;
@@ -82,6 +122,14 @@ void ReconstructionService::configure(int densityLevel, int maxFeatures, bool au
 bool ReconstructionService::reconstruct() {
     if (m_running.exchange(true)) return false; // Already running
     m_cancelRequested = false; // cờ hủy thuộc đúng một lần chạy
+    {
+        // The previous result is no longer current; drop the cached snapshot
+        // before the worker starts mutating the pipeline. The published lock
+        // is enough — the pipeline lock belongs to the worker from here on.
+        std::lock_guard pub(m_publishedMutex);
+        m_snapshot.reset();
+        m_publishedPointCount = 0;
+    }
 
     // Worker được move vào QThread nội bộ (service layer sở hữu thread,
     // không bao giờ thuộc về plugin). Worker emit finished(bool) từ
@@ -109,8 +157,16 @@ bool ReconstructionService::reconstruct() {
 void ReconstructionService::finishRun(bool ok) {
     // Thread đã được quit() ngay trước tín hiệu; join để chắc chắn nó dừng
     // hẳn rồi mới xóa worker (worker có affinity với thread đó).
+    //
+    // The wait is BOUNDED: this runs on the GUI thread, and a pipeline stuck
+    // in an external library (PCL/FLANN) would otherwise freeze the window
+    // forever. The fallback is the same one the destructor uses.
     if (m_thread) {
-        m_thread->wait();
+        if (!m_thread->wait(15000)) {
+            qWarning() << "Reconstruction: the worker did not stop in time; terminating it.";
+            m_thread->terminate();
+            m_thread->wait(2000);
+        }
         delete m_thread;
         m_thread = nullptr;
     }
@@ -127,12 +183,42 @@ void ReconstructionService::finishRun(bool ok) {
 }
 
 bool ReconstructionService::runPipeline() {
-    bool ok;
+    bool ok = false;
     {
         std::unique_lock lock(m_mutex);
-        ok = m_pipeline->reconstruct(
-            [this] { return m_cancelRequested.load(std::memory_order_relaxed); });
-        m_lastError = ok ? QString() : m_pipeline->errorString();
+        // The pipeline calls into OpenCV and PCL, and both throw. An
+        // exception escaping the worker thread would reach std::terminate
+        // and take the whole application down — instead of the
+        // reconstructFinished(false, message) the interface promises.
+        try {
+            ok = m_pipeline->reconstruct(
+                [this] { return m_cancelRequested.load(std::memory_order_relaxed); });
+            m_lastError = ok ? QString() : m_pipeline->errorString();
+        } catch (const cv::Exception &e) {
+            ok = false;
+            m_lastError = QStringLiteral("OpenCV error during reconstruction: %1")
+                              .arg(QString::fromUtf8(e.what()));
+            qWarning() << m_lastError;
+        } catch (const std::exception &e) {
+            ok = false;
+            m_lastError = QStringLiteral("Reconstruction failed: %1")
+                              .arg(QString::fromUtf8(e.what()));
+            qWarning() << m_lastError;
+        } catch (...) {
+            ok = false;
+            m_lastError = QStringLiteral("Reconstruction failed with an unknown error.");
+            qWarning() << m_lastError;
+        }
+        // Publish the result for the UI — HERE, on the worker thread, while
+        // the pipeline lock is held. The UI then reads the published copy and
+        // never has to touch the pipeline (which is locked for the whole run).
+        // Building the snapshot here also keeps the copy off the GUI thread.
+        //
+        // It is published on EVERY run, not only on a successful one: a
+        // cancelled run leaves a partial cloud behind, and the UI must see
+        // the state of the run that just ended — never the state of an
+        // older one.
+        publishResult();
     }
     return ok;
 }
@@ -151,55 +237,55 @@ void ReconstructionService::stopReconstruction() {
 }
 
 QStringList ReconstructionService::getImageList() const {
-    std::shared_lock lock(m_mutex);
-    QStringList result;
-    for (const QString& p : m_pipeline->getImages())
-        result.append(p);
-    return result;
+    // The published copy is read under the published lock only: the pipeline
+    // lock is held by the worker for the whole reconstruction, so taking it
+    // here would freeze the UI for the entire run.
+    std::lock_guard pub(m_publishedMutex);
+    return m_imageList;
 }
 
-const std::vector<Point3D>& ReconstructionService::getPointCloud() const {
-    static const std::vector<Point3D> s_empty;
-    if (m_running || !m_pipeline) return s_empty;
-    std::shared_lock lock(m_mutex);
-    const auto& src = m_pipeline->getPointCloud();
-    static std::vector<Point3D> s_converted;
-    s_converted.clear();
-    s_converted.reserve(src.size());
-    for (const auto& p : src) {
-        s_converted.push_back({p.x, p.y, p.z});
-    }
-    return s_converted;
-}
-
-const std::vector<PointColor>& ReconstructionService::getPointColors() const {
-    static const std::vector<PointColor> s_empty;
-    if (m_running || !m_pipeline) return s_empty;
-    std::shared_lock lock(m_mutex);
-    const auto& src = m_pipeline->getPointColors();
-    static std::vector<PointColor> s_converted;
-    s_converted.clear();
-    s_converted.reserve(src.size());
-    for (const auto& c : src) {
-        s_converted.push_back({c[0], c[1], c[2]});
-    }
-    return s_converted;
+std::shared_ptr<const PointCloudSnapshot> ReconstructionService::pointCloudSnapshot() const {
+    // The PUBLISHED state only: the pipeline lock is held by the worker for
+    // the whole reconstruction, so reading the pipeline here would freeze the
+    // UI for the entire run. The snapshot is built and published by the
+    // worker when the run ends (publishResult).
+    std::lock_guard pub(m_publishedMutex);
+    return m_snapshot;
 }
 
 size_t ReconstructionService::pointCount() const {
-    if (m_running || !m_pipeline) return 0;
-    std::shared_lock lock(m_mutex);
-    return m_pipeline->pointCount();
+    // Published together with the snapshot — the UI never touches the
+    // pipeline, not even to count its points.
+    std::lock_guard pub(m_publishedMutex);
+    return m_publishedPointCount;
 }
 
 bool ReconstructionService::hasResult() const {
-    if (m_running || !m_pipeline) return false;
-    std::shared_lock lock(m_mutex);
-    return m_pipeline->hasResult();
+    std::lock_guard pub(m_publishedMutex);
+    return m_snapshot != nullptr;
 }
 
 void ReconstructionService::processPointCloud() {
+    std::unique_lock<std::shared_mutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        qWarning() << "ReconstructionService: the pipeline is busy — the point cloud was not processed.";
+        return;
+    }
     if (m_running) return;
-    std::unique_lock lock(m_mutex);
     m_pipeline->processPointCloud();
+    // The processed cloud replaces the published result.
+    publishResult();
+}
+
+void ReconstructionService::publishResult() {
+    // The caller holds m_mutex (the pipeline lock) — the pipeline data is
+    // read under it. The publication takes the published lock, so the lock
+    // order stays m_mutex → m_publishedMutex.
+    std::lock_guard pub(m_publishedMutex);
+    m_snapshot.reset();
+    m_publishedPointCount = 0;
+    if (!m_pipeline || !m_pipeline->hasResult()) return;
+
+    m_snapshot = m_pipeline->buildSnapshot();
+    m_publishedPointCount = m_snapshot->points.size();
 }

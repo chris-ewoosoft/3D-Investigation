@@ -5,19 +5,11 @@ from typing import Any
 from uuid import uuid4
 
 from ..domain.approvals import approval_fingerprint
-from ..domain.security import DataClassification, Principal
-from ..domain.tools import ToolRequest, ToolResult
-from ..plugins.registry import PluginRegistry, RegisteredTool
-from ..ports import ToolEventSink
+from ..domain.security import Principal, classification_at_least
+from ..domain.tools import ToolRequest, ToolResult, tool_result_succeeded
+from ..ports import ToolCatalog, ToolCatalogEntry, ToolEventSink
 from .approvals import InMemoryApprovalGrantStore
 from .validation import validate_input
-
-_CLASSIFICATION_ORDER = {
-    DataClassification.PUBLIC: 0,
-    DataClassification.INTERNAL: 1,
-    DataClassification.RESTRICTED: 2,
-    DataClassification.REGULATED: 3,
-}
 
 
 class ToolExecutionService:
@@ -26,9 +18,14 @@ class ToolExecutionService:
     Approval-gated tools are unlocked exclusively by a single-use grant
     :meth:`issue_approval_grant` created for the exact ``(tool, params)``
     pair a user approved — never by a boolean the caller can assert.
+
+    The catalogue is the :class:`~ai_assistant.ports.ToolCatalog` *port*
+    (ADR 0032), not the concrete plugin registry: the policy chokepoint
+    depends on the contract, so the catalogue implementation stays
+    replaceable.
     """
 
-    def __init__(self, registry: PluginRegistry, event_sink: ToolEventSink | None = None,
+    def __init__(self, registry: ToolCatalog, event_sink: ToolEventSink | None = None,
                  grants: InMemoryApprovalGrantStore | None = None) -> None:
         self._registry = registry
         self._event_sink = event_sink
@@ -46,7 +43,12 @@ class ToolExecutionService:
             return self._finish(request, ToolResult(False, error_code="tool_failure", message=str(error)))
         if not isinstance(payload, dict):
             return self._finish(request, ToolResult(False, error_code="invalid_tool_result", message="Tool returned a non-object"))
-        success = not bool(payload.get("error")) and payload.get("success") is not False
+        # One rule for "did it work", and it is the domain's: absence of an
+        # ``error`` is not enough, a command can finish with a non-zero exit
+        # code, and a mutation can report ``success: false``. The application
+        # used to re-spell half of that rule and dropped ``return_code``
+        # entirely, so a failed command was reported as a success.
+        success = tool_result_succeeded(payload)
         return self._finish(request, ToolResult(success, payload, None if success else "tool_failure"))
 
     def preflight(self, tool_name: str, parameters: Mapping[str, Any], principal: Principal,
@@ -65,7 +67,7 @@ class ToolExecutionService:
         return self._finish(request, ToolResult(True, {"tool": tool_name, "preflight": True}))
 
     def _admit(self, request: ToolRequest, principal: Principal,
-               approval_token: str) -> RegisteredTool | ToolResult:
+               approval_token: str) -> ToolCatalogEntry | ToolResult:
         """Validate and authorise one request: the refusal, or the tool to run."""
         item = self._registry.tool(request.tool_name)
         if item is None:
@@ -76,7 +78,13 @@ class ToolExecutionService:
             return ToolResult(False, error_code="invalid_input", message=validation_error)
         if not principal.permits(spec.required_scope):
             return ToolResult(False, error_code="forbidden", message="Required tool scope is missing")
-        if _CLASSIFICATION_ORDER[principal.classification] > _CLASSIFICATION_ORDER[spec.maximum_classification]:
+        # The principal's clearance must cover the tool's ceiling: a caller
+        # that may only work with internal data may not drive a tool that
+        # touches restricted data. The comparison used to run the other way
+        # round (``tool >= principal``), which denied the *most* trusted
+        # callers and let the least trusted ones through — and every tool
+        # carried the same ceiling, so the gate was a constant comparison.
+        if not classification_at_least(principal.classification, spec.maximum_classification):
             return ToolResult(False, error_code="data_policy_denied", message="Data classification is not permitted")
         if spec.requires_approval and not self._grants.covers(
                 approval_token, approval_fingerprint(spec.name, request.parameters)):

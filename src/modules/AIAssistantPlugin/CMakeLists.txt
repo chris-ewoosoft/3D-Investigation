@@ -18,7 +18,7 @@ add_library(AIAssistantPlugin SHARED
 
 target_include_directories(AIAssistantPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/core
+    ${PROJECT_SOURCE_DIR}/src/include
     ${PROJECT_SOURCE_DIR}/src/utils
 )
 

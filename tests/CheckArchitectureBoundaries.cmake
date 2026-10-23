@@ -28,6 +28,15 @@
 #      include heavy SDK (VTK/OpenCV/PCL). Code heavy thuộc src/services/*.
 #   7. Teardown phải có biên: `waitForFinished()` trần (mặc định Qt chờ 30 s)
 #      bị cấm trong src/** — luôn truyền timeout tường minh.
+#   8. Plugin cài event filter lên widget KHÔNG thuộc nó (receiver không phải
+#      this/m_*) phải removeEventFilter trong CÙNG file — nếu không shell gọi
+#      vào code của DLL đã unload.
+#   9. Plugin không được dò QApplication::topLevelWidgets() để tìm shell.
+#  10. Plugin không được dùng pool nó không sở hữu (QtConcurrent::run,
+#      QThreadPool::globalInstance()) — task có thể sống lâu hơn plugin.
+#
+# Bypass-resistance: so sánh tên header là KHÔNG phân biệt hoa/thường (Windows
+# filesystem cũng vậy) và include bằng <...> được kiểm tra y như "...".
 #
 # Chạy: cmake -DSOURCE_DIR=<repo-root> -P tests/CheckArchitectureBoundaries.cmake
 # ──────────────────────────────────────────────────────────────────────────────
@@ -38,50 +47,65 @@ endif()
 
 set(VIOLATIONS "")
 
+# ── Normalisation helpers ─────────────────────────────────────────────────────
+# Windows filesystems are case-insensitive, so `#include "sceneservice.h"`
+# finds SceneService.h. A boundary check that compares case-sensitively is
+# therefore bypassable by changing the case of one letter: every name set and
+# every extracted basename is lower-cased before it is compared.
+function(normalise_name out value)
+    string(TOLOWER "${value}" lower)
+    set(${out} "${lower}" PARENT_SCOPE)
+endfunction()
+
 # ── Name sets derived from the source tree (single source of truth) ───────────
 file(GLOB_RECURSE SERVICE_HEADERS "${SOURCE_DIR}/src/services/*.h")
 file(GLOB_RECURSE APP_HEADERS     "${SOURCE_DIR}/src/app/*.h")
 file(GLOB_RECURSE CORE_HEADERS    "${SOURCE_DIR}/src/core/*.h")
+file(GLOB_RECURSE PUBLIC_HEADERS  "${SOURCE_DIR}/src/include/*.h")
 file(GLOB_RECURSE UTILS_HEADERS   "${SOURCE_DIR}/src/utils/*.h")
 
 set(APP_BASENAMES "")
 foreach(h IN LISTS APP_HEADERS)
     get_filename_component(base "${h}" NAME)
+    normalise_name(base "${base}")
     list(APPEND APP_BASENAMES "${base}")
 endforeach()
 
-# Forbidden for plugins: every service/app header, plus core headers that are
-# NOT plugin-facing interfaces (I*.h).
-set(FORBIDDEN_HEADERS "")
-foreach(h IN LISTS SERVICE_HEADERS APP_HEADERS)
+# The PUBLIC surface a plugin may include: src/include (the interfaces, the
+# core glue they expose and the value types) plus the shared utility layer.
+# This is the SAME boundary the compiler enforces: src/core is PRIVATE on
+# AppCore, so a plugin cannot resolve a concrete header at all.
+set(PUBLIC_BASENAMES "")
+foreach(h IN LISTS PUBLIC_HEADERS)
     get_filename_component(base "${h}" NAME)
+    normalise_name(base "${base}")
+    list(APPEND PUBLIC_BASENAMES "${base}")
+endforeach()
+
+# Forbidden for plugins: every service/app header and every concrete core
+# header (src/core).
+set(FORBIDDEN_HEADERS "")
+foreach(h IN LISTS SERVICE_HEADERS APP_HEADERS CORE_HEADERS)
+    get_filename_component(base "${h}" NAME)
+    normalise_name(base "${base}")
     list(APPEND FORBIDDEN_HEADERS "${base}")
 endforeach()
-foreach(h IN LISTS CORE_HEADERS)
-    get_filename_component(base "${h}" NAME)
-    if(NOT base MATCHES "^I[A-Z].*\\.h$")
-        list(APPEND FORBIDDEN_HEADERS "${base}")
-    endif()
-endforeach()
 list(REMOVE_DUPLICATES FORBIDDEN_HEADERS)
-
-# Allowed shared core glue: read-only constants, value types, and the
-# registry/signal plumbing that IS part of the plugin-facing ABI.
-set(CORE_ALLOWLIST
-    Global.h
-    AppConstants.h
-    AIMode.h
-    SignalBus.h
-    AgentActionManifest.h
-    ServiceRegistry.h)
 
 set(UTILS_BASENAMES "")
 foreach(h IN LISTS UTILS_HEADERS)
     get_filename_component(base "${h}" NAME)
+    normalise_name(base "${base}")
     list(APPEND UTILS_BASENAMES "${base}")
 endforeach()
 
+
 file(GLOB_RECURSE PLUGIN_SOURCES
+    "${SOURCE_DIR}/src/modules/*.cpp"
+    "${SOURCE_DIR}/src/modules/*.h")
+
+# Rule 8 needs .h and .cpp alike (a filter may be installed from a header).
+file(GLOB_RECURSE PLUGIN_ALL_SOURCES
     "${SOURCE_DIR}/src/modules/*.cpp"
     "${SOURCE_DIR}/src/modules/*.h")
 
@@ -90,18 +114,18 @@ foreach(source IN LISTS PLUGIN_SOURCES)
     file(READ "${source}" content)
     string(REGEX MATCHALL "#[ \t]*include[ \t]+[\"<][^\">]+[\">]" includes "${content}")
     foreach(inc IN LISTS includes)
-        # System / third-party includes are not our boundary.
-        if(inc MATCHES "#[ \t]*include[ \t]+<")
-            continue()
-        endif()
+        # Angle brackets are NOT skipped: `<SceneService.h>` resolves to the
+        # same file as "SceneService.h", and skipping the form was a complete
+        # bypass of this rule. A genuine system header (`<vector>`,
+        # `<QString>`) is simply not in any of the name sets below, so it
+        # falls through harmlessly.
         string(REGEX REPLACE ".*[\"<]([^\">]+)[\">].*" "\\1" path "${inc}")
         get_filename_component(base "${path}" NAME)
+        # Case-insensitive on purpose: the filesystem is.
+        normalise_name(base "${base}")
 
-        if(base MATCHES "^I[A-Z].*\\.h$")
-            continue()   # core interface — the plugin-facing ABI
-        endif()
-        if(base IN_LIST CORE_ALLOWLIST)
-            continue()
+        if(base IN_LIST PUBLIC_BASENAMES)
+            continue()   # the plugin-facing surface (src/include)
         endif()
         if(base IN_LIST UTILS_BASENAMES)
             continue()   # shared UI utility
@@ -109,7 +133,7 @@ foreach(source IN LISTS PLUGIN_SOURCES)
         if(base IN_LIST FORBIDDEN_HEADERS)
             file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
             list(APPEND VIOLATIONS
-                "${rel}: include \"${path}\" — plugin chỉ được include I*.h, header shared (AppConstants/SignalBus/ServiceRegistry/…), utils dùng chung, hoặc header nội bộ của plugin")
+                "${rel}: include \"${path}\" — plugin chỉ được include header trong src/include (bề mặt công khai) + utils dùng chung, hoặc header nội bộ của plugin")
         endif()
         # Anything else = plugin-local header — allowed by the principle.
     endforeach()
@@ -124,18 +148,17 @@ foreach(source IN LISTS SERVICE_SOURCES)
     file(READ "${source}" content)
     string(REGEX MATCHALL "#[ \t]*include[ \t]+[\"<][^\">]+[\">]" includes "${content}")
     foreach(inc IN LISTS includes)
-        if(inc MATCHES "#[ \t]*include[ \t]+<")
-            continue()
-        endif()
         string(REGEX REPLACE ".*[\"<]([^\">]+)[\">].*" "\\1" path "${inc}")
         get_filename_component(base "${path}" NAME)
+        normalise_name(base "${base}")
         if(base IN_LIST APP_BASENAMES)
             file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
             list(APPEND VIOLATIONS
-                "${rel}: service include \"${base}.h\" — services không được phụ thuộc src/app (lục đục nguồn services → app)")
+                "${rel}: service include \"${path}\" — services không được phụ thuộc src/app (lục đục nguồn services → app)")
         endif()
     endforeach()
 endforeach()
+
 
 # ── 3. UserManager::instance() chỉ ở composition root ─────────────────────────
 file(GLOB_RECURSE ALL_SOURCES
@@ -216,7 +239,11 @@ foreach(cml IN LISTS PLUGIN_CMAKELISTS)
                 "${rel}: plugin nặng (source include VTK/OpenCV/PCL) nhưng build với SharedPCHLight — phải REUSE_FROM SharedPCH")
         endif()
     else()
-        if(content MATCHES "(VTK_LIBRARIES|VTK_INCLUDE_DIRS|OpenCV_LIBS|OpenCV_INCLUDE_DIRS|PCL_LIBRARIES|PCL_INCLUDE_DIRS|onnxruntime|SharedPCH[^A-Za-z])")
+        # Both the CMake variable spelling (VTK_LIBRARIES) and the imported
+        # target spelling (VTK::CommonCore, OpenCV::core, PCL::common,
+        # Eigen3::Eigen) link the heavy SDK. A find_package() for one of them
+        # belongs here too: it is what makes those targets exist.
+        if(content MATCHES "(VTK_LIBRARIES|VTK_INCLUDE_DIRS|OpenCV_LIBS|OpenCV_INCLUDE_DIRS|PCL_LIBRARIES|PCL_INCLUDE_DIRS|onnxruntime|SharedPCH[^A-Za-z]|VTK::|OpenCV::|PCL::|Eigen3::|Eigen::|onnxruntime::|find_package[ \t]*\\([ \t]*(VTK|OpenCV|PCL|Eigen3|Eigen|onnxruntime))")
             list(APPEND VIOLATIONS
                 "${rel}: plugin nhẹ tham chiếu heavy SDK/SharedPCH — phải dùng SharedPCHLight và không kéo VTK/OpenCV/PCL/ONNX")
         endif()
@@ -250,6 +277,120 @@ foreach(source IN LISTS ALL_CXX_SOURCES)
             "${rel}: waitForFinished() không truyền timeout — luôn dùng waitForFinished(<ms>) (mặc định Qt 30 s, treo teardown)")
     endif()
 endforeach()
+
+# ── 8. Event filter: a plugin that installs one on a widget it does NOT own
+#    must be able to remove it. The filter's vtable lives in the plugin DLL;
+#    if the plugin cannot take it off the shell, the shell calls into the
+#    plugin's code after the plugin is gone.
+#
+#    Ownership is decided by the RECEIVER of installEventFilter():
+#      this->installEventFilter(...)      — the plugin's own object (self)
+#      m_xxx->installEventFilter(...)     — a widget this object created
+#    Both die with the plugin, so nothing has to be removed. Any other
+#    receiver (a parameter, a shell service getter) is a widget the plugin
+#    does not own: the removal must be visible in the SAME file.
+#
+#    The previous version was directory-scoped, so one removeEventFilter()
+#    anywhere in the plugin's folder silenced the rule for every file in it —
+#    which is exactly how a dropped filter handle passed this check.
+foreach(source IN LISTS PLUGIN_ALL_SOURCES)
+    file(READ "${source}" content)
+
+    # Every X->installEventFilter(...) call, and the subset whose receiver is
+    # this / a member of this object.
+    string(REGEX MATCHALL "[A-Za-z_][A-Za-z0-9_]*[ \t]*->[ \t]*installEventFilter[ \t]*\\([^)]*\\)"
+           receiver_calls "${content}")
+    string(REGEX MATCHALL "(this|m_[A-Za-z0-9_]+)[ \t]*->[ \t]*installEventFilter[ \t]*\\([^)]*\\)"
+           owned_receiver_calls "${content}")
+    list(LENGTH receiver_calls receiver_count)
+    list(LENGTH owned_receiver_calls owned_count)
+
+    if(receiver_count GREATER owned_count
+       AND NOT content MATCHES "removeEventFilter[ \t]*\\(")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
+        list(APPEND VIOLATIONS
+            "${rel}: cài event filter lên widget KHÔNG thuộc plugin (receiver không phải this/m_*) mà không removeEventFilter trong cùng file — shell sẽ gọi vào code của plugin sau khi plugin đã đi")
+    endif()
+endforeach()
+
+# ── 9. Plugin không được tự dò cửa sổ shell. IShellService là nguồn duy
+#    nhất; quét QApplication::topLevelWidgets() có thể chọn nhầm cửa sổ.
+foreach(source IN LISTS PLUGIN_SOURCES)
+    file(READ "${source}" content)
+    if(content MATCHES "topLevelWidgets[ \t]*\\(")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
+        list(APPEND VIOLATIONS
+            "${rel}: dò QApplication::topLevelWidgets() để tìm cửa sổ shell — dùng IShellService::dialogParent()")
+    endif()
+endforeach()
+
+# ── 10. Blocking / asynchronous work trong plugin: phải do owner quản lý ─────
+#     QtConcurrent::run và QThreadPool::globalInstance() đều chạy trên pool mà
+#     plugin KHÔNG sở hữu: task có thể chạy inline trên GUI thread, và nó vẫn
+#     sống sau khi plugin bị unload — lúc đó nó đang thực thi code của DLL đã
+#     đi. blocking::run dùng QThread riêng do caller join; việc nền của plugin
+#     phải nằm sau một service AppCore sở hữu worker (IAIModelLoadService,
+#     IAIPredictionLogService) hoặc một thread chính plugin join trong
+#     destructor.
+foreach(source IN LISTS PLUGIN_SOURCES)
+    file(READ "${source}" content)
+    if(content MATCHES "QtConcurrent[ \t]*::[ \t]*run")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
+        list(APPEND VIOLATIONS
+            "${rel}: QtConcurrent::run cho blocking I/O — pool có thể chạy task inline trên GUI thread; dùng blocking::run")
+    endif()
+    if(content MATCHES "QThreadPool[ \t]*::[ \t]*globalInstance[ \t]*\\([ \t]*\\)")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${source}")
+        list(APPEND VIOLATIONS
+            "${rel}: QThreadPool::globalInstance() — pool không do plugin sở hữu, task có thể sống sau khi plugin unload; chuyển việc nền sang service AppCore (IAIPredictionLogService/IAIModelLoadService) hoặc thread plugin tự join")
+    endif()
+endforeach()
+
+
+# ── 11. Include path của plugin không được chứa src/core ─────────────────────
+#     Rule 1 chỉ soi mã nguồn; include path mới là thứ compiler thật sự dùng.
+#     Từ khi bề mặt công khai là src/include, việc thêm src/core vào include
+#     path của plugin là đưa được header lõi (UserManager.h, SecretVault.h…)
+#     vào tầm với của nó — đúng thứ ranh giới này cấm. Không có rule này thì
+#     một dòng include path có thể vô hiệu hoá toàn bộ rule 1.
+file(GLOB PLUGIN_CMAKE_FILES "${SOURCE_DIR}/src/modules/*/CMakeLists.txt")
+foreach(cml IN LISTS PLUGIN_CMAKE_FILES)
+    file(READ "${cml}" content)
+    # Bỏ comment: một dòng giải thích nhắc tới src/core không phải vi phạm.
+    string(REGEX REPLACE "#[^\n]*" "" content "${content}")
+    if(content MATCHES "src/core")
+        file(RELATIVE_PATH rel "${SOURCE_DIR}" "${cml}")
+        list(APPEND VIOLATIONS
+            "${rel}: include path của plugin chứa src/core — bề mặt công khai là src/include; header lõi (UserManager.h, SecretVault.h…) là PRIVATE của AppCore")
+    endif()
+endforeach()
+
+
+# ── 12. Mỗi lời gọi inference thô phải đi qua MỘT exception guard ────────────
+#     AIService::runDetection / runSegmentation / runTracking / detectObjects
+#     gọi thẳng vào AIProcessor, nơi ONNX Runtime và OpenCV ném exception. Một
+#     exception thoát ra khỏi một Qt slot (GUI thread) hoặc QThread::run()
+#     (background thread) sẽ tới std::terminate() và GIẾT CẢ ỨNG DỤNG.
+#     Vì vậy mọi lời gọi thô phải bọc trong ai::runInferenceGuarded /
+#     ai::runDetectionGuarded.
+#
+#     Luật: số lời gọi thô phải BẰNG số lời gọi guard — mỗi lời gọi thô có
+#     đúng một guard. Thêm một entry point inference mà quên guard ⇒ số lời
+#     gọi thô vượt số guard ⇒ vi phạm bị bắt. Đây là câu trả lời cấu trúc cho
+#     "guard chỉ được dán vào một thể hiện của lớp lỗi, còn anh em thì không".
+set(_ai_service "${SOURCE_DIR}/src/services/ai/AIService.cpp")
+if(EXISTS "${_ai_service}")
+    file(READ "${_ai_service}" _ai_content)
+    string(REGEX MATCHALL "m_processor->(runTracking|runSegmentation|runObjectDetection|detectObjects)[ \t]*\\(" _raw_calls "${_ai_content}")
+    string(REGEX MATCHALL "(runInferenceGuarded|runDetectionGuarded)[ \t]*\\(" _guard_calls "${_ai_content}")
+    list(LENGTH _raw_calls _raw_count)
+    list(LENGTH _guard_calls _guard_count)
+    if(NOT _raw_count EQUAL _guard_count)
+        list(APPEND VIOLATIONS
+            "src/services/ai/AIService.cpp: ${_raw_count} lời gọi inference thô nhưng chỉ ${_guard_count} guard — mỗi lời gọi thô phải có một ai::runInferenceGuarded/runDetectionGuarded (exception ONNX/OpenCV nếu thoát ra sẽ giết app)")
+    endif()
+endif()
+
 
 if(VIOLATIONS)
     list(JOIN VIOLATIONS "\n  - " report)

@@ -6,7 +6,10 @@ loaded — matching the offline CI constraint.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -14,7 +17,11 @@ from unittest import mock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from ai_assistant.adapters.http.chat_routes import build_chat_router
+from ai_assistant.adapters.http.chat_routes import (
+    _attachment_may_be_opened,
+    build_chat_router,
+)
+from ai_assistant.ports import SEALED_BINARY_PREFIX
 
 LLM_CTX = 4096
 
@@ -36,6 +43,26 @@ class _FailLock:
         return False
 
 
+class _Lease:
+    """The drain contract (ADR 0040): records entry, exit and the live span."""
+
+    def __init__(self, backend) -> None:
+        self.backend = backend
+        self.active = False
+        self.entered = 0
+        self.exited = 0
+
+    def __enter__(self):
+        self.active = True
+        self.entered += 1
+        return self.backend
+
+    def __exit__(self, *exc) -> bool:
+        self.active = False
+        self.exited += 1
+        return False
+
+
 class _FakeChatbotAgent:
     def __init__(self, messages=None) -> None:
         self.messages = messages or [{"role": "user", "content": "hello"}]
@@ -51,6 +78,19 @@ class _FakeChatbotAgent:
 
     def clean_answer(self, answer, chatbot_metadata, finish_reason):
         return answer.strip()
+
+
+class _LeaseAwareChatbotAgent(_FakeChatbotAgent):
+    """Records whether the model lease was held while prompts were built."""
+
+    def __init__(self, llm_module) -> None:
+        super().__init__()
+        self.llm_module = llm_module
+        self.lease_active_during_build: bool | None = None
+
+    def build_messages(self, *args, **kwargs):
+        self.lease_active_during_build = self.llm_module.lease.active
+        return super().build_messages(*args, **kwargs)
 
 
 _UNSET = object()
@@ -70,12 +110,15 @@ def _make_llm_module(
 ) -> SimpleNamespace:
     if llm is _UNSET:
         llm = SimpleNamespace(generate=_fake_generate)
-    return SimpleNamespace(
+    module = SimpleNamespace(
         llm=llm,
         is_vision_model=is_vision,
         llm_lock=lock,
         estimate_tokens=lambda _text: estimate_tokens,
     )
+    module.lease = _Lease(llm)
+    module.model_lease = lambda: module.lease
+    return module
 
 
 def _make_rag_module(**kwargs) -> SimpleNamespace:
@@ -166,6 +209,53 @@ class ChatRoutesTest(unittest.TestCase):
         self.assertFalse(payload["x_meta"]["vision_model"])
         self.assertEqual(agent.last_kwargs["language"], "vi")
         self.assertIsNone(agent.last_kwargs["query_image_b64"])
+
+    def test_generation_holds_the_model_lease_end_to_end(self) -> None:
+        """ADR 0040: one chat request sees one model from prompt to answer.
+
+        The route used to snapshot the handle under ``llm_lock`` and generate
+        outside it, so ``/admin/reload-model`` could free the backend under
+        the stream. The lease now spans prompt assembly (which reads
+        ``is_vision_model``), token estimation and generation.
+        """
+        llm_module = _make_llm_module()
+        observed: list[bool] = []
+
+        def _generate(messages, max_tokens, temperature, repeat_penalty, stream=False):
+            observed.append(llm_module.lease.active)
+            yield {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+
+        llm_module.llm.generate = _generate
+        agent = _LeaseAwareChatbotAgent(llm_module)
+        client, _ = _build_client(llm_module=llm_module, agent=agent)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(agent.lease_active_during_build)
+        self.assertEqual(observed, [True])
+        self.assertEqual(llm_module.lease.entered, 1)
+        self.assertEqual(llm_module.lease.exited, 1)
+        self.assertFalse(llm_module.lease.active)
+
+    def test_a_backend_released_before_the_lease_is_refused(self) -> None:
+        """The early ``llm is None`` read is a fast path, not the guarantee.
+
+        A reload can win the race between that read and the lease; the route
+        must answer 503 instead of generating against a freed model.
+        """
+        llm_module = _make_llm_module()
+        llm_module.lease.backend = None
+        client, _ = _build_client(llm_module=llm_module)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(llm_module.lease.entered, 1)
+        self.assertEqual(llm_module.lease.exited, 1)
+        self.assertFalse(llm_module.lease.active)
 
     def test_uses_create_chat_completion_when_generate_missing(self) -> None:
         llm = SimpleNamespace(create_chat_completion=_fake_generate)
@@ -269,13 +359,18 @@ class ChatRoutesTest(unittest.TestCase):
             yield  # pragma: no cover
 
         llm = SimpleNamespace(generate=_explode)
-        client, _ = _build_client(llm_module=_make_llm_module(llm=llm))
+        llm_module = _make_llm_module(llm=llm)
+        client, _ = _build_client(llm_module=llm_module)
         response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "hi"}]},
         )
         self.assertEqual(response.status_code, 500)
         self.assertIn("inference boom", response.text)
+        # The failure path must release the lease too, or one bad request
+        # blocks every reload for the life of the process.
+        self.assertEqual(llm_module.lease.exited, 1)
+        self.assertFalse(llm_module.lease.active)
 
     def test_attachment_image_is_used_for_retrieval(self) -> None:
         client, agent = _build_client()
@@ -302,6 +397,154 @@ class ChatRoutesTest(unittest.TestCase):
         self.assertEqual(
             agent.last_kwargs["query_image_b64"], "data:image/png;base64,AAA"
         )
+
+    def test_an_attachment_outside_the_upload_roots_is_refused(self) -> None:
+        """The request body is untrusted and the route holds the at-rest key.
+
+        A client-named path must not become "read any file on this host":
+        the file is only opened when it resolves inside a directory the
+        desktop client stores attachments in, or when it is a sealed
+        envelope the platform itself produced. Before the gate, a caller
+        could name any image-extension file on the machine and have its
+        bytes reach the model.
+        """
+        client, _agent = _build_client()
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        secret = os.path.join(outside, "credential.png")
+        with open(secret, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+        with (
+            mock.patch("ai_assistant.image_utils.is_image_file", return_value=True),
+            mock.patch(
+                "ai_assistant.image_utils.image_to_data_uri",
+                return_value="data:image/png;base64,AAA",
+            ) as reader,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "what is this?",
+                            "attachments": [secret],
+                        }
+                    ]
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        reader.assert_not_called()
+
+    def test_a_directory_is_not_opened_as_an_attachment(self) -> None:
+        """Only a regular file is opened.
+
+        A FIFO or a device would block the worker thread on a path the
+        request body chose — a denial of service the client could trigger
+        with one line of JSON.
+        """
+        client, _agent = _build_client()
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(directory, ignore_errors=True))
+        with (
+            mock.patch("ai_assistant.image_utils.is_image_file", return_value=True),
+            mock.patch(
+                "ai_assistant.image_utils.image_to_data_uri",
+                return_value="data:image/png;base64,AAA",
+            ) as reader,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "what is this?",
+                            "attachments": [directory],
+                        }
+                    ]
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        reader.assert_not_called()
+
+    def test_a_non_regular_file_is_not_even_opened(self) -> None:
+        """The guard is asserted on the **open**, not on the outcome.
+
+        A directory raises on open anyway, so the refusal looks the same
+        with and without the check — the difference is *that the file was
+        opened at all*, and on a FIFO that open blocks.
+        """
+        directory = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(directory, ignore_errors=True))
+        with mock.patch("builtins.open", side_effect=AssertionError("opened")) as opener:
+            self.assertFalse(_attachment_may_be_opened(directory))
+        opener.assert_not_called()
+
+    def test_an_attachment_that_does_not_exist_is_refused(self) -> None:
+        """A name that resolves to nothing is refused, not raised."""
+        client, _agent = _build_client()
+        missing = os.path.join(tempfile.gettempdir(), "no-such-attachment.png")
+        with (
+            mock.patch("ai_assistant.image_utils.is_image_file", return_value=True),
+            mock.patch(
+                "ai_assistant.image_utils.image_to_data_uri",
+                return_value="data:image/png;base64,AAA",
+            ) as reader,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "what is this?",
+                            "attachments": [missing],
+                        }
+                    ]
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        reader.assert_not_called()
+
+    def test_a_sealed_attachment_is_opened_wherever_it_lives(self) -> None:
+        """A sealed envelope is the platform's own convention.
+
+        The marker is a *hint*, not a proof of provenance — anyone can write
+        those six bytes — but the route *unseals* the file afterwards, and
+        the AEAD refuses anything the platform did not seal. So a planted
+        marker yields an error, never a document. The branch exists because
+        the desktop client may have stored the file before the upload roots
+        were known to the service.
+        """
+        client, agent = _build_client()
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        sealed = os.path.join(outside, "attachment.png")
+        with open(sealed, "wb") as handle:
+            handle.write(SEALED_BINARY_PREFIX + b"payload")
+        with (
+            mock.patch("ai_assistant.image_utils.is_image_file", return_value=True),
+            mock.patch(
+                "ai_assistant.image_utils.image_to_data_uri",
+                return_value="data:image/png;base64,AAA",
+            ) as reader,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "what is this?",
+                            "attachments": [sealed],
+                        }
+                    ]
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        reader.assert_called_once()
+        self.assertEqual(agent.last_kwargs["query_image_b64"], "data:image/png;base64,AAA")
 
     def test_attachment_read_failure_falls_back_and_warns(self) -> None:
         client, agent = _build_client()

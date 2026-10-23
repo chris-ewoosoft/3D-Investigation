@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,13 @@ def _run_preflight(cfg: TrainConfig, reporter: ProgressReporter, backend: Traini
     device_ok, device_msg = backend.check_device(cfg)
     if not device_ok:
         report.add(preflight.Check("runtime.device", False, device_msg, fatal=True))
+    # "Installed" is not "usable": the dependency check above proves the
+    # packages are on disk, this one proves the stack can actually be loaded.
+    # A broken install must be reported here, in the preflight report, rather
+    # than surfacing later as an unexplained failure.
+    importable, import_msg = backend.check_importable(cfg)
+    if not importable:
+        report.add(preflight.Check("runtime.import", False, import_msg, fatal=True))
 
     for line in report.lines():
         LOG.info("%s", line)
@@ -116,7 +124,7 @@ def _start_manifest(cfg: TrainConfig, backend_version: str) -> manifest_mod.Mani
     manifest["generator"] = generator_name()
     # Key name is historical: it records whichever backend produced the run.
     manifest["ultralytics"] = backend_version
-    manifest["last_run"] = manifest_mod.LastRun(
+    last_run = manifest_mod.LastRun(
         started_at=started_at,
         dataset=str(cfg.data_yaml),
         models=list(cfg.models),
@@ -127,10 +135,12 @@ def _start_manifest(cfg: TrainConfig, backend_version: str) -> manifest_mod.Mani
         batch=cfg.batch,
         workers=cfg.workers,
         device=cfg.device_class,
+        device_resolved=cfg.device_resolved,
         python=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         git_commit=manifest_mod.resolve_git_commit(PROJECT_ROOT),
         min_metrics=[[name, minimum] for name, minimum in cfg.min_metrics],
     )
+    manifest["last_run"] = last_run
     # ``updated_at`` is deliberately *not* stamped here: it marks provenance
     # writes, and this header is not one. Nothing saves the document until
     # ``_record_entry`` does, and that refreshes the stamp itself — setting it
@@ -146,10 +156,12 @@ def _epoch_reporter(
 ) -> EpochCallback:
     """Bind a backend epoch callback to this model's slot in the overall bar.
 
-    Each epoch also *keeps the advisory lock alive* (see
+    Each epoch also *keeps the advisory lock's lease alive* (see
     :func:`cvtrain.fsio.touch_lock`): the stale threshold is what decides a
     crashed run's lock is abandoned, so a run that is very much alive must not
-    look like a crash halfway through a long training.
+    look like a crash halfway through a long training. The lock also has a
+    heartbeat thread for the long gaps *between* epochs; this call keeps the
+    lease in step with visible progress as well.
     """
 
     def _on_epoch(epoch: int, total: int) -> None:
@@ -191,48 +203,70 @@ def _record_entry(
     target: Path,
     model: TrainedModel[Any],
     backend_version: str,
+    inputs: gate.InputSnapshot,
 ) -> None:
     """Append this model's provenance and flush the manifest immediately.
 
-    Flushing per model (not at the end) means a crash during model 3 of 3 still
-    leaves a verified manifest for models 1 and 2.
+    ``inputs`` was captured *before* ``backend.train`` (see
+    :func:`cvtrain.gate.snapshot_inputs`): recording the filesystem as it looks
+    after a multi-hour run would misattribute a dataset or checkpoint edited
+    mid-run. Flushing per model (not at the end) means a crash during model 3 of
+    3 still leaves a verified manifest for models 1 and 2.
     """
 
     trained_at = manifest_mod.now_utc_iso()
+    facts = model.facts
+
+    def effective(name: str, fallback: Any) -> Any:
+        """The run's fact, or the invocation's value when it could not report one."""
+
+        value = getattr(facts, name)
+        return fallback if value is None else value
+
     entry = manifest_mod.ManifestEntry(
         role=spec.role,
+        # The declared base checkpoint (the model family). The digest below is
+        # the file this run *actually* started from — a resumed run starts
+        # from the interrupted run's ``last.pt``, recorded separately in
+        # ``resume_from``.
         source_weights=spec.ckpt,
         sha256=sha256_file(target),
         size_bytes=file_size(target),
-        epochs=cfg.epochs,
-        imgsz=cfg.imgsz,
-        seed=cfg.seed,
+        # The effective *budget*, not the epochs this invocation asked for:
+        # a resumed run restores its arguments from the checkpoint and ignores
+        # ``--epochs``. The completed count is a different fact and is
+        # recorded separately (`epochs_completed`): early stopping can finish a
+        # 100-epoch budget after 40 epochs.
+        epochs=effective("epochs", cfg.epochs),
+        imgsz=effective("imgsz", cfg.imgsz),
+        seed=effective("seed", cfg.seed),
         opset=cfg.opset,
-        batch=cfg.batch,
+        batch=effective("batch", cfg.batch),
         workers=cfg.workers,
         backend_version=backend_version,
         # Normalised exactly the way ``gate.already_current`` compares it: "no
         # ``--device``" and "``--device auto``" are the same experiment, and
         # ``"0, 1"`` and ``"0,1"`` are the same too (see ``device_class``).
-        device=cfg.device_class,
+        device=effective("device", cfg.device_class),
+        device_resolved=effective("device_resolved", cfg.device_resolved),
         trained_at=trained_at,
-        dataset=str(cfg.data_yaml),
+        dataset=effective("dataset", str(cfg.data_yaml)),
         run_dir=str(model.run_dir),
         metrics=model.metrics,
     )
-    # Both digests are taken through the gate module so that what is written
-    # down here and compared there can never disagree. Absent when the file is
-    # not on disk: leaving the field out is honest, and ``gate.already_current``
-    # re-reads that as "unproven" and retrains.
-    weights_sha = gate.weights_digest(spec, cfg)
-    if weights_sha is not None:
-        entry["source_weights_sha256"] = weights_sha
-    dataset_sha = gate.dataset_digest(cfg)
-    if dataset_sha is not None:
-        entry["dataset_sha256"] = dataset_sha
-    content_sha = gate.dataset_content_digest(cfg)
-    if content_sha is not None:
-        entry["dataset_content_sha256"] = content_sha
+    if facts.epochs_completed is not None:
+        entry["epochs_completed"] = facts.epochs_completed
+    if facts.resumed_from is not None:
+        entry["resume_from"] = facts.resumed_from
+    # The snapshot is the single source of truth for what this artifact was
+    # trained from. Absent values stay absent: leaving the field out is honest,
+    # and ``gate.already_current`` re-reads that as "unproven" and retrains.
+    if inputs.source_weights_sha256 is not None:
+        entry["source_weights_sha256"] = inputs.source_weights_sha256
+    if inputs.dataset_sha256 is not None:
+        entry["dataset_sha256"] = inputs.dataset_sha256
+    if inputs.dataset_content_sha256 is not None:
+        entry["dataset_content_sha256"] = inputs.dataset_content_sha256
     if spec.role == "tracking":
         # The artifact is a detector; association lives in the Qt runtime.
         # Recording the parameters here keeps "tracking" from implying that the
@@ -261,9 +295,18 @@ def _train_all(
     """
 
     total = len(cfg.models)
+    # One content fingerprint for the whole invocation (see
+    # ``gate.snapshot_dataset``): both the skip verdict and the provenance
+    # recorder compare against the same observation, and a three-model run does
+    # not hash the dataset three times. The reporter is told about it: reading
+    # the whole dataset is minutes of work on a large one, and a bar that
+    # stands still for minutes looks like a hang.
+    dataset_snapshot = gate.snapshot_dataset(cfg, on_file=reporter.dataset)
     for index, key in enumerate(cfg.models):
         spec = MODEL_REGISTRY[key]
-        if cfg.skip_unchanged and gate.already_current(spec, cfg, manifest, backend.version):
+        if cfg.skip_unchanged and gate.already_current(
+            spec, cfg, manifest, backend.version, dataset=dataset_snapshot
+        ):
             LOG.info("[%d/%d] %s already matches this invocation; skipping", index + 1, total, spec.output)
             kept = (manifest.get("entries") or {}).get(spec.output) or {}
             # Read back through the gate, which tolerates a document a hand has
@@ -273,10 +316,20 @@ def _train_all(
             reporter.skipped(index, spec.key)
             continue
         LOG.info("[%d/%d] Training %s from %s", index + 1, total, spec.label, spec.ckpt)
-        model = backend.train(spec, cfg, _epoch_reporter(reporter, index, spec.key, heartbeat))
+        # Resolve the plan *before* the snapshot: a resumed run starts from the
+        # interrupted run's ``last.pt``, and the digest must describe the file
+        # training actually starts from — not the base checkpoint the spec
+        # names. This is also where ``--resume`` fails closed (no checkpoint,
+        # completed checkpoint, different dataset).
+        plan = backend.plan(spec, cfg, dataset_content_sha256=dataset_snapshot.content_sha256)
+        # Capture the inputs *before* the expensive call: the manifest must
+        # describe what training started from, not what the filesystem looked
+        # like when the export finished.
+        inputs = gate.snapshot_inputs(spec, cfg, dataset=dataset_snapshot, source_weights=plan.source_weights)
+        model = backend.train(spec, cfg, _epoch_reporter(reporter, index, spec.key, heartbeat), plan)
         gate.enforce_quality_gate(cfg, spec, model.metrics)
         target = _export_one(spec, cfg, reporter, index, model, backend)
-        _record_entry(manifest, spec, cfg, target, model, backend.version)
+        _record_entry(manifest, spec, cfg, target, model, backend.version, inputs)
     return [MODEL_REGISTRY[key].output for key in cfg.models]
 
 
@@ -289,6 +342,14 @@ def _execute(cfg: TrainConfig, reporter: ProgressReporter, backend: TrainingBack
     failed = _run_preflight(cfg, reporter, backend)
     if failed is not None:
         return failed
+
+    # "Let the framework choose" is a request, not an answer: it resolves
+    # differently on a machine with a GPU and on one without. Resolving it
+    # *here* — before any weight is touched — gives the run a device that can
+    # be compared with the next one, tells the framework which device to use
+    # instead of letting it decide, and puts the answer in the provenance.
+    cfg = replace(cfg, device_resolved=backend.resolve_device(cfg))
+    LOG.info("Device: %s (requested %s)", cfg.device_resolved, cfg.device_class)
 
     if cfg.check_only:
         LOG.info("Environment is ready for training.")
@@ -307,10 +368,11 @@ def _execute(cfg: TrainConfig, reporter: ProgressReporter, backend: TrainingBack
     # lock: a second run aimed at the same directory is refused here instead of
     # silently overwriting this run's provenance in ``manifest.json``.
     with directory_lock(cfg.models_dir) as lock:
-        # The lock's mtime is what "abandoned after LOCK_STALE_SECONDS" means,
-        # so a long training refreshes it every epoch: a run that is still
-        # working must never look like the crash the stale rule exists to clean
-        # up after.
+        # The lock is a lease: its heartbeat thread refreshes it while this
+        # block runs, and the owner (host + PID) in the file lets the next run
+        # detect a same-host crash without waiting out the stale window.
+        # Training also refreshes it every epoch so liveness and progress stay
+        # in step.
         def heartbeat() -> None:
             touch_lock(lock)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import ai_assistant.observability.tracing as tracing
@@ -218,7 +219,19 @@ class InlineCodeFlagTests(unittest.TestCase):
 
 class SandboxFrontDoorTests(unittest.TestCase):
     def test_an_unparseable_command_is_rejected_without_running(self):
-        outcome = run("git 'abc", ".", 10)
+        # The local runtime is requested explicitly: the isolation gate is on
+        # by default (ADR 0023), and it would otherwise answer before the
+        # parser is reached — which is a different refusal than the one this
+        # case pins.
+        settings = SimpleNamespace(
+            sandbox_enabled=True,
+            sandbox_runtime="local",
+            sandbox_image="agent:latest",
+            max_write_bytes=1024 * 1024,
+            sandbox_require_isolation=False,
+        )
+        with patch("ai_assistant.tools.sandbox.load_agent_runtime_settings", return_value=settings):
+            outcome = run("git 'abc", ".", 10)
         self.assertIn("error", outcome)
         self.assertIn("Invalid command", outcome["error"])
 

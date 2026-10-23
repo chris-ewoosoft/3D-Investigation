@@ -7,6 +7,7 @@
 #include <QThread>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <shared_mutex>
 
 /**
@@ -29,8 +30,7 @@ public:
     bool isRunning() const override;
     void stopReconstruction() override;
     QStringList getImageList() const override;
-    const std::vector<Point3D>& getPointCloud() const override;
-    const std::vector<PointColor>& getPointColors() const override;
+    std::shared_ptr<const PointCloudSnapshot> pointCloudSnapshot() const override;
     size_t pointCount() const override;
     bool hasResult() const override;
     void processPointCloud() override;
@@ -46,12 +46,42 @@ private:
     /// lúc thread vừa finished và lúc destructor kiểm tra trạng thái).
     void finishRun(bool ok);
 
+    /// Builds the published snapshot + point count from the pipeline and
+    /// publishes them. The caller MUST hold m_mutex (the pipeline lock) —
+    /// the pipeline data is read under it. The publication itself takes
+    /// m_publishedMutex, so the lock order stays m_mutex → m_publishedMutex.
+    void publishResult();
+
     std::unique_ptr<ReconstructionPipeline> m_pipeline;
     std::atomic<bool> m_running{false};
     /// Yêu cầu hủy cooperative — set bởi stopReconstruction()/dtor, đọc bởi
     /// predicate truyền vào pipeline. Reset ở đầu mỗi lần reconstruct().
     std::atomic<bool> m_cancelRequested{false};
+    /// Bảo vệ chính pipeline: worker giữ khoá độc quyền suốt quá trình
+    /// reconstruct, nên MỌI lời gọi vào m_pipeline đều phải đi qua khoá này.
     mutable std::shared_mutex m_mutex;
+    /// Bảo vệ state đã "publish" cho UI (m_imageList + m_snapshot +
+    /// m_publishedPointCount), TÁCH RIÊNG khỏi m_mutex: worker giữ m_mutex suốt
+    /// quá trình chạy, nên một truy vấn UI đọc bản publish phải không bao giờ
+    /// phải chờ nó (nếu dùng chung khoá thì UI đóng băng suốt thời gian
+    /// reconstruct).
+    ///
+    /// Đây là bản publish DUY NHẤT cho UI: cả kết quả lẫn số điểm đều được
+    /// worker publish khi lần chạy kết thúc, nên UI không bao giờ phải chạm
+    /// vào pipeline — kể cả khi đang reconstruct.
+    ///
+    /// Thứ tự khoá bất biến: m_mutex TRƯỚC m_publishedMutex, không bao giờ
+    /// ngược lại (xem publishResult / setImages).
+    mutable std::mutex m_publishedMutex;
+    /// The image list, published when the images are set. The UI reads this
+    /// copy instead of the pipeline's.
+    QStringList m_imageList;
+    /// The published result. Rebuilt per run and replaced (never mutated in
+    /// place) so callers holding a snapshot stay valid.
+    std::shared_ptr<const PointCloudSnapshot> m_snapshot;
+    /// The number of points in the published snapshot — published together
+    /// with it, so the UI never has to touch the pipeline to report it.
+    size_t m_publishedPointCount = 0;
     /// QThread nội bộ chạy ReconstructionWorker (moveToThread pattern);
     /// không bao giờ move `this` — chỉ worker được move. Ownership tường minh:
     /// service xóa cả hai trong finishRun()/destructor sau khi join thread.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -104,6 +105,23 @@ class DataYamlTests(unittest.TestCase):
                     check = check_data_yaml(path)
                     self.assertFalse(check.ok)
                     self.assertIn("at least one class", check.detail)
+
+    def test_a_scalar_names_value_fails_instead_of_raising_typeerror(self) -> None:
+        # ``names: part`` and ``names: 42`` used to reach ``len()``: a check
+        # whose job is to report malformed input crashed with a traceback.
+        for value in ("part", "42"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    for name in ("images/train", "images/val"):
+                        (root / name).mkdir(parents=True, exist_ok=True)
+                    path = _write(
+                        root / "data.yaml",
+                        f"train: images/train\nval: images/val\nnames: {value}\n",
+                    )
+                    check = check_data_yaml(path)
+                    self.assertFalse(check.ok)
+                    self.assertIn("mapping or list", check.detail)
 
     def test_top_level_must_be_a_mapping(self) -> None:
         # A bare list is valid YAML but not a dataset definition; without this
@@ -360,6 +378,44 @@ class DatasetContentFingerprintTests(unittest.TestCase):
             fp2 = dataset_content_fingerprint(non_mapping)
             self.assertIsNotNone(fp2)
 
+    def test_the_fingerprint_reports_progress_for_every_file(self) -> None:
+        # Reading the whole dataset is minutes of work on a large one: the
+        # caller has to be able to show that, or the operator watches a bar
+        # that stands still and assumes the run is stuck.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "img1.jpg", "content1")
+            _write(train_dir / "img2.jpg", "content2")
+            _write(val_dir / "img3.jpg", "content3")
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/val\nnames:\n  0: part\n")
+
+            seen: list[tuple[int, int]] = []
+            fingerprint = dataset_content_fingerprint(
+                yaml_path, on_file=lambda done, total: seen.append((done, total))
+            )
+
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual([done for done, _ in seen], [1, 2, 3])
+        self.assertEqual({total for _, total in seen}, {3})
+        self.assertEqual(seen[-1], (3, 3))
+
+    def test_an_empty_dataset_reports_nothing_to_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "images" / "train").mkdir(parents=True)
+            (root / "images" / "val").mkdir(parents=True)
+            yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/val\nnames:\n  0: part\n")
+            seen: list[tuple[int, int]] = []
+            fingerprint = dataset_content_fingerprint(
+                yaml_path, on_file=lambda done, total: seen.append((done, total))
+            )
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual(seen, [])
+
     def test_directory_content_changes_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -397,6 +453,172 @@ class DatasetContentFingerprintTests(unittest.TestCase):
             fp = dataset_content_fingerprint(yaml_path)
             self.assertIsNotNone(fp)
 
+    def test_glob_splits_fingerprint_every_matching_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "a.jpg", "pixels-a")
+            _write(train_dir / "notes.txt", "not an image")
+
+            yaml_path = _write(
+                root / "data.yaml",
+                'train: "images/train/*.jpg"\nval: images/val\nnames:\n  0: part\n',
+            )
+            first = dataset_content_fingerprint(yaml_path)
+
+            _write(train_dir / "a.jpg", "different-pixels")
+            second = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(first, second)
+
+            # A non-matching file in the same directory is not part of the split.
+            _write(train_dir / "notes.txt", "still not an image")
+            third = dataset_content_fingerprint(yaml_path)
+            self.assertEqual(second, third)
+
+            _write(train_dir / "b.jpg", "new-image")
+            fourth = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(third, fourth)
+
+    def test_list_valued_splits_fingerprint_every_member(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "a.jpg", "pixels-a")
+            _write(val_dir / "b.jpg", "pixels-b")
+
+            yaml_path = _write(
+                root / "data.yaml",
+                "train: [images/train, images/val]\nval: images/val\nnames:\n  0: part\n",
+            )
+            first = dataset_content_fingerprint(yaml_path)
+            _write(val_dir / "b.jpg", "different-pixels")
+            second = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(first, second)
+
+    def test_txt_listing_fingerprints_the_files_it_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            image = _write(train_dir / "a.jpg", "pixels-a")
+            listing = _write(root / "train.txt", "# one image\nimages/train/a.jpg\n")
+
+            yaml_path = _write(
+                root / "data.yaml",
+                "train: train.txt\nval: images/val\nnames:\n  0: part\n",
+            )
+            first = dataset_content_fingerprint(yaml_path)
+
+            # The image itself, not just the listing, is part of the proof.
+            image.write_bytes(b"different-pixels")
+            second = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(first, second)
+
+            listing.write_text("# one image\nimages/train/a.jpg\nimages/train/b.jpg\n", encoding="utf-8")
+            third = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(second, third)
+
+    def test_a_listing_in_a_subdirectory_handles_absolute_and_mixed_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            lists_dir = root / "lists"
+            external_dir = root.parent / f"{root.name}-external"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            lists_dir.mkdir()
+            external_dir.mkdir()
+            self.addCleanup(shutil.rmtree, external_dir, ignore_errors=True)
+            _write(train_dir / "a.jpg", "pixels-a")
+            external = _write(external_dir / "external.jpg", "outside-pixels")
+            listing = _write(
+                lists_dir / "train.txt",
+                "https://example.com/remote.jpg\n"
+                "\n"
+                "# comment\n"
+                "images/train/a.jpg\n"
+                f"{external.as_posix()}\n",
+            )
+
+            yaml_path = _write(
+                root / "data.yaml",
+                f"train: lists/{listing.name}\nval: images/val\nnames:\n  0: part\n",
+            )
+            first = dataset_content_fingerprint(yaml_path)
+            _write(external_dir / "external.jpg", "changed-outside-pixels")
+            second = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(first, second)
+
+    def test_an_unreadable_listing_contributes_its_own_bytes_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            listing = _write(root / "train.txt", "images/train/a.jpg\n")
+            yaml_path = _write(
+                root / "data.yaml",
+                f"train: {listing.name}\nval: images/val\nnames:\n  0: part\n",
+            )
+            real_read_text = Path.read_text
+
+            def _read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+                if path.name == listing.name:
+                    raise OSError("sharing violation")
+                return real_read_text(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", _read_text):
+                fingerprint = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(fingerprint)
+
+    def test_list_splits_ignore_remote_and_non_string_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "a.jpg", "pixels")
+            yaml_path = _write(
+                root / "data.yaml",
+                "train: [https://example.com/data.zip, 42, images/train]\n"
+                "val: images/val\nnames:\n  0: part\n",
+            )
+            self.assertIsNotNone(dataset_content_fingerprint(yaml_path))
+
+    def test_a_missing_split_path_is_part_of_the_fingerprint(self) -> None:
+        # "The directory is not there yet" is not the same dataset as "the
+        # directory is there and empty": creating a previously missing split
+        # must move the digest, or a deleted dataset could look unchanged.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            yaml_path = _write(
+                root / "data.yaml",
+                "train: images/train\nval: images/val\nnames:\n  0: part\n",
+            )
+            missing = dataset_content_fingerprint(yaml_path)
+
+            train_dir = root / "images" / "train"
+            val_dir = root / "images" / "val"
+            train_dir.mkdir(parents=True)
+            val_dir.mkdir(parents=True)
+            _write(train_dir / "a.jpg", "pixels")
+
+            present = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(missing)
+            self.assertIsNotNone(present)
+            self.assertNotEqual(missing, present)
+
     def test_subdirectories_inside_split_are_ignored(self) -> None:
         """rglob('*') yields subdirectories too; only files should be hashed."""
 
@@ -413,13 +635,21 @@ class DatasetContentFingerprintTests(unittest.TestCase):
             self.assertIsNotNone(fp)
 
     def test_an_unreadable_file_contributes_a_stable_marker(self) -> None:
+        # The marker is what makes an unreadable file a *fact* rather than a
+        # hole: without it, a file we could not read would hash exactly like
+        # a file we read and found empty, and the fingerprint would stop
+        # noticing the moment the file became readable again. Asserting that
+        # the digests *differ* is what pins the marker — asserting only that
+        # a 64-character digest comes out pins nothing at all.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             train_dir = root / "images" / "train"
             train_dir.mkdir(parents=True)
-            _write(train_dir / "img.jpg", "data")
+            target = train_dir / "img.jpg"
+            _write(target, "data")
 
             yaml_path = _write(root / "data.yaml", "train: images/train\nval: images/train\nnames:\n  0: part\n")
+            readable = dataset_content_fingerprint(yaml_path)
             orig_open = Path.open
 
             def _flaky_open(self: Path, *a: Any, **kw: Any) -> Any:
@@ -429,9 +659,15 @@ class DatasetContentFingerprintTests(unittest.TestCase):
                 return orig_open(self, *a, **kw)
 
             with mock.patch.object(Path, "open", _flaky_open):
-                fp = dataset_content_fingerprint(yaml_path)
-                self.assertIsNotNone(fp)
-                self.assertEqual(len(fp or ""), 64)
+                unreadable = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(unreadable)
+            self.assertEqual(len(unreadable or ""), 64)
+
+            # An unreadable file is not an empty file.
+            target.write_text("", encoding="utf-8")
+            empty = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(unreadable, empty)
+            self.assertNotEqual(readable, empty)
 
     def test_an_unreadable_single_file_contributes_a_stable_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -451,9 +687,15 @@ class DatasetContentFingerprintTests(unittest.TestCase):
                 return orig_open(self, *a, **kw)
 
             with mock.patch.object(Path, "open", _flaky_open):
-                fp = dataset_content_fingerprint(yaml_path)
-                self.assertIsNotNone(fp)
-                self.assertEqual(len(fp or ""), 64)
+                unreadable = dataset_content_fingerprint(yaml_path)
+            self.assertIsNotNone(unreadable)
+            self.assertEqual(len(unreadable or ""), 64)
+
+            # The same property on the listing path: an unreadable listing is
+            # not an empty one.
+            train_file.write_text("", encoding="utf-8")
+            empty = dataset_content_fingerprint(yaml_path)
+            self.assertNotEqual(unreadable, empty)
 
     def test_same_size_content_change_changes_the_fingerprint(self) -> None:
         # The inventory-only fingerprint this replaces compared (name, size),

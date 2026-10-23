@@ -7,18 +7,9 @@
 #include <QStyle>
 #include <QFileDialog>
 #include <QHBoxLayout>
-#include <QApplication>
-#include <QMainWindow>
 #include <QPainter>
 #include <QCheckBox>
 #include <QPointer>
-
-// Helper: find the top-level QMainWindow
-static QMainWindow* findMainWindow() {
-    for (QWidget *w : QApplication::topLevelWidgets())
-        if (auto *mw = qobject_cast<QMainWindow*>(w)) return mw;
-    return nullptr;
-}
 
 ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *parent)
     : QWidget(parent)
@@ -222,78 +213,11 @@ ThemeSelectionDialog::ThemeSelectionDialog(const QString &username, QWidget *par
 }
 
 void ThemeSelectionDialog::applyBackground() {
-    QMainWindow *mw = findMainWindow();
-    if (!mw) return;
-    applyGlobalBackground(mw, m_bgImagePath, m_bgOpacity, m_useBgImage);
-}
-
-void ThemeSelectionDialog::applyGlobalBackground(QWidget *mw, const QString &bgPath, int bgOpacity, bool useBg) {
-    if (!mw) return;
-
-    if (!useBg || bgPath.isEmpty()) {
-        // Remove background overlay
-        QLabel *oldOverlay = mw->findChild<QLabel*>("bgGlobalOverlay");
-        if (oldOverlay) oldOverlay->deleteLater();
-        return;
-    }
-
-    QLabel *overlay = mw->findChild<QLabel*>("bgGlobalOverlay");
-    if (!overlay) {
-        overlay = new QLabel(mw);
-        overlay->setObjectName("bgGlobalOverlay");
-        // Must be transparent for mouse events so user can click through
-        overlay->setAttribute(Qt::WA_TransparentForMouseEvents);
-        overlay->setScaledContents(true);
-        // Ensure it stays on top
-        overlay->raise();
-        overlay->show();
-        
-        // We need the overlay to resize with the main window.
-        // A simple event filter can do this.
-        class OverlayResizer : public QObject {
-        public:
-            OverlayResizer(QObject* parent) : QObject(parent) {}
-            bool eventFilter(QObject* obj, QEvent* event) override {
-                if (event->type() == QEvent::Resize) {
-                    QWidget* w = qobject_cast<QWidget*>(obj);
-                    if (w) {
-                        QLabel* overlay = w->findChild<QLabel*>("bgGlobalOverlay");
-                        if (overlay) {
-                            overlay->setGeometry(w->rect());
-                            overlay->lower(); // Keep it at the bottom
-                        }
-                    }
-                }
-                return QObject::eventFilter(obj, event);
-            }
-        };
-        // Avoid adding multiple filters
-        if (!mw->property("hasOverlayResizer").toBool()) {
-            mw->installEventFilter(new OverlayResizer(mw));
-            mw->setProperty("hasOverlayResizer", true);
-        }
-    }
-    
-    // Ensure overlay is correctly sized immediately and on bottom
-    overlay->setGeometry(mw->rect());
-    overlay->lower();
-
-    QPixmap pm(bgPath);
-    if (!pm.isNull()) {
-        // Apply color tint blend manually to the pixmap
-        QPixmap tinted = pm;
-        QPainter p(&tinted);
-        QColor accent(StyleManager::accentColor());
-        double alpha = bgOpacity / 100.0;
-        accent.setAlpha(qRound(alpha * 255));
-        p.fillRect(tinted.rect(), accent);
-        p.end();
-        
-        overlay->setPixmap(tinted);
-        overlay->show();
-    } else {
-        overlay->hide();
-    }
+    // The owner applies the background to the shell. The dialog never
+    // installs the event filter itself: the filter's vtable lives in the
+    // plugin DLL and it must outlive this dialog, so the plugin owns it.
+    if (!m_backgroundRequest) return;
+    m_backgroundRequest(m_bgImagePath, m_bgOpacity, m_useBgImage);
 }
 
 void ThemeSelectionDialog::addColorOption(QGridLayout *layout, int row, int col,

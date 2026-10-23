@@ -1,21 +1,46 @@
-"""Line-coverage gate for the C++ guard layer (measured with OpenCppCoverage).
+"""Line-coverage gate for the C++ guard and service layer (OpenCppCoverage).
 
 The C++ side of the repository had no coverage measurement at all: the
 architecture guard, the mutation check and the CTest suite proved behaviour,
 but nothing prevented an untested branch from being added to the files that
-every plugin depends on. This script runs the owning tests of the guard layer
-under OpenCppCoverage, merges the per-test cobertura reports and enforces the
+every plugin depends on. This script runs the owning tests under
+OpenCppCoverage, merges the per-test cobertura reports and enforces the
 per-file floors below.
 
-Scope: translation-unit sources (``.cpp``) of the kernel/guard layer. Header
-only templates (``ServiceRegistry.h``, ``MailThreadGuard.h``) compile inline
-into their callers under ``/O2 /Ob2`` and cannot be mapped line-by-line by the
-tool, so they are pinned by ``tests/mutation_check.py`` instead (null
-registration, GUI-thread warning) — see tests/README.md for the split.
+Scope: every translation unit of ``src/`` that a test can reach.
+
+* The kernel/guard layer (``src/core``) and the composition root
+  (``src/app``) — the files every plugin transitively depends on.
+* The service layer (``src/services``) and the shared utility layer
+  (``src/utils``) — the behaviour the application is made of.
+* The plugin layer (``src/modules``) is *visible* (the plugin DLLs are
+  instrumented and loaded by the smoke test) even though the shipped plugins
+  are GUI shells: what is not executed is printed as "coverage debt" on every
+  run instead of disappearing from the report.
+
+Two gates beyond the per-file floors:
+
+1. **Completeness** — a translation unit that is missing from the report
+   fails the run.  A file can only go missing when it is not compiled into
+   an instrumented module (or when the unity build inlined it away), and
+   both are architectural drift, not a coverage detail.
+2. **Debt visibility** — the files with 0 % are listed on every run with
+   their line count, so the remaining work is named, not implied.
+
+Header only templates (``ServiceRegistry.h``, ``MailThreadGuard.h``,
+``BlockingCall.h``) compile inline into their callers under ``/O2 /Ob2`` and
+cannot be mapped line-by-line by the tool, so they are pinned by
+``tests/mutation_check.py`` instead (null registration, GUI-thread warning,
+the completed/never-cancelled promise) — see tests/README.md for the split.
 
 The floors are a ratchet, not an aspiration: they equal the measured value of
 the current suite (rounded down), so any new uncovered line in these files
 fails the gate. Raise a floor when its file reaches the next integer.
+
+Note that the comparison uses the **raw** percentage (covered/valid*100) while
+the table displays it rounded to one decimal: a file measured at 38.967 % shows
+as "39.0 %" but its floor stays 38 — the ratchet may never sit above the value
+that was actually measured.
 
 Usage (from the repository root, PATH prepared like the CTest step):
 
@@ -30,10 +55,12 @@ discovered through OPENCPPCOVERAGE_EXE, PATH or the known install paths).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,8 +69,12 @@ BASE = Path(__file__).resolve().parent.parent
 
 # One row per test executable that owns part of the gate scope.
 # (ctest name, exe file name, extra environment)
+#
+# TestServiceRegistry is deliberately absent: it only exercises the
+# header-only ServiceRegistry.h (no scope .cpp) and can finish without loading
+# AppCore.dll, so OpenCppCoverage has nothing to export. Its null-registration
+# decision is pinned by mutation_check.py instead.
 TESTS: tuple[tuple[str, str, dict[str, str]], ...] = (
-    ("TestServiceRegistry", "TestServiceRegistry.exe", {}),
     ("TestPluginDependencyResolver", "TestPluginDependencyResolver.exe", {}),
     ("TestPluginHost", "TestPluginHost.exe", {}),
     # Loads the real plugin DLLs through the default QPluginLoader path —
@@ -52,10 +83,87 @@ TESTS: tuple[tuple[str, str, dict[str, str]], ...] = (
     ("TestAppShell", "TestAppShell.exe", {"QT_QPA_PLATFORM": "offscreen"}),
     ("TestUserManagerCrypto", "TestUserManagerCrypto.exe", {}),
     ("TestMailCredentialLifecycle", "TestMailCredentialLifecycle.exe", {}),
+    # The at-rest confidentiality contract of the user INI (fail-closed vault,
+    # the two namespaces, the legacy migration, the licence inventory).
+    ("TestSecretProtection", "TestSecretProtection.exe", {}),
     ("TestChatSessionManager", "TestChatSessionManager.exe", {}),
+    # The at-rest cipher (AES-256-GCM envelope shared with the Python service).
+    ("TestAtRestCipher", "TestAtRestCipher.exe", {}),
     ("TestSettingsService", "TestSettingsService.exe", {}),
     ("TestShellService", "TestShellService.exe", {}),
     ("TestLanguageManager", "TestLanguageManager.exe", {}),
+    ("TestAppConfig", "TestAppConfig.exe", {}),
+    ("TestAIRequestQueue", "TestAIRequestQueue.exe", {}),
+    # AppCore-owned worker lifetime/cancellation (owns a private thread pool).
+    ("TestAIModelLoadService", "TestAIModelLoadService.exe", {}),
+    # Non-blocking server-process teardown (terminate + kill timer + deferred
+    # start). Runs this executable itself as a stand-in for the wrapper.
+    ("TestAIServerProcessController", "TestAIServerProcessController.exe", {}),
+    # The AI service: its own lines (the delegation, the readiness flags, the
+    # refusal of a missing model) are measured here. The real ONNX session is
+    # NOT loaded under the exporter — its instrumentation multiplies every
+    # allocation and the session creation dies with std::bad_alloc — so the
+    # gate sets AI_SERVICE_NO_MODELS. The real inference is proven by the
+    # normal CTest run (TestAIService without the exporter).
+    ("TestAIService", "TestAIService.exe", {"AI_SERVICE_NO_MODELS": "1"}),
+    # ── Service layer ────────────────────────────────────────────────────────
+    # The rows above only exercise the kernel/guard layer.  The rows below own
+    # the *service* layer: without them the service sources were reported with
+    # 0 % (their lines are only reachable through a test that links the
+    # concrete service translation units).  Each of them is a cheap test that
+    # already exists in tests/CMakeLists.txt — the gate simply has to run it
+    # under the coverage exporter.
+    ("TestSignalBus", "TestSignalBus.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    ("TestAgentActions", "TestAgentActions.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    ("TestAIAssistant", "TestAIAssistant.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    ("TestAIYoloPostProcessor", "TestAIYoloPostProcessor.exe", {}),
+    # Mail: MIME parsing (the largest service TU) and the SMTP outbox adapter.
+    ("TestMailMimeParser", "TestMailMimeParser.exe", {}),
+    ("TestSmtpOutbox", "TestSmtpOutbox.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    # Reconstruction: the pipeline family (16 translation units compiled into
+    # the test executable) plus the two parsers/filters with their own tests.
+    ("TestReconstructionPipeline", "TestReconstructionPipeline.exe",
+     {"QT_QPA_PLATFORM": "offscreen"}),
+    # The SERVICE half of the reconstruction contract: the published state
+    # (snapshot + point count) and the non-blocking queries/mutators. It is a
+    # separate executable because the completed-run case needs a full
+    # reconstruction; see tests/TestReconstructionService.cpp.
+    #
+    # RECONSTRUCTION_NO_HEAVY_RUN: the exporter cannot host the heavy
+    # reconstruction (MLS densify to 1M points + Poisson meshing) — it exceeds
+    # the exporter's per-test budget and the run times out. The completed-run
+    # case skips under the exporter; the published-state contract is still
+    # measured by the other cases here and by TestReconstructionPipeline
+    # (which owns the snapshot conversion).
+    ("TestReconstructionService", "TestReconstructionService.exe",
+     {"QT_QPA_PLATFORM": "offscreen", "RECONSTRUCTION_NO_HEAVY_RUN": "1"}),
+    ("TestCameraParamsParser", "TestCameraParamsParser.exe", {}),
+    ("TestPointCloudFilter", "TestPointCloudFilter.exe",
+     {"QT_QPA_PLATFORM": "offscreen"}),
+    # Scene: the DICOM crosshair math (pure header + TU, no VTK needed) and
+    # the crosshair overlay manager (VTK, no GL context required).
+    ("TestCrosshairGeometry", "TestCrosshairGeometry.exe", {}),
+    ("TestCrosshairManager", "TestCrosshairManager.exe", {}),
+    # Viewer: the file → VTK actor loaders for 2-D images and 3-D models.
+    ("TestViewerLoaders", "TestViewerLoaders.exe", {}),
+    # Plugin helpers that carry real logic (mail preview, inbox row, attachment
+    # preview, prediction logger).
+    ("TestPluginHelpers", "TestPluginHelpers.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    # The authentication dialogs of the user-auth plugin (≈1 000 GUI lines).
+    ("TestUserAuthDialogs", "TestUserAuthDialogs.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    # The remaining plugin UI: the ribbon panels, the mail dialogs, the
+    # viewer view model and the AI inference dispatch.
+    ("TestPluginUi", "TestPluginUi.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    # The SMTP client: input validation and failure reporting.
+    ("TestSmtpMailer", "TestSmtpMailer.exe", {}),
+    # The remaining guard-layer decision branches (loader failures, resolver
+    # diagnostics, settings fallback).
+    ("TestGuardBranches", "TestGuardBranches.exe", {}),
+    # The last two plugin translation units without a test: the sealed
+    # attachment viewer and the video tracking thread.
+    ("TestPluginWidgets", "TestPluginWidgets.exe", {"QT_QPA_PLATFORM": "offscreen"}),
+    # Shared utility layer (src/utils/**) — the plugin-facing helpers.
+    ("TestUtilsLayer", "TestUtilsLayer.exe", {"QT_QPA_PLATFORM": "offscreen"}),
 )
 
 # Measured floors: repository-relative path -> minimum line coverage in %.
@@ -65,19 +173,113 @@ TESTS: tuple[tuple[str, str, dict[str, str]], ...] = (
 # from (2026-10, MSVC 2022 / VS 17.12, Release). Raise a floor when its file
 # reaches the next integer — never lower one to make a change pass.
 FLOORS: dict[str, float] = {
-    # Kernel + guard layer: the files every plugin transitively depends on.
-    "src/core/pluginhost.cpp": 91,               # measured 91.8
+    # ── Kernel + guard layer: the files every plugin transitively depends on.
+    "src/core/pluginhost.cpp": 97,               # measured 97.2
     "src/core/plugindependencyresolver.cpp": 93,  # measured 93.3
-    "src/core/secretvault.cpp": 92,               # measured 92.9
-    "src/core/usermanager.cpp": 57,               # measured 57.5
+    "src/core/secretvault.cpp": 94,               # measured 94.6
+    "src/core/cryptoutils.cpp": 100,              # measured 100
+    "src/core/atrestcipher.cpp": 100,             # measured 100
+    "src/core/licensekeyledger.cpp": 100,         # measured 100
+    "src/core/otpstore.cpp": 100,                 # measured 100
+    "src/core/useraccountstore.cpp": 100,         # measured 100
+    "src/core/usersettingsstore.cpp": 100,         # measured 100.0
+    "src/core/usermanager.cpp": 100,              # measured 100
     "src/core/languagemanager.cpp": 96,           # measured 96.5
-    "src/core/appconfig.cpp": 43,                 # measured 43.9 (path matrix)
-    # Composition root + service layer the wiring test owns end-to-end.
+    "src/core/appconfig.cpp": 98,                 # measured 98.8 (79/80)
+    "src/core/signalbus.cpp": 100,                # measured 100
+    # Composition root + the service files the wiring test owns end-to-end.
     "src/app/appshell.cpp": 100,                  # measured 100
     "src/services/ai/chatsessionmanager.cpp": 100,  # measured 100
     "src/services/ai/chatsessionstore.cpp": 100,    # measured 100
+    "src/services/ai/chatmessage.cpp": 88,           # measured 88.6
+    "src/services/ai/aipredictionlogservice.cpp": 100,  # measured 100
+    "src/services/ai/airequestqueue.cpp": 100,      # measured 100
+    "src/services/ai/aimodelloadservice.cpp": 100,  # measured 100
+    "src/services/ai/aiyolopostprocessor.cpp": 100,  # measured 100
+    "src/services/ai/agentactionmanifest.cpp": 45,  # measured 45.7
+    "src/services/ai/aiassistant.cpp": 42,          # measured 42.0
+    "src/services/ai/aiserverprocesscontroller.cpp": 94,  # measured 94.7
+    # The exception guard of the AI inference path: one place where an
+    # ONNX/OpenCV exception is contained, so it can never leave a Qt slot
+    # or a thread entry point (and abort the application).
+    "src/services/ai/aiinferenceguard.cpp": 71,  # measured 71.4
+    "src/services/ai/aiservice.cpp": 64,           # measured 64.1
+    "src/services/ai/aiprocessor.cpp": 17,         # measured 17.7
+    "src/services/mail/mailmimeparser.cpp": 67,     # measured 67.1
+    "src/services/mail/mailservice.cpp": 27,       # measured 27.0
+    "src/services/mail/smtpoutbox.cpp": 87,        # measured 87.5
+    "src/services/mail/smtpmailer.cpp": 21,        # measured 21.6 (28/142)
+    "src/services/reconstruction/cameraparamsparser.cpp": 97,  # measured 97.6
+    "src/services/reconstruction/featureextractor.cpp": 100,   # measured 100
+    "src/services/reconstruction/featurematcher.cpp": 97,      # measured 97.7
+    "src/services/reconstruction/incrementalsfm.cpp": 79,      # measured 79.0
+    "src/services/reconstruction/multiviewtriangulator.cpp": 100,  # measured 100
+    "src/services/reconstruction/pointcloudfilter.cpp": 97,   # measured 97.2
+    "src/services/reconstruction/poseestimator.cpp": 61,      # measured 61.9
+    "src/services/reconstruction/reconstructionpipeline.cpp": 52,  # measured 52.5
+    "src/services/reconstruction/reconstructionpostprocessor.cpp": 96,  # measured 96.3
+    "src/services/reconstruction/reconstructionservice.cpp": 73,  # measured 73.8
+    "src/services/reconstruction/reconstructionworker.cpp": 100,  # measured 100
+    "src/services/reconstruction/sfmstage.cpp": 100,  # measured 100
+    "src/services/reconstruction/tracksfm.cpp": 96,   # measured 96.6
+    "src/services/reconstruction/triangulator.cpp": 100,  # measured 100
+    "src/services/scene/crosshairgeometry.cpp": 92,  # measured 92.9
+    "src/services/scene/crosshairmanager.cpp": 56,   # measured 56.1 (120/214)
+    "src/services/scene/sceneservice.cpp": 4,        # measured 4.9
     "src/services/settings/settingsservice.cpp": 100,  # measured 100
-    "src/services/shell/shellservice.cpp": 96,    # measured 96.1
+    "src/services/shell/shellservice.cpp": 98,    # measured 98.2 (one closing brace)
+    "src/services/viewer/dicomloader.cpp": 1,      # measured 1.5
+    "src/services/viewer/image2dloader.cpp": 95,    # measured 95.8 (68/71)
+    "src/services/viewer/model3dloader.cpp": 46,    # measured 46.9 (30/64)
+    "src/services/viewer/viewerservice.cpp": 13,   # measured 13.6
+    # Shared utility layer — the helpers every plugin links against.
+    "src/utils/abstractribbonpanel.cpp": 100,     # measured 100
+    "src/utils/customprogressdialog.cpp": 95,      # measured 95.2
+    "src/utils/fileutilities.cpp": 100,           # measured 100 (54/54)
+    "src/utils/htmlutilities.cpp": 95,            # measured 95.3
+    "src/utils/iconfactory.cpp": 100,             # measured 100
+    "src/utils/logger.cpp": 70,                   # measured 70.5
+    "src/utils/moderndialog.cpp": 78,             # measured 78.6
+    "src/utils/modernmessagebox.cpp": 46,         # measured 46.8
+    "src/utils/stylemanager.cpp": 90,             # measured 90.2
+    # Plugin layer — the shipped plugins are GUI shells; the floor is what
+    # their initialize()/cleanup() cycle covers.  The rest of the plugin code
+    # (dialogs, dock widgets) is listed as coverage debt.
+    "src/modules/aiassistantplugin/chatbotdockwidget.cpp": 96,      # measured 96.4
+    "src/modules/viewerplugin/viewernavigatorui.cpp": 94,           # measured 94.7
+    "src/modules/reconstructionplugin/reconstructionribbonui.cpp": 100,  # measured 100.0
+    "src/modules/userauthplugin/userauthplugin.cpp": 63,            # measured 63.8
+    "src/modules/userauthplugin/settingsdialog.cpp": 91,             # measured 91.0
+    "src/modules/userauthplugin/aboutdialog.cpp": 75,               # measured 75.9
+    "src/modules/userauthplugin/logindialog.cpp": 68,               # measured 68.6
+    "src/modules/userauthplugin/licenseactivationdialog.cpp": 68,   # measured 68.5
+    "src/modules/userauthplugin/themeselectiondialog.cpp": 90,      # measured 90.5
+    "src/modules/userauthplugin/overlayresizer.cpp": 100,          # measured 100
+    "src/modules/userauthplugin/forgotpassworddialog.cpp": 65,      # measured 65.3
+    "src/modules/userauthplugin/changepassworddialog.cpp": 54,       # measured 54.9
+    "src/modules/userauthplugin/avatarcropperdialog.cpp": 42,        # measured 42.8
+    "src/modules/userauthplugin/adminusermanagerdialog.cpp": 40,     # measured 40.8
+    "src/modules/sendmailplugin/maildockwidget.cpp": 45,            # measured 46.0
+    "src/modules/viewerplugin/viewerplugin.cpp": 51,                # measured 51.4
+    "src/modules/sendmailplugin/sendmailplugin.cpp": 47,            # measured 47.7
+    "src/modules/aiprocessorplugin/aitraindockwidget.cpp": 38,       # measured 39.0
+    "src/modules/aiprocessorplugin/aiprocessorplugin.cpp": 44,       # measured 44.1
+    "src/modules/reconstructionplugin/reconstructionplugin.cpp": 21, # measured 21.3
+    "src/modules/aiassistantplugin/aiassistantplugin.cpp": 18,       # measured 18.3
+    "src/modules/viewerplugin/viewerlistui.cpp": 7,                 # measured 7.0
+    "src/modules/aiassistantplugin/chatmessagerenderer.cpp": 38,     # measured 39.0
+    "src/modules/aiassistantplugin/aiattachmentpreviewfactory.cpp": 100,  # measured 100
+    "src/modules/sendmailplugin/mailinboxitemfactory.cpp": 100,            # measured 100
+    "src/modules/sendmailplugin/mailmessageformatter.cpp": 84,              # measured 84.7
+    "src/modules/aiassistantplugin/aiassistantribbonui.cpp": 100,      # measured 100
+    "src/modules/aiprocessorplugin/aiprocessorribbonui.cpp": 100,      # measured 100
+    "src/modules/sendmailplugin/sendmailribbonui.cpp": 100,            # measured 100
+    "src/modules/viewerplugin/viewerribbonui.cpp": 100,                # measured 100
+    "src/modules/sendmailplugin/mailfilterdialog.cpp": 81,             # measured 81.8
+    "src/modules/sendmailplugin/mailsettingsdialog.cpp": 65,           # measured 65.6
+    "src/modules/viewerplugin/viewerviewmodel.cpp": 8,                 # measured 9.0 (6/67)
+    "src/modules/aiassistantplugin/chatimageviewer.cpp": 100,       # measured 100
+    "src/modules/aiprocessorplugin/videotrackerthread.cpp": 73,     # measured 73.1
 }
 
 _TOOL_CANDIDATES = (
@@ -124,8 +326,93 @@ class FileCoverage:
         return 100.0 * self.covered / self.valid if self.valid else 0.0
 
 
+# Translation units that cannot be measured — each entry carries its reason.
+# The list is deliberately explicit: a new translation unit that nobody can
+# measure has to be listed here (with a reason) instead of silently
+# disappearing from the report.
+_NOT_MEASURABLE = {
+    # PCH carriers: the dummy .cpp exists only to hold the precompiled header.
+    "src/pch_dummy.cpp",
+    "src/pch_light_dummy.cpp",
+    # The application entry point and the main window are compiled into the
+    # application executable, which no test executes — they are exercised by
+    # running the application itself.
+    "src/app/main.cpp",
+    "src/app/mainwindow.cpp",
+    # VTK boilerplate only (vtkStandardNewMacro), no logic of its own.
+    "src/services/scene/panstyle.cpp",
+}
+
+#: The committed baseline of the coverage floors.
+#:
+#: The gate refuses a floor that is LOWER than the baseline: the ratchet is a
+#: one-way street. A coverage regression has to be fixed in the code, not in
+#: the number. Raising a floor and the baseline happen in the same commit
+#: (``python tests/coverage_gate.py --update-baseline``).
+#:
+#: The baseline is the *decision*; ``FLOORS`` is the same decision in the
+#: place the gate reads it from. Keeping both is deliberate: the baseline is
+#: the record of what was agreed, the floor is what the gate enforces.
+BASELINE_PATH = BASE / "tests" / "coverage_floors.json"
+
+
+def load_baseline() -> dict[str, float]:
+    """The committed floors, or an empty map when the file does not exist yet."""
+    if not BASELINE_PATH.exists():
+        return {}
+    data = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+    return {path: float(value) for path, value in data.items()}
+
+
+def write_baseline() -> None:
+    """Record the current floors as the new baseline (a deliberate act)."""
+    payload = {path: floor for path, floor in sorted(FLOORS.items())}
+    BASELINE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                             encoding="utf-8")
+    print(f"Baseline written: {BASELINE_PATH.relative_to(BASE)} ({len(payload)} floors)")
+
+
+def _source_translation_units() -> set[str]:
+    """Every real .cpp under ``src/``, repository-relative and lower-case."""
+    units = {
+        path.relative_to(BASE).as_posix().lower()
+        for path in (BASE / "src").rglob("*.cpp")
+    }
+    return units - _NOT_MEASURABLE
+
+
 def _windows_path(path: Path) -> str:
     return str(path).replace("/", "\\")
+
+
+def _module_patterns(build_dir: Path, exe_path: Path, include_plugins: bool) -> list[str]:
+    """Module patterns the exporter has to instrument for one test run.
+
+    Only the modules that can contribute coverage are instrumented:
+
+    * the test executable itself (some tests compile the translation unit
+      under test directly into their own binary),
+    * ``AppCore.dll`` — the kernel/guard layer every test imports,
+    * the application executable — it carries the service layer, so the
+      service sources are part of the report even when no test runs them
+      (they show up with 0 hits, which is what makes the debt visible),
+    * the plugin DLLs — only for the test that loads them, so the whole
+      plugin layer (``src/modules/**``) stops being invisible.
+
+    Instrumenting *everything* in the output directory (the previous
+    behaviour) made the first run of a clean build tree pay for ~35 modules
+    — tens of minutes before the first report appeared.
+    """
+    patterns: list[str] = [_windows_path(exe_path)]
+    for name in ("AppCore.dll", "3D-Reconstruction.exe"):
+        module = build_dir / "Release" / name
+        if module.is_file():
+            patterns.append(_windows_path(module))
+    if include_plugins:
+        plugins = build_dir / "plugins" / "Release"
+        if plugins.is_dir():
+            patterns.append(_windows_path(plugins) + "\\*")
+    return patterns
 
 
 def run_tests(tool: Path, build_dir: Path, out_dir: Path) -> None:
@@ -137,21 +424,45 @@ def run_tests(tool: Path, build_dir: Path, out_dir: Path) -> None:
         env = os.environ.copy()
         env.update(extra_env)
         report = out_dir / f"{name}.xml"
+        # Never accept a stale report from a previous run if this run fails to
+        # produce one.
+        report.unlink(missing_ok=True)
         argv = [
             str(tool), "--quiet", "--optimized_build",
             "--sources", _windows_path(BASE / "src"),
-            "--modules", _windows_path(exe_dir) + "\\*",
+            # The plugin layer is exercised in child processes (one per
+            # plugin, so a crash cannot take the suite down): without this
+            # flag the exporter would only see the parent and the plugin
+            # code would measure 0 %.
+            "--cover_children",
+        ]
+        for pattern in _module_patterns(build_dir, exe_path, name == "TestPluginSmoke"):
+            argv += ["--modules", pattern]
+        argv += [
             "--export_type", f"cobertura:{_windows_path(report)}",
             "--", exe,
         ]
         print(f"  coverage: {name}")
         result = subprocess.run(argv, cwd=exe_dir, env=env, capture_output=True,
-                                text=True, errors="replace", timeout=1800)
+                                text=True, errors="replace", timeout=1800,
+                                check=False)
         if result.returncode != 0:
             sys.exit(
                 f"{name} failed under OpenCppCoverage (exit {result.returncode}):\n"
                 f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
             )
+        # OpenCppCoverage can report success before Windows/AV makes the
+        # cobertura file visible (observed intermittently on Win11). Poll for
+        # a non-empty, stable file instead of failing the gate spuriously.
+        deadline = time.monotonic() + 30.0
+        last_size = -1
+        while time.monotonic() < deadline:
+            if report.is_file():
+                size = report.stat().st_size
+                if size > 0 and size == last_size:
+                    break
+                last_size = size
+            time.sleep(0.1)
         if not report.is_file():
             sys.exit(f"OpenCppCoverage produced no report for {name}")
 
@@ -214,8 +525,42 @@ def print_table(merged: dict[str, FileCoverage]) -> None:
               f"{entry.percent:>6.1f}%")
 
 
+def print_debt(merged: dict[str, FileCoverage]) -> None:
+    """Print the translation units that are visible but never executed.
+
+    These files carry no floor (a floor of 0 would pin nothing), so they would
+    otherwise be invisible in the report.  Listing them on every run keeps the
+    debt explicit: it is measured, named and reviewable, not forgotten.
+    """
+    dark = sorted(
+        (name, entry) for name, entry in merged.items()
+        if name.endswith(".cpp") and entry.covered == 0 and entry.valid > 0
+    )
+    if not dark:
+        return
+    total = sum(entry.valid for _, entry in dark)
+    print()
+    print(f"Coverage debt: {len(dark)} translation unit(s), {total} line(s) "
+          f"visible but never executed")
+    for name, entry in dark:
+        print(f"  {name:<62} {entry.valid:>5} lines")
+
+
 def enforce(merged: dict[str, FileCoverage]) -> int:
     failures: list[str] = []
+    # Completeness first: a translation unit that is missing from the report
+    # is either not linked into any instrumented module (a plugin DLL outside
+    # the module pattern) or was added/renamed without the gate noticing.
+    # Either way the file is invisible to the measurement, so the gate must
+    # not pass while that is true.
+    missing_units = sorted(_source_translation_units() - set(merged))
+    if missing_units:
+        shown = ", ".join(missing_units[:10])
+        if len(missing_units) > 10:
+            shown += f", … (+{len(missing_units) - 10} more)"
+        failures.append(
+            f"{len(missing_units)} translation unit(s) escape the measurement: {shown}"
+        )
     for path, floor in sorted(FLOORS.items()):
         entry = merged.get(path)
         if entry is None or entry.valid == 0:
@@ -225,6 +570,20 @@ def enforce(merged: dict[str, FileCoverage]) -> int:
             failures.append(
                 f"{path}: {entry.percent:.1f}% < floor {floor:.1f}% "
                 f"({entry.covered}/{entry.valid} lines)")
+
+    # The ratchet is a one-way street: a floor that is lowered instead of the
+    # code being fixed is a silent decision to stop measuring.
+    baseline = load_baseline()
+    for path, floor in sorted(FLOORS.items()):
+        previous = baseline.get(path)
+        if previous is None:
+            failures.append(
+                f"{path}: no baseline entry — run "
+                f"'python tests/coverage_gate.py --update-baseline' to record it")
+        elif floor < previous:
+            failures.append(
+                f"{path}: the floor was lowered ({floor:g} < {previous:g}) — "
+                f"the ratchet only goes up; fix the code instead")
     print()
     if failures:
         print("Coverage gate FAILED:")
@@ -240,12 +599,28 @@ def main() -> int:
     parser.add_argument("--build-dir", default=str(BASE / "build"))
     parser.add_argument("--measure", action="store_true",
                         help="print measured rates without enforcing the floors")
+    parser.add_argument("--update-baseline", action="store_true",
+                        help="record the current floors as the new baseline "
+                             "(a deliberate act: the ratchet only goes up)")
     args = parser.parse_args()
 
+    if args.update_baseline:
+        write_baseline()
+        return 0
+
     tool = find_tool()
-    build_dir = Path(args.build_dir)
+    # Resolve before run_tests(): the test executable runs with cwd=
+    # <build>/Release, so a relative report path would be resolved there
+    # instead of the repository root (and silently fail to export).
+    build_dir = Path(args.build_dir).resolve()
     out_dir = build_dir / "coverage"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The merged report is the union of *this* run's per-test reports. A
+    # leftover report from an earlier run (a test that was removed from TESTS,
+    # or a run that crashed) would silently inflate the numbers, so the
+    # directory is emptied before the measurement starts.
+    for stale in out_dir.glob("*.xml"):
+        stale.unlink()
 
     print(f"OpenCppCoverage: {tool}")
     run_tests(tool, build_dir, out_dir)
@@ -253,6 +628,7 @@ def main() -> int:
     if not merged:
         sys.exit("no source files were found in the coverage reports")
     print_table(merged)
+    print_debt(merged)
 
     if args.measure:
         missing = sorted(set(FLOORS) - set(merged))

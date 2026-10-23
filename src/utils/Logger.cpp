@@ -95,6 +95,10 @@ void customMessageHandler(QtMsgType type, const QMessageLogContext &context,
 }
 
 void setLogsDir(const QString& dir) {
+    // s_logsDir is read (and lazily defaulted) by ensureFileOpenUnderLock(),
+    // which runs on the message handler under s_logMutex — the write must
+    // take the same lock or a concurrent log line races the assignment.
+    std::lock_guard<std::mutex> lock(s_logMutex);
     s_logsDir = dir;
 }
 

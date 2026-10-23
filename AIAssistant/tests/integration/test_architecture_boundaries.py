@@ -34,7 +34,7 @@ FRAMEWORKS = frozenset(
 )
 
 # Top-level ai_assistant subpackages the application layer may import.
-APPLICATION_ALLOWED = {"application", "domain", "plugins", "ports"}
+APPLICATION_ALLOWED = {"application", "domain", "ports"}
 
 
 def _iter_python(layer: str | None = None):
@@ -229,7 +229,14 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertEqual(violations, [], _format(violations))
 
     def test_application_does_not_depend_on_adapters_or_frameworks(self):
-        """Application depends inward only (domain/ports/plugins)."""
+        """Application depends inward only (domain/ports).
+
+        ADR 0032 removed the plugin package from this allow-list: the
+        application layer reaches the plugin catalogue through a port, so a
+        ``plugins`` allowance here would contradict the import-linter contract
+        ("Application depends inward only (domain and ports)") instead of
+        mirroring it.
+        """
         violations: list[tuple[str, str, str]] = []
         for path in _iter_python("application"):
             for module in _imports(path):
@@ -275,10 +282,10 @@ class ArchitectureBoundaryTests(unittest.TestCase):
     def test_orchestration_does_not_import_any_adapter(self):
         """ADR 0002: orchestration is inner — adapters depend on it, never back.
 
-        The A2A integration uses dependency inversion: the supervisor exposes
-        ``set_remote_specialist_lookup`` and the composition root installs the
-        adapter's resolver, so no orchestration module imports
-        ``ai_assistant.adapters`` (that was an import cycle).
+        The A2A integration uses dependency inversion: ``delegate`` accepts a
+        caller-supplied ``remote_lookup`` (bound by the composition root to its
+        registry), so no orchestration module imports ``ai_assistant.adapters``
+        (that was an import cycle).
         """
         violations: list[tuple[str, str, str]] = []
         for path in _iter_python("orchestration"):
@@ -346,15 +353,17 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertEqual(violations, [], _format(violations))
 
     def test_langgraph_framework_stays_isolated(self):
-        """The graph framework is replaceable: only two modules may import it.
+        """The graph framework is replaceable: only its adapters may import it.
 
-        ``orchestration/graph.py`` is the decision-loop engine and
-        ``adapters/persistence/checkpointing.py`` is the checkpointer adapter.
-        Every other module reaches the agent loop through ports, so the
-        LangGraph/LangChain stack can be swapped without touching callers.
+        ``internal/langgraph_engine.py`` owns the LangGraph/LangChain stack and
+        ``adapters/persistence/checkpointing.py`` owns the checkpointer types.
+        ``orchestration/graph.py`` is the decision-loop *caller*: it reaches the
+        engine through ``LangGraphEngine``, so the framework can be swapped
+        without touching the graph. This test is the single owner of the rule —
+        the duplicate that allowed ``orchestration/graph.py`` was removed
+        (2026-10-23 review: two tests, two verdicts).
         """
         allowed = {
-            "orchestration/graph.py",
             "internal/langgraph_engine.py",
             "adapters/persistence/checkpointing.py",
         }
@@ -524,39 +533,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                     violations.append(str(path.relative_to(PACKAGE)))
         self.assertEqual(violations, [], "\n".join(violations))
 
-    def test_langgraph_is_confined_to_its_adapter(self):
-        """LangGraph is imported only by ``adapters/orchestration/langgraph_engine.py``
-        and ``adapters/persistence/checkpointing.py``.
-
-        The framework dependency is confined to the adapter layer (ADR 0003/0012);
-        every other module — including ``orchestration/graph.py`` — reaches
-        the engine through :class:`LangGraphEngine`. This test enforces that
-        boundary: a direct ``from langgraph`` or ``import langgraph`` outside
-        the allowed adapters is a CI failure.
-        """
-        allowed = {
-            "internal/langgraph_engine.py",
-            "adapters/persistence/checkpointing.py",
-        }
-        violations: list[str] = []
-        for path in _iter_python():
-            rel = path.relative_to(PACKAGE).as_posix()
-            if rel in allowed:
-                continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name == "langgraph" or alias.name.startswith("langgraph."):
-                            violations.append(f"{rel}: import {alias.name}")
-                elif isinstance(node, ast.ImportFrom):
-                    # Skip relative imports (local modules like `.langgraph`)
-                    if node.level:
-                        continue
-                    if node.module and (node.module == "langgraph" or node.module.startswith("langgraph.")):
-                        violations.append(f"{rel}: from {node.module}")
-        self.assertEqual(violations, [], "\n".join(violations))
-
     def test_no_global_tool_service_locator_remains(self):
         """The mutable ``_tool_service`` locator was replaced by injected gateways."""
         offenders = [
@@ -590,6 +566,44 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         root_kwargs = _keyword_values(root_path)
         self.assertIn("LangGraphAgentOrchestrator", root_kwargs.get("orchestrator", set()))
         self.assertNotIn("LegacyConstrainedCompletion", root_path.read_text(encoding="utf-8"))
+
+    def test_the_rag_layer_imports_no_adapter(self):
+        """ADR 0028: the RAG cache is sealed through the *port*, not the adapter.
+
+        The cache artifacts live on disk next to the task state, so sealing
+        them was a one-line change away from importing the persistence
+        adapter. The inversion that keeps the layers honest is the
+        ``FieldCipher`` protocol in ``ai_assistant.ports``: the composition
+        root injects the implementation and ``rag`` only ever sees the port.
+        An ``ai_assistant.adapters`` import anywhere under ``rag/`` would undo
+        that, so it is a CI failure.
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("rag"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant.adapters"):
+                    reason = "imports an adapter (the at-rest cipher is injected through the port)"
+                    violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
+        self.assertEqual(violations, [], _format(violations))
+
+    def test_the_application_layer_does_not_import_the_plugin_package(self):
+        """ADR 0032: the tool catalogue is the ``ToolCatalog`` *port*.
+
+        The application layer used to depend on the concrete
+        ``plugins.registry.PluginRegistry`` — a peer layer's class. The
+        policy chokepoint was therefore bound to the plugin implementation
+        instead of to a contract, and a future catalogue could not replace it
+        without editing the application layer. The import-linter contract
+        says the same thing; this is the AST twin, so a deferred import
+        cannot slip past it either.
+        """
+        violations: list[tuple[str, str, str]] = []
+        for path in _iter_python("application"):
+            for module in _imports(path):
+                if module.startswith("ai_assistant.plugins"):
+                    reason = "imports the plugin package (the catalogue is a port)"
+                    violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
+        self.assertEqual(violations, [], _format(violations))
 
     def test_the_orchestration_package_init_stays_framework_free(self):
         """Importing ``ai_assistant.orchestration`` must not pull the graph.

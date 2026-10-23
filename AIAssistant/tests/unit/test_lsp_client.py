@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,19 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ai_assistant.tools import lsp_client
+
+
+def _windows_short_path(path: Path) -> Path:
+    """Return the 8.3 spelling of ``path`` when the volume provides one."""
+    if os.name != "nt":
+        return path
+    import ctypes
+
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(  # type: ignore[attr-defined]
+        str(path), buffer, len(buffer),
+    )
+    return Path(buffer.value) if length else path
 
 
 class FakeProc:
@@ -113,6 +127,25 @@ class LspClientHelperTests(unittest.TestCase):
     def test_uri_to_rel_path_unknown_scheme(self) -> None:
         self.assertEqual(lsp_client._uri_to_rel_path("https://example.com/x"), "https://example.com/x")
 
+    def test_a_windows_short_name_project_root_is_normalised(self) -> None:
+        """An 8.3 root and a long-name URI must still relativise to the file.
+
+        ``tempfile`` can hand back ``RUNNER~1`` while ``_file_uri`` resolves the
+        file to ``runneradmin``; without normalising both sides the result walks
+        out of the project instead of naming ``src/main.py``.
+        """
+        long_root = self.root.resolve()
+        short_root = _windows_short_path(long_root)
+        if short_root == long_root:
+            self.skipTest("8.3 short names are not available on this volume")
+        with mock.patch(
+            "ai_assistant.tools.lsp_client.get_paths",
+            return_value=SimpleNamespace(project_root=str(short_root)),
+        ):
+            uri = lsp_client._file_uri(str(long_root / "src" / "main.py"))
+            rel = lsp_client._uri_to_rel_path(uri)
+        self.assertEqual(rel.replace("\\", "/"), "src/main.py")
+
     # -- format locations
     def test_format_locations_variants(self) -> None:
         abs_header = self._write("src/a.h", "// header\n")
@@ -157,17 +190,66 @@ class LspClientHelperTests(unittest.TestCase):
 
     # -- lsp call
     def test_lsp_call_binary_missing(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value=None):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value=None):
             result = lsp_client._lsp_call("nonexist", [], str(self.root / "src/main.py"), 1, 0, "textDocument/definition")
         self.assertIn("not found", result["error"])
 
+    def test_the_server_is_resolved_by_the_shared_resolver(self) -> None:
+        """The client must not resolve the program itself.
+
+        ``shutil.which`` used to do the job here, and on Windows it
+        prepends the *current directory* to the search path — so a
+        ``clangd.bat`` planted next to the process was found **and
+        executed**, and the "not found on PATH" refusal could never fire
+        because ``which`` had already found the planted file. The old test
+        mocked that lookup and returned a *relative* name, which is exactly
+        the shape a current-directory hit produces — so the suite stayed
+        green while the control did not work.
+        """
+        with mock.patch(
+            "ai_assistant.tools.lsp_client.resolve_tool_binary", return_value=None,
+        ) as resolver:
+            result = lsp_client._lsp_call("clangd", [], str(self.root / "src/main.py"), 1, 0, "textDocument/definition")
+        resolver.assert_called_once_with("clangd")
+        self.assertTrue(result.get("binary_missing"))
+
+    def test_a_language_server_planted_in_the_working_directory_is_not_run(self) -> None:
+        """The current directory is never consulted.
+
+        The server's working directory is a directory the agent may write
+        to, so a planted binary there would run with the user's privileges
+        the first time a definition lookup happened.
+        """
+        with tempfile.TemporaryDirectory() as workspace:
+            # Named the way the resolver would look for it: on Windows one of
+            # the PATHEXT spellings, on POSIX the bare name. It also needs
+            # the execute bit there, or the scan would skip it for a reason
+            # that has nothing to do with the current directory.
+            planted = Path(workspace) / ("clangd.bat" if os.name == "nt" else "clangd")
+            planted.write_text("@echo PWNED\r\n", encoding="utf-8")
+            os.chmod(planted, 0o700)
+            original = os.getcwd()
+            os.chdir(workspace)
+            try:
+                from ai_assistant.exec_policy import resolve_tool_binary
+                resolved = resolve_tool_binary("clangd")
+            finally:
+                os.chdir(original)
+        # The CI image may or may not ship a real clangd, so the assertion is
+        # about the *planted* file: it must never be the one that is picked.
+        self.assertFalse(
+            resolved is not None
+            and os.path.abspath(str(resolved)) == os.path.abspath(str(planted)),
+            "a binary in the current directory must not be resolved",
+        )
+
     def test_lsp_call_file_missing(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             result = lsp_client._lsp_call("clangd", [], str(self.root / "nope.py"), 1, 0, "textDocument/definition")
         self.assertIn("does not exist", result["error"])
 
     def test_lsp_call_initialize_timeout(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
                 proc = mock.MagicMock()
                 proc.stdin = mock.MagicMock()
@@ -179,7 +261,7 @@ class LspClientHelperTests(unittest.TestCase):
         self.assertIn("did not respond", result["error"])
 
     def test_lsp_call_happy_path(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
                 proc = mock.MagicMock()
                 proc.stdin = mock.MagicMock()
@@ -202,7 +284,7 @@ class LspClientHelperTests(unittest.TestCase):
     def test_lsp_call_closes_both_pipes_on_the_normal_path(self) -> None:
         """stdout is closed alongside stdin on the way out, not just stdin —
         a leaked PIPE handle would emit a ResourceWarning when reaped."""
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
                 proc = mock.MagicMock()
                 proc.stdin = mock.MagicMock()
@@ -231,7 +313,7 @@ class LspClientHelperTests(unittest.TestCase):
         proc.terminate.assert_called_once()
 
     def test_lsp_call_server_error_in_response(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
                 proc = mock.MagicMock()
                 proc.stdin = mock.MagicMock()
@@ -250,7 +332,7 @@ class LspClientHelperTests(unittest.TestCase):
         self.assertIn("LSP server error", result["error"])
 
     def test_lsp_call_request_timeout(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
                 proc = mock.MagicMock()
                 proc.stdin = mock.MagicMock()
@@ -270,7 +352,7 @@ class LspClientHelperTests(unittest.TestCase):
         self.assertIn("timed out", result["error"])
 
     def test_lsp_call_popen_exception(self) -> None:
-        with mock.patch("ai_assistant.tools.lsp_client.shutil.which", return_value="clangd"):
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
             with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen", side_effect=RuntimeError("spawn failed")):
                 result = lsp_client._lsp_call("clangd", [], str(self.root / "src/main.py"), 1, 0, "textDocument/definition")
         self.assertIn("subprocess failed", result["error"])
@@ -365,7 +447,7 @@ class LspToolsTests(unittest.TestCase):
 
     def test_a_sibling_directory_sharing_the_name_prefix_is_refused(self) -> None:
         """``<root>-evil`` shares the root as a string prefix: only a real
-        containment check (``commonpath``) rejects it."""
+        containment check (the kernel's ``resolve_within``) rejects it."""
         sibling = os.path.join(str(self.root) + "-evil", "x.cpp")
         with mock.patch("ai_assistant.tools.lsp_client._lsp_call") as call:
             result = lsp_client.tool_go_to_definition({"path": sibling, "line": 1, "character": 0})
@@ -379,14 +461,32 @@ class LspToolsTests(unittest.TestCase):
             )
         self.assertFalse(result["found"])
 
-    def test_a_commonpath_failure_is_treated_as_an_escape(self) -> None:
-        """Different Windows drives make ``commonpath`` raise: that is an
-        escape, not a crash."""
+    def test_a_containment_check_that_cannot_be_made_is_an_escape(self) -> None:
+        """Different Windows drives share no root: that is an escape, not a
+        crash. The comparison itself lives in the kernel
+        (``path_policy.resolve_within``)."""
         with mock.patch(
-            "ai_assistant.tools.lsp_client.os.path.commonpath",
+            "ai_assistant.path_policy.os.path.commonpath",
             side_effect=ValueError("mix of drives"),
         ):
             self.assertIsNone(lsp_client._confine_to_project("src/main.cpp", str(self.root)))
+
+    def test_a_junction_out_of_the_project_is_refused(self) -> None:
+        """The *real* target decides, not the spelling.
+
+        A junction inside the project that points outside it is an escape,
+        and a lexical comparison cannot see it — the file was read through
+        a path the gate accepted.
+        """
+        outside = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        Path(outside, "secret.py").write_text("SECRET = 1\n", encoding="utf-8")
+        link = Path(self.root) / "escape"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available on this filesystem")
+        self.assertIsNone(lsp_client._confine_to_project(str(link / "secret.py"), str(self.root)))
 
 
 class ReadResponseEdgeCaseTests(unittest.TestCase):
@@ -491,7 +591,7 @@ class LspCallHardeningTests(unittest.TestCase):
         for target, value in (
             ("ai_assistant.tools.lsp_client.get_paths",
              SimpleNamespace(project_root=str(self.root))),
-            ("ai_assistant.tools.lsp_client.shutil.which", "pylsp"),
+            ("ai_assistant.tools.lsp_client.resolve_tool_binary", "pylsp"),
         ):
             patcher = mock.patch(target, return_value=value)
             patcher.start()

@@ -1,6 +1,8 @@
 #include "ChatBotDockWidget.h"
 #include "AppConstants.h"
-#include "IUserManager.h"
+#include "IAuthService.h"
+#include "IUserPreferences.h"
+#include "IShellService.h"
 #include "IconFactory.h"
 #include <QVBoxLayout>
 #include <QMenu>
@@ -61,9 +63,11 @@ QWidget* ChatBotDockWidget::createTopBar(QWidget* parent) {
     
     // Load per-user model index
     int savedIdx = 0;
-    if (auto *um = m_ctx->services()->get<IUserManager>()) {
-        QString username = um->currentUsername();
-        savedIdx = um->getUserPref(username, "ai_model_index", "0").toInt();
+    if (auto *prefs = m_ctx->services()->get<IUserPreferences>()) {
+        if (auto *auth = m_ctx->services()->get<IAuthService>()) {
+            QString username = auth->currentUsername();
+            savedIdx = prefs->getUserPref(username, "ai_model_index", "0").toInt();
+        }
     }
     m_modelSelector->setCurrentIndex(savedIdx);
     tl->addWidget(m_modelSelector, 1);

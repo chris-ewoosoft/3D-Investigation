@@ -11,14 +11,34 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ai_assistant.application.agent_runs import AgentRunService
     from ai_assistant.domain.tasks import AgentTask
+    from ai_assistant.llm.contracts import PromptBuilder
     from ai_assistant.orchestration.specialists import ChatbotAgent
+    from ai_assistant.ports import FieldCipher
 
 logger = logging.getLogger(__name__)
+
+
+def attachment_unsealer(cipher: "FieldCipher") -> Callable[[bytes], bytes]:
+    """Return a callable that opens a chat attachment sealed at rest.
+
+    The Qt client seals the attached file with the platform at-rest key
+    (ADR 0031), and the AI service has to open it before the model can see
+    the image. The key stays in the cipher that the composition root owns;
+    this only hands out the one operation the readers need.
+    """
+    from ai_assistant.ports import CHAT_ATTACHMENT_CONTEXT
+
+    def unseal(raw: bytes) -> bytes:
+        return cipher.open_bytes(raw, context=CHAT_ATTACHMENT_CONTEXT)
+
+    return unseal
 
 
 class LlmModule:
@@ -40,6 +60,47 @@ class LlmModule:
         self._paths = paths
         self._model_idx = model_idx
         self._use_vision_llm = use_vision_llm
+        # Serializes load/release against each other (download + construct can
+        # take seconds). The lock is distinct from ``llm_lock`` so readers do
+        # not block for the whole load; the swap itself is one short critical
+        # section. This instance is the ONLY owner of the backend — the old
+        # module-level ``_global_backend`` was a second reference, so dropping
+        # ``self.llm`` left the weights alive and VRAM was never reclaimed.
+        self._load_lock = threading.RLock()
+        # Model-reload drain: a run holds a lease for its whole lifetime, and a
+        # reload waits for every lease before swapping the backend. New leases
+        # wait while a reload is in progress, so a run sees one model end to end.
+        self._model_condition = threading.Condition()
+        self._active_leases = 0
+        self._reloading = False
+
+    @contextmanager
+    def model_lease(self) -> Iterator[Any]:
+        """Pin the current backend for one run; reloads wait for the lease."""
+        with self._model_condition:
+            while self._reloading:
+                self._model_condition.wait()
+            self._active_leases += 1
+        try:
+            yield self.llm
+        finally:
+            with self._model_condition:
+                self._active_leases -= 1
+                self._model_condition.notify_all()
+
+    @contextmanager
+    def model_reload(self) -> Iterator[None]:
+        """Wait for active runs, block new leases, then swap the model."""
+        with self._model_condition:
+            self._reloading = True
+            while self._active_leases:
+                self._model_condition.wait()
+        try:
+            yield
+        finally:
+            with self._model_condition:
+                self._reloading = False
+                self._model_condition.notify_all()
 
     def _adopt_backend(self, backend: Any) -> bool:
         """Bind a freshly loaded backend to this instance.
@@ -56,31 +117,60 @@ class LlmModule:
         self.active_model_desc = getattr(backend, "model_description", "")
         return True
 
+    def _clear_backend_locked(self) -> bool:
+        """Drop the backend and every field that describes it, as one unit.
+
+        Returns whether a model was actually loaded. The metadata is cleared
+        in the same critical section as the reference, so ``/health`` cannot
+        report ``llm_loaded: false`` while ``/v1/models`` still advertises the
+        previous description (ADR 0041: one owner, one transition).
+        """
+        had_backend = self.llm is not None
+        self.llm = None
+        self.active_model_desc = ""
+        self.is_vision_model = False
+        return had_backend
+
+    def release(self) -> bool:
+        """Drop the only reference to the backend so its memory can be freed.
+
+        Returns whether a model was loaded. ``release_ml_memory()`` runs only
+        after the last reference is gone — calling it while a stray owner
+        still holds the object is what made the old ``/admin/release-vram``
+        return ``ok`` without releasing anything.
+        """
+        from ai_assistant.llm.hardware import release_ml_memory
+
+        with self._load_lock:
+            with self.llm_lock:
+                had_backend = self._clear_backend_locked()
+            if had_backend:
+                release_ml_memory()
+        return had_backend
+
     def load_model(self, model_idx: int | None = None) -> None:
-        from ai_assistant.llm import get_backend, load_model
+        from ai_assistant.llm import load_backend
         from ai_assistant.llm.defaults import LLM_N_CTX
+        from ai_assistant.llm.hardware import release_ml_memory
 
-        load_model(
-            registry=self._registry,
-            models_dir=str(self._paths.models_dir),
-            model_idx=model_idx or self._model_idx,
-            enable_vision=self._use_vision_llm,
-            n_ctx=LLM_N_CTX,
-        )
-        self._adopt_backend(get_backend())
-
-    def reload_model(self) -> None:
-        from ai_assistant.llm import get_backend, reload_model
-        from ai_assistant.llm.defaults import LLM_N_CTX
-
-        reload_model(
-            registry=self._registry,
-            models_dir=str(self._paths.models_dir),
-            model_idx=self._model_idx,
-            enable_vision=self._use_vision_llm,
-            n_ctx=LLM_N_CTX,
-        )
-        self._adopt_backend(get_backend())
+        with self._load_lock:
+            # Free the previous weights before the new download/constructor:
+            # two models must never be resident at once on a GPU.
+            with self.llm_lock:
+                had_backend = self._clear_backend_locked()
+            if had_backend:
+                release_ml_memory()
+            backend = load_backend(
+                registry=self._registry,
+                models_dir=str(self._paths.models_dir),
+                # ``0`` is a valid model index, so the fallback must be on
+                # ``None`` — ``model_idx or self._model_idx`` silently ignored it.
+                model_idx=self._model_idx if model_idx is None else model_idx,
+                enable_vision=self._use_vision_llm,
+                n_ctx=LLM_N_CTX,
+            )
+            with self.llm_lock:
+                self._adopt_backend(backend)
 
     @staticmethod
     def estimate_tokens(text: str) -> int:
@@ -96,9 +186,14 @@ class RagModule:
     Instance-based replacement for the former ``_RAGModule`` class-level
     state. All index state lives on the instance, so the composition root
     owns exactly one and tests can build isolated doubles.
+
+    The at-rest cipher is injected: the cache on disk holds the user's
+    document corpus, so it is sealed with the same key as the task store
+    (ADR 0027/0028). There is no "no cipher" mode — a cache that cannot be
+    sealed is not written.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, cipher: FieldCipher) -> None:
         self.rag_lock = threading.RLock()
         self.knowledge_index = None
         self.knowledge_chunks: list[Any] = []
@@ -106,6 +201,7 @@ class RagModule:
         self.embed_model_ref: Any = None
         self._reranker = None
         self._pipeline: Any = None     # the live retrieval handle (/health and admin reset it)
+        self._cipher = cipher
         self.CHUNK_CHARS = 1200
         self.MAX_CONTEXT_CHARS = 9000
 
@@ -118,12 +214,27 @@ class RagModule:
             return (None, None)
         return build_retrievers(index, bm25, chunks, encoder, settings)
 
-    def _reset_index_state(self) -> None:
-        """Drop every retrieval handle so an empty state is observable everywhere."""
-        self.knowledge_index = None
-        self.knowledge_chunks = []
-        self.bm25_index = None
-        self._pipeline = None
+    def reset_index_state(self) -> None:
+        """Drop every retrieval handle so an empty state is observable everywhere.
+
+        ADR 0032: this is the *only* owner of the "the RAG state is empty"
+        transition. It used to exist twice with two different field sets — the
+        module reset cleared ``_pipeline`` but not the encoder/reranker
+        references, while the HTTP admin route cleared the encoder/reranker but
+        not ``_pipeline``. The two owners disagreed, so ``/health`` could
+        report ``rag_chunks == 0`` while retrieval was still serving the
+        previous corpus out of the stale pipeline.
+
+        Every field is cleared together, under the lock, so no reader can
+        observe a half-reset state.
+        """
+        with self.rag_lock:
+            self.knowledge_index = None
+            self.knowledge_chunks = []
+            self.bm25_index = None
+            self._pipeline = None
+            self.embed_model_ref = None
+            self._reranker = None
 
     def initialize_rag(self, enable_reranker: bool = True, force_rebuild: bool = False) -> int:
         """Load (or rebuild) the RAG index and wire the retrieval pipeline.
@@ -139,7 +250,7 @@ class RagModule:
             # Fail safe *and* visible: the traceback is logged, the state is
             # cleared and /health degrades instead of pretending success.
             logger.exception("RAG initialization failed; retrieval stays disabled")
-            self._reset_index_state()
+            self.reset_index_state()
             return 0
         return count
 
@@ -160,14 +271,14 @@ class RagModule:
         settings = RAGSettings.from_env_and_dict({})
         if not settings.enabled:
             logger.info("RAG disabled by AI_ENABLE_RAG")
-            self._reset_index_state()
+            self.reset_index_state()
             return 0
         paths = get_paths()
         encoder = lazy_embedding_encoder(settings)
 
         index = chunks = bm25 = None
         if not force_rebuild and is_cache_valid(paths, settings):
-            index, chunks, bm25 = load_cache(paths, settings)
+            index, chunks, bm25 = load_cache(paths, settings, cipher=self._cipher)
 
         if index is None:
             registry = DocumentLoaderRegistry.create_default(
@@ -176,16 +287,17 @@ class RagModule:
             if not scanned:
                 logger.warning("RAG: no documents found under %s — index not built",
                                paths.project_root)
-                self._reset_index_state()
+                self.reset_index_state()
                 return 0
             # Cache is missing/stale: force the build path so the fs hash is
             # computed once (scan already happened above).
             index, chunks, bm25 = load_or_build_index(
-                scanned, encoder, paths, settings, force_rebuild=True)
+                scanned, encoder, paths, settings, force_rebuild=True,
+                cipher=self._cipher)
 
         if index is None or not chunks:
             logger.warning("RAG: index unavailable after load/build")
-            self._reset_index_state()
+            self.reset_index_state()
             return 0
 
         from typing import cast
@@ -241,20 +353,24 @@ class ChatbotAgentHolder:
     model/RAG reload can replace the agent without re-registering the router.
     """
 
-    def __init__(self, llm_module: LlmModule, rag_module: RagModule) -> None:
+    def __init__(self, llm_module: LlmModule, rag_module: RagModule,
+                 prompt_builder: "PromptBuilder") -> None:
         self._llm_module = llm_module
         self._rag_module = rag_module
+        self._prompt_builder = prompt_builder
         self._agent: ChatbotAgent | None = None
 
     def get(self) -> ChatbotAgent:
         if self._agent is None:
             from ai_assistant.orchestration.specialists import ChatbotAgent
-            self._agent = ChatbotAgent(self._llm_module, self._rag_module)
+            self._agent = ChatbotAgent(
+                self._llm_module, self._rag_module, self._prompt_builder)
         return self._agent
 
     def rebuild(self) -> None:
         from ai_assistant.orchestration.specialists import ChatbotAgent
-        self._agent = ChatbotAgent(self._llm_module, self._rag_module)
+        self._agent = ChatbotAgent(
+            self._llm_module, self._rag_module, self._prompt_builder)
 
 
 class RuntimeModules:
@@ -268,10 +384,10 @@ class RuntimeModules:
     with an ``AttributeError`` deep inside a task run.
     """
 
-    def __init__(self, llm: LlmModule, rag: RagModule) -> None:
+    def __init__(self, llm: LlmModule, rag: RagModule, prompt_builder: "PromptBuilder") -> None:
         self.llm = llm
         self.rag = rag
-        self.chatbot_agent = ChatbotAgentHolder(llm, rag)
+        self.chatbot_agent = ChatbotAgentHolder(llm, rag, prompt_builder)
         self.agent_run_service: AgentRunService | None = None
 
     def execute_a2a_task(self, task: AgentTask) -> dict[str, Any]:

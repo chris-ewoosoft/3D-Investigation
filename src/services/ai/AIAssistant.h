@@ -2,7 +2,6 @@
 #define AIASSISTANT_H
 
 #include <QObject>
-#include <QProcess>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QList>
@@ -14,6 +13,8 @@
 #include "Global.h"
 #include "IAIAssistantService.h"
 #include "ChatSessionManager.h"
+#include "AIRequestQueue.h"
+#include "AIServerProcessController.h"
 
 class ILanguageService;
 class IUserManager;
@@ -53,12 +54,13 @@ public:
     void newChat() override;                              // Create new session (keep old)
     void loadSession(const QString &sessionId) override; // Switch to existing session
     void deleteSession(const QString &sessionId) override;
+    void renameSession(const QString &sessionId, const QString &title) override;
     void clearHistory() override;
     void reloadSessions() override;
 
     QList<ChatSession> getSessions() const override { return m_sessions.sessions(); }
     QString currentSessionId() const override { return m_sessions.currentId(); }
-    QList<QJsonObject> getHistory() const override;
+    QList<ChatMessage> getHistory() const override;
     bool isThinking() const override { return m_isThinking; }
     bool isSessionThinking(const QString &sessionId) const override;
     int sessionThinkingInsertIndex(const QString &sessionId) const override;
@@ -73,9 +75,7 @@ protected:
     void markServerReady();
 
 private slots:
-    void onProcessReadyRead();
-    void onProcessError();
-    void onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onServerFinished(int exitCode, bool crashed);
     void onReplyFinished(QNetworkReply* reply);
 
 private:
@@ -84,22 +84,13 @@ private:
     IAppPaths* m_paths = nullptr;        ///< injected by AppShell (composition root)
     QString m_pythonInterpreter;         ///< injected by AppShell (config, default "python")
     int m_serverPort = 8080;             ///< injected by AppShell (config, default 8080)
-    struct QueuedCompletionRequest {
-        QString sessionId;
-        QJsonObject payload;
-        int retryCount = 0;
-        bool isAgent = false;
-        bool isApproval = false;
-        bool isUiActionAck = false;
-        int insertAfterIndex = -1;
-    };
+    using QueuedCompletionRequest = AICompletionRequest;
 
-    QProcess *aiServerProcess;
+    AIServerProcessController m_server;
     /// Injected transport (test seam) or owned by this object when null.
     QNetworkAccessManager *networkManager;
     ChatSessionManager m_sessions; ///< session collection + current pointer
-    QMap<QNetworkReply*, QueuedCompletionRequest> m_pendingRequests;
-    QList<QueuedCompletionRequest> m_queuedRequests;
+    AIRequestQueue m_requests;     ///< queued work + in-flight replies
     // Maps requestId → {sessionId, insertAfterIndex} so that the
     // ui-action ACK response is inserted at the correct position
     // instead of being appended to the end of the conversation.
@@ -113,12 +104,16 @@ private:
     ChatSession* getSession(const QString &sessionId);
     bool hasPendingWork() const;
     bool hasPendingRequestForSession(const QString &sessionId) const;
-    QJsonObject buildCompletionPayload(const QList<QJsonObject> &messages) const;
-    QJsonObject buildAgentPayload(const QList<QJsonObject> &messages, const QString &task,
+    QJsonObject buildCompletionPayload(const QList<ChatMessage> &messages) const;
+    QJsonObject buildAgentPayload(const QList<ChatMessage> &messages, const QString &task,
                                   const QStringList &attachments) const;
     bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
+    /// Replaces the placeholder title of a still-default session with the
+    /// first prompt. Returns true when the title changed, so the caller emits
+    /// sessionsChanged(); a user-renamed session is never overwritten.
+    bool applyAutoTitle(ChatSession &session, const QString &text,
+                        const QStringList &attachments);
     void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
-    void startServerProcess(int modelIndex);
     /// Clears all in-flight request state (queued requests, pending replies,
     /// pending UI-action sessions) and resets thinking/recovery flags.
     /// Called whenever the backend generation is torn down (stop/restart).

@@ -1,12 +1,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # cvtrain nightly — real-dependency smoke test for the training/export pipeline
 #
-# The offline suite (Build-Python-ci.yml: cvtrain job) drives the pipeline with a
+# The offline suite (Build-cvtrain-ci.yml: gates job) drives the pipeline with a
 # fake backend, so the only way API drift in the pinned ultralytics version (or
 # an ONNX export regression) can surface is to actually train. This job trains
 # one detection model and one segmentation model for a single epoch on a tiny
 # synthetic dataset, CPU-only, and verifies the published manifest. Expensive,
-# so nightly + manual only. Tracking (yolo11x) stays out on purpose: its
+# so nightly + manual — plus every pull request that touches the package, where
+# it is the only check of the resume seam against the real framework (ADR 0012).
+# Tracking (yolo11x) stays out on purpose: its
 # backbone triples the nightly budget while exercising the same backend seam
 # the det/seg jobs already cover.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -15,13 +17,25 @@ name: cvtrain nightly real-deps
 on:
   schedule:
     - cron: "30 5 * * *"
+  # The real-dependency resume check must not be a nightly-only event: a
+  # change to the training seam that only breaks against the *real* framework
+  # would otherwise reach main unnoticed, because the offline suite drives the
+  # pipeline with a fake backend (ADR 0012).
+  pull_request:
+    paths:
+      - "AIComputerVision/**"
+      - ".github/workflows/cvtrain-nightly.yml"
   workflow_dispatch:
 
 concurrency:
-  group: cvtrain-nightly
-  # Never cancel a run mid-download/mid-train: restarting the ML bootstrap costs
-  # more than letting it finish.
-  cancel-in-progress: false
+  # Per ref: a pull request's run must not queue behind the scheduled one (and
+  # the other way round) — waiting an hour for a status check is how a check
+  # gets ignored.
+  group: cvtrain-nightly-${{ github.ref }}
+  # Restarting the ML bootstrap costs more than letting it finish, so a
+  # scheduled run is never cancelled mid-train. A pull request's superseded run
+  # is dead work: the newer commit replaces it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   train-smoke:
@@ -30,10 +44,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.11"
 
@@ -44,8 +58,15 @@ jobs:
           # torch from the CPU index and then letting ultralytics pull
           # torchvision from PyPI mixes two builds, and the ops registration
           # breaks at runtime ("operator torchvision::nms does not exist").
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          pip install -r AIComputerVision/requirements.txt pillow
+          # The versions are the ones the shipped models were produced with
+          # (Models/manifest.json): torch 2.7.0 pairs with torchvision 0.22.0.
+          # A floating install here would make this job's verdict a property
+          # of the day it ran (ADR 0012).
+          pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cpu
+          # Everything else is pinned in requirements.txt (ultralytics, onnx,
+          # onnxruntime, PyYAML); pillow is installed on top of it and is
+          # pinned here for the same reason.
+          pip install -r AIComputerVision/requirements.txt pillow==11.0.0
 
       - name: Generate a toy dataset
         run: |
@@ -76,9 +97,68 @@ jobs:
           python AIComputerVision/TrainModel.py --verify-manifest
           test -f AIComputerVision/Models/yolo11n-seg.onnx
 
+      - name: Interrupt a run to leave a resumable checkpoint
+        # The resume seam is the one behaviour a fake backend cannot vouch
+        # for: it needs the *real* framework to write a checkpoint that
+        # carries its epoch counter and optimizer state, and to accept
+        # ``resume=True``. The offline suite drives it with a stub, so this is
+        # the only place the real dependency exercises it.
+        #
+        # A dedicated --runs-dir is not tidiness: the earlier one-epoch run's
+        # completed last.pt is still on disk, and a bare ``find`` would find it
+        # immediately, kill the new run before it wrote anything, and then
+        # "resume" the old completed run. Isolating the directory makes the
+        # checkpoint unambiguously this run's.
+        run: |
+          RESUME_RUNS="$GITHUB_WORKSPACE/ResumeRuns"
+          rm -rf "$RESUME_RUNS"
+          python AIComputerVision/TrainModel.py --yes --det --epochs 5 --imgsz 64 --batch 2 --workers 0 --device cpu --runs-dir "$RESUME_RUNS" &
+          TRAIN_PID=$!
+          CHECKPOINT=""
+          for _ in $(seq 1 240); do
+            CHECKPOINT="$(find "$RESUME_RUNS/detect" -name last.pt -print -quit 2>/dev/null)"
+            if [ -n "$CHECKPOINT" ]; then break; fi
+            sleep 1
+          done
+          # The checkpoint is written asynchronously; a moment's grace lets the
+          # write finish so the kill cannot truncate it.
+          sleep 5
+          kill -9 "$TRAIN_PID" 2>/dev/null || true
+          wait "$TRAIN_PID" 2>/dev/null || true
+          test -n "$CHECKPOINT"
+          # A checkpoint whose remaining work is zero is not resumable, and a
+          # checkpoint that cannot be loaded is not a checkpoint. Assert both
+          # facts on the artifact the kill left behind.
+          python -c "import sys, torch; c=torch.load(sys.argv[1], map_location='cpu', weights_only=False); assert isinstance(c.get('epoch'), int) and c['epoch'] >= 0, c.get('epoch'); assert c['train_args']['epochs'] == 5, c['train_args']['epochs']" "$CHECKPOINT"
+          # The killed process cannot release its advisory lock. The lock names
+          # its owner, so the resume run detects the dead same-host PID and
+          # steals it without waiting out the stale window — exactly the crash
+          # recovery the lease exists for.
+
+      - name: Continue the interrupted run with --resume
+        # Three checks, and they are different ones:
+        #   * the pipeline picked the checkpoint up and handed it to the
+        #     framework — "Resuming" is our own log line;
+        #   * the framework *continued* that run instead of starting a new
+        #     one — a resumed run reuses its directory, so the number of run
+        #     directories under the dedicated runs directory must not grow;
+        #   * the manifest records the effective budget and the completed count
+        #     of the resumed experiment, not the earlier one-epoch invocation.
+        run: |
+          set -o pipefail
+          RESUME_RUNS="$GITHUB_WORKSPACE/ResumeRuns"
+          BEFORE=$(find "$RESUME_RUNS/detect" -maxdepth 1 -type d -name 'train-*' | wc -l)
+          test "$BEFORE" -eq 1
+          python AIComputerVision/TrainModel.py --yes --det --resume --imgsz 64 --batch 2 --workers 0 --device cpu --runs-dir "$RESUME_RUNS" 2>&1 | tee /tmp/resume.log
+          grep -q "Resuming yolo11n.onnx" /tmp/resume.log
+          AFTER=$(find "$RESUME_RUNS/detect" -maxdepth 1 -type d -name 'train-*' | wc -l)
+          test "$BEFORE" -eq "$AFTER"
+          python -c "import json, sys; from pathlib import Path; runs=list(Path(sys.argv[1]).glob('train-*/weights/last.pt')); assert len(runs) == 1, runs; m=json.loads(Path('AIComputerVision/Models/manifest.json').read_text()); e=m['entries']['yolo11n.onnx']; assert e['epochs'] == 5, e; assert e['epochs_completed'] == 5, e; assert e['resume_from'].endswith('last.pt'), e" "$RESUME_RUNS/detect"
+          python AIComputerVision/TrainModel.py --verify-manifest
+
       - name: Upload training logs (kept on failure too)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cvtrain-nightly-logs
           path: |

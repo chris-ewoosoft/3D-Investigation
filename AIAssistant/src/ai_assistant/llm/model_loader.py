@@ -4,19 +4,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import threading
 
 from ai_assistant.config import ModelDefinition, ModelRegistry
 
 from .contracts import LLMBackend
-from .hardware import release_ml_memory
 from .llama_cpp_backend import LlamaCppBackend
 
 logger = logging.getLogger("ai_assistant.llm.loader")
-
-# Module-level state for backward compatibility (singleton backend)
-_global_backend: LLMBackend | None = None
-_global_lock = threading.RLock()
 
 #: Streaming hash block; large enough that hashing a multi-GB GGUF stays I/O-bound.
 _HASH_CHUNK_BYTES = 8 * 1024 * 1024
@@ -99,62 +93,41 @@ def _mmproj_revision(model: ModelDefinition) -> str:
     return ""
 
 
-def get_backend() -> LLMBackend | None:
-    """Get the currently loaded backend instance."""
-    return _global_backend
-
-
-def load_model(
+def load_backend(
     registry: ModelRegistry,
     models_dir: str,
     model_idx: int = 0,
     enable_vision: bool = True,
     n_ctx: int = 8192
 ) -> LLMBackend:
-    """Load a model from the registry and publish it as the shared runtime."""
-    global _global_backend
+    """Build the backend for one registry entry (pure factory).
 
+    The caller owns the returned object — ``LlmModule`` in the composition
+    root. There is deliberately **no** module-level "current backend": the
+    process used to keep a second reference next to the runtime module, so
+    ``/admin/release-vram`` dropped one owner while the global kept the
+    weights resident and VRAM was never reclaimed. One owner is the only
+    shape in which "released" can mean released.
+    """
     selected = registry.get_by_index(model_idx)
     if selected.is_vision and not enable_vision:
         logger.warning("Vision LLM disabled; using text fallback")
         selected = registry.fallback
 
-    with _global_lock:
-        if _global_backend is not None:
-            del _global_backend
-            release_ml_memory()
-
-        model_path = download_if_missing(selected, models_dir)
-        mmproj_path = None
-        if selected.is_vision and selected.mmproj_filename and selected.mmproj_repo_id:
-            mmproj_path = _ensure_artifact(
-                repo_id=selected.mmproj_repo_id, filename=selected.mmproj_filename,
-                revision=_mmproj_revision(selected), sha256=selected.mmproj_sha256,
-                models_dir=models_dir, desc=f"{selected.desc} (vision projector)",
-            )
-
-        backend = LlamaCppBackend(
-            model_path=model_path,
-            is_vision=selected.is_vision,
-            mmproj_path=mmproj_path,
-            n_ctx=n_ctx,
-            desc=selected.desc
+    model_path = download_if_missing(selected, models_dir)
+    mmproj_path = None
+    if selected.is_vision and selected.mmproj_filename and selected.mmproj_repo_id:
+        mmproj_path = _ensure_artifact(
+            repo_id=selected.mmproj_repo_id, filename=selected.mmproj_filename,
+            revision=_mmproj_revision(selected), sha256=selected.mmproj_sha256,
+            models_dir=models_dir, desc=f"{selected.desc} (vision projector)",
         )
-        
-        _global_backend = backend
-        return backend
 
+    return LlamaCppBackend(
+        model_path=model_path,
+        is_vision=selected.is_vision,
+        mmproj_path=mmproj_path,
+        n_ctx=n_ctx,
+        desc=selected.desc
+    )
 
-def reload_model(
-    registry: ModelRegistry,
-    models_dir: str,
-    model_idx: int = 0,
-    enable_vision: bool = True,
-    n_ctx: int = 8192
-) -> LLMBackend:
-    """Release the active model before reloading it."""
-    with _global_lock:
-        if _global_backend is None:
-            msg = "LLM has not been initialized"
-            raise RuntimeError(msg)
-        return load_model(registry, models_dir, model_idx, enable_vision, n_ctx)

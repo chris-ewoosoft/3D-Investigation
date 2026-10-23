@@ -67,6 +67,7 @@ private slots:
     void emptyPluginNameFails();
     void selfDependencyIsACycle();
     void cycleIsReportedWithPath();
+    void cycleIsFoundAfterAnAcyclicComponentWasScanned();
     void failedResultCarriesNoOrder();
 };
 
@@ -236,6 +237,22 @@ void TestPluginDependencyResolver::cycleIsReportedWithPath()
         makePlugin(QStringLiteral("a"), 100, {QStringLiteral("b")}),
         makePlugin(QStringLiteral("b"), 100, {QStringLiteral("a")}),
         makePlugin(QStringLiteral("c")),
+    });
+    const Result result = Resolver::resolve(plugins);
+    QVERIFY(!result.ok);
+    QVERIFY(hasError(result, QStringLiteral("a -> b -> a")));
+}
+
+void TestPluginDependencyResolver::cycleIsFoundAfterAnAcyclicComponentWasScanned()
+{
+    // The cycle reporter walks the graph depth-first. When the first scanned
+    // component is acyclic, the walk has to backtrack out of it before it
+    // reaches the cycle — a decision of its own, not an accident of the
+    // cycle being found on the very first path.
+    const QList<Plugin> plugins = withDiscoveryOrder({
+        makePlugin(QStringLiteral("c")),
+        makePlugin(QStringLiteral("a"), 100, {QStringLiteral("b")}),
+        makePlugin(QStringLiteral("b"), 100, {QStringLiteral("a")}),
     });
     const Result result = Resolver::resolve(plugins);
     QVERIFY(!result.ok);

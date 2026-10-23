@@ -124,7 +124,7 @@ AIAssistant/
 │  │  ├─ index.py                     # Xây/dựng cache/lưu chỉ mục FAISS + BM25
 │  │  ├─ retrievers.py                # Retriever sản xuất trên FAISS đã cache + bảng BM25
 │  │  ├─ retrieval.py                 # Pipeline truy xuất + định dạng context
-│  │  ├─ cache_integrity.py           # Niêm phong HMAC cho cache on-disk (pickle + FAISS)
+│  │  ├─ cache_seal.py                # Định dạng cache RAG đã niêm phong (ADR 0028)
 │  │  ├─ domain.py                    # Model domain của RAG (chunk, hit…)
 │  │  └─ nlp_utils.py                 # Tiện ích NLP phục vụ RAG
 │  │
@@ -152,12 +152,12 @@ AIAssistant/
 │  │  ├─ a2a_payloads.py              # Build payload, map state, redaction dữ liệu nhạy cảm
 │  │  ├─ a2a_router.py                # Router FastAPI A2A: /message:send, /tasks/*, /a2a/tasks/*
 │  │  ├─ a2a_client.py                # TrustedA2AClient — transport remota duy nhất, allowlist-only
-│  │  ├─ a2a_protocol.py              # Dịch giữa A2A và specialist (resolve_remote_specialist)
+│  │  ├─ a2a_protocol.py              # RemoteAgentRegistry + A2ARouter (khám phá và định tuyến A2A)
 │  │  ├─ mcp.py                       # McpToolServer — máy chủ công cụ MCP
 │  │  ├─ http/
 │  │  │  ├─ __init__.py               # HTTP adapters package
 │  │  │  ├─ health_routes.py          # /health /livez /readyz /metrics /v1/models
-│  │  │  ├─ chat_routes.py            # /v1/chat/completions (JSON + SSE)
+│  │  │  ├─ chat_routes.py            # /v1/chat/completions (JSON)
 │  │  │  ├─ agent_routes.py           # /v1/agent/execute|cancel|approve|ui-action-result
 │  │  │  ├─ admin_routes.py           # /admin/* (reload-model, reload-rag, shutdown…)
 │  │  │  ├─ security.py               # TransportPolicy: peer loopback, Origin, bearer (ADR 0008)
@@ -170,7 +170,8 @@ AIAssistant/
 │  │     ├─ __init__.py               # Persistence adapters package
 │  │     ├─ checkpointing.py          # Checkpointer LangGraph hoán đổi được, fallback an toàn
 │  │     ├─ pending_store.py          # PendingActionStore bền vững (file-backed) cho phê duyệt
-│  │     └─ sqlite_store.py           # TaskStore lưu SQLite
+│  │     ├─ sqlite_store.py           # TaskStore lưu SQLite
+│  │     └─ storage_crypto.py         # AES-256-GCM field cipher cho state at-rest (ADR 0027)
 │  │
 │  ├─ plugins/                        # ── LỚP PLUGINS: nạp plugin bên thứ ba ──
 │  │  ├─ __init__.py                  # Export Plugin, PluginRegistry, ToolPlugin
@@ -214,12 +215,14 @@ AIAssistant/
 ├─ scripts/
 │  ├─ mutation_check.py               # Đảo từng quyết định trọng yếu; test sở hữu phải fail
 │  ├─ generate_sbom.py                # CycloneDX: distribution từ lock + artifact GGUF (ADR 0023)
+│  ├─ rekey_storage.py                # Xoay khoá at-rest: --verify / --dry-run / xoay (ADR 0030)
+│  ├─ migrate_state_row_binding.py    # Ràng buộc state cũ theo dòng: --verify / re-bind (ADR 0037)
 │  └─ verify_models.py                # Pre-flight OK/MISSING/MISMATCH cho GGUF đã tải (ADR 0023)
 ├─ tests/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 25 Architecture Decision Record (0001–0025)
+├─ Docs/adr/                          # 40 Architecture Decision Record (0001–0040)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -293,11 +296,26 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   công cụ chạy, và composition root tiêm cho nó event sink: mọi thực thi đều
   được ghi thành **một dòng JSON đã redact** trên logger `agent.tools`
   (`observability/tool_events.py`).
-* **Cache RAG được niêm phong, không được tin.** `save_cache` niêm phong FAISS
-  index, chunk pickle và BM25 pickle bằng một key nằm **ngoài** thư mục cache
-  (`<data_dir>/.secrets/cache_hmac_key`, 0600); `load_cache`
-  (`rag/cache_integrity.py`) coi thiếu key, thiếu record hoặc digest lệch là
-  **cache miss** — không bao giờ là code để chạy.
+* **Cache RAG được niêm phong, không được tin — và không đọc được** (ADR 0028).
+  `Cache/chunks.pkl` chứa **nguyên văn** tài liệu người dùng đã index (kèm ảnh
+  base64), `bm25.pkl` chứa corpus đã token hoá, `faiss_index.bin` chứa
+  embedding. Cả ba giờ được **mã hoá** bằng **đúng key** của ADR 0027 (một key
+  cho mọi thứ app ghi ra đĩa), nên một bản sao volume dữ liệu không còn đọc
+  được corpus. Index FAISS được **serialize trong RAM** rồi mới seal — không
+  bao giờ chạm đĩa ở dạng rõ. Cache không xác thực được (sai key, bị sửa,
+  chưa seal, cache của version cũ) là **miss** → dựng lại, không bao giờ
+  unpickle payload chưa xác thực.
+* **State cục bộ được mã hoá at-rest** (ADR 0027). `adapters/persistence/storage_crypto.py`
+  bọc **theo field** bằng AES-256-GCM: envelope `enc:v1:<base64(nonce||ciphertext)>`,
+  nonce random 96-bit cho từng field, và **tên field làm associated data** nên
+  ciphertext bị chuyển sang cột khác sẽ fail authentication. `compose()` nạp key
+  **một lần** (fail-closed) rồi tiêm vào `SqliteTaskStore` và
+  `PendingActionStore`; đọc state đã seal mà thiếu/sai key thì **abort**, không
+  bao giờ trả ciphertext lên tầng trên. Key lấy từ `AI_STORAGE_KEY` →
+  `AI_STORAGE_KEY_FILE` → tự sinh một lần ở `%LOCALAPPDATA%`/`$XDG_CONFIG_HOME`
+  (**ngoài** `APP_DATA_DIR`, nên backup volume không mang theo key). Cột chỉ mô tả
+  (id, status, owner, timestamp) vẫn plaintext để SQL filter/retention/tenant
+  còn chạy trên chỉ mục thật.
 * **Hủy job được đo đúng chỗ runner dừng.** `TaskCoordinator.cancel()` đóng dấu
   `cancelled_at`, `finish()` báo delta qua observer mà composition root tiêm vào
   histogram Prometheus `agent_recovery_seconds`.
@@ -347,7 +365,9 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   `adapters/a2a_client.TrustedA2AClient` (allowlist-only); allowlist là tập hợp
   triển khai từ `settings.a2a_trusted_endpoints()` — không cấu hình gì thì mọi
   điều phối remota fail closed (ADR 0012). Supervisor chỉ chạm A2A qua đảo ngược
-  phụ thuộc (`set_remote_specialist_lookup`).
+  phụ thuộc: `compose()` tạo một `RemoteAgentRegistry`, tiêm cùng instance đó
+  vào `A2ARouter` và vào `functools.partial(delegate, remote_lookup=…)` của
+  `AgentService`; không còn lookup toàn tiến trình.
 * **Từ vựng bàn giao là dữ liệu registry, không phải luồng điều khiển:**
   `TRANSFER_TARGETS` trong `domain/specialists.py` là nơi đặt tên duy nhất cho
   mọi handoff; routing theo công cụ là bảng `_TOOL_ROUTE_RULES` được `_route`
@@ -379,12 +399,17 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
   hình Postgres/Redis khi cần khôi phục session bền vững đa tiến trình.
 * **Cổng production là opt-in, fail closed (ADR 0023/0024).**
   `AGENT_CHECKPOINT_REQUIRED=1` từ chối backend memory (raise thay vì rơi về
-  `MemorySaver` im lặng); `AGENT_SANDBOX_REQUIRE_ISOLATION=1` từ chối runtime
-  local (chỉ chạy tool trong docker `--cap-drop ALL` + `no-new-privileges`);
+  `MemorySaver` im lặng); `AGENT_SANDBOX_REQUIRE_ISOLATION` **mặc định là `1`**
+  nên từ chối runtime local (chỉ chạy tool trong docker `--cap-drop ALL` +
+  `no-new-privileges`) — allow-list không phải là một OS boundary, nên đường
+  local phải là một quyết định được viết ra
+  (`AGENT_SANDBOX_REQUIRE_ISOLATION=0` cho desktop một người dùng, ADR 0037);
   `AGENT_MAX_CONCURRENT_RUNS` và `AGENT_RATE_LIMIT_PER_MINUTE` bật governor
   admission (hết slot → 503, vượt quota → 429 + `Retry-After`; `/livez`,
-  `/readyz` được miễn). Desktop không đặt gì thì hành vi không đổi; deployment
-  nhiều người dùng xem [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) (SLO, cảnh báo,
+  `/readyz` được miễn). Budget run áp cho **mọi** entry point chạy graph —
+  `execute`, `approve` và desktop-ack — nên một burst resume không thể vượt
+  trần như trước. Deployment nhiều người dùng xem
+  [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) (SLO, cảnh báo,
   quy trình chỉnh quota/backup/rollback).
 * Người phản biện là tất định **bằng thiết kế**: không tốn một lời gọi mô hình
   thêm nào, và ngăn một kết quả công cụ thất bại bị âm thầm coi là sự thật.
@@ -414,11 +439,27 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
   đã persist so với `get_args(StepType)`. Không request HTTP/A2A inbound nào
   mang trường `steps` — có test ghim điều đó.
 * **Cứng hoá transport.** ADR 0008 — peer loopback + allow-list `Origin` + bearer
-  tuỳ chọn theo từng bề mặt, A2A remota không thể bật khi thiếu `AI_A2A_TOKEN`
-  (fail closed). ADR 0009 — phê duyệt là capability dùng một lần, gắn với đúng
+  tuỳ chọn theo từng bề mặt, A2A remota không thể bật khi thiếu credential:
+  `AI_A2A_TOKEN` (single-tenant) hoặc mapping `AI_A2A_TENANTS` (mỗi token sở
+  hữu task riêng). ADR 0009 — phê duyệt là capability dùng một lần, gắn với đúng
   lời gọi (`approval_fingerprint` + grant store). ADR 0010 — domain sở hữu một
   chính sách redaction duy nhất. ADR 0011 — sandbox lệnh từ chối code interpreter
   nội tuyến (`-c`, `-m`, `-`) và shell substitution.
+* **Mã hoá at-rest cho state cục bộ** (ADR 0027, ADR 0037). Prompt, đối số tool, kết quả
+  model và event log không còn nằm plaintext trên đĩa. Key được **tiêm** từ
+  composition root (không có global), đọc thiếu/sai key thì **fail closed**,
+  và row plaintext cũ được seal đúng **một lần** nhờ `PRAGMA user_version = 3`.
+  Từ ADR 0037, state còn được **ràng buộc theo dòng**: AAD mang id của dòng
+  (`task.v2:<id>:<field>`) nên một giá trị không chép sang dòng khác được, và
+  mỗi dòng mang một **identity bundle đã seal** (`owner`, `classification`,
+  `status`) nên các cột quyết định *ai được đọc dòng này* không còn là
+  plaintext có thể sửa. File đã seal bằng định dạng cũ được từ chối mở và
+  người vận hành chạy một lần `scripts/migrate_state_row_binding.py`.
+* **Cache RAG dùng chung key đó** (ADR 0028). `Cache/chunks.pkl` là **bản sao
+  thứ hai của corpus tài liệu** (kèm ảnh base64) — nên nó được seal như mọi
+  thứ khác, **một key cho tất cả**. HMAC cũ bị bỏ (GCM đã tự xác thực), index
+  FAISS được serialize trong RAM trước khi seal, và cache không xác thực
+  được thì là **miss** → dựng lại, không bao giờ unpickle payload chưa xác thực.
 * **Di sản đã xoá, không phải được tài liệu hoá** (ADR 0006/0012/0013/0014).
   Package `modules/` và shim `legacy/` không còn tồn tại; mọi production import
   đi thẳng `ai_assistant.*`. Hợp đồng import-linter và guard AST giữ `modules`
@@ -429,7 +470,7 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
 | Bề mặt | Endpoint |
 |--------|----------|
 | Health & metrics | `/health`, `/livez`, `/readyz`, `/metrics` |
-| Chat (tương thích OpenAI) | `/v1/models`, `/v1/chat/completions` (JSON và SSE) |
+| Chat (tương thích OpenAI) | `/v1/models`, `/v1/chat/completions` (JSON; SSE là ở `/v1/agent/execute`) |
 | Agent | `/v1/agent/execute` (JSON hoặc SSE), `/v1/agent/cancel`, `/v1/agent/approve`, `/v1/agent/ui-action-result` |
 | Admin | `/admin/release-vram`, `/admin/reload-model`, `/admin/reload-rag`, `/admin/reload-agent`, `/admin/shutdown` |
 | A2A | `/.well-known/agent.json`, `/message:send`, `/tasks/*` (`:cancel`, `:resume`, `:subscribe`), `/a2a/tasks/*` (tương thích) |
@@ -483,6 +524,7 @@ Hugging Face + SHA-256; kiểm tra trước khi chạy server:
 ```powershell
 python AIAssistant/scripts/verify_models.py          # OK/MISSING/MISMATCH, exit 1 nếu lệch pin
 python AIAssistant/scripts/generate_sbom.py --output sbom.json   # CycloneDX: lock (version + SHA-256) + model artifacts
+python AIAssistant/scripts/rekey_storage.py --verify  # Kiểm tra khoá at-rest có mở được state không (ADR 0030)
 ```
 
 Biến runtime đặt trong `AIAssistant/.env` (git-ignored); bắt đầu từ
@@ -548,26 +590,150 @@ PYTHONPATH=src python scripts/mutation_check.py
 Các cổng là **cấu hình**, không phải cờ dòng lệnh: `pyproject.toml` sở hữu breadth
 lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy strict và
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
-một thứ. Theo lần đo ngày 2026-10-16 (các con số đo được được ghi lại trong
-`Docs/SCORECARD.md` — bản local, không theo git): **100.00%** statement *và*
-branch toàn package, và **39/39** kill trong mutation check.
+một thứ. Theo lần đo ngày 2026-10-23 (các con số đo được được ghi lại trong
+`Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
+branch toàn package (9 642 statement / 2 600 branch, 2 209 test), và **150/150**
+kill trong mutation check. Số mutant tối thiểu cũng là một cổng
+(`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
+quyết định *nhìn thấy được*.
+
+Nhưng một bảng cổng xanh **không phải** là một hệ thống an toàn. Vòng review
+2026-10-21 thứ ba (ADR 0034) tìm ra tám lỗi mà **mọi cổng đều không thấy** —
+vì từng lỗi nằm đúng ở chỗ mà test chỉ chứng minh được *qua mock*: control
+có thật, test có thật, nhưng test **không tái hiện được tấn công**. Đáng chú ý:
+`.env` (khoá at-rest + mọi bearer token) đọc được **không cần approval** vì
+block-list là *extension* mà dotfile không có extension; `shutil.which` trên
+Windows tìm CWD trước PATH nên binary agent cài được chạy thay binary thật;
+deny-list so khớp phân biệt hoa thường nên `PYPROJECT.TOML` ghi đè file thật;
+`open()` trả plaintext chưa seal nên cột bị thay thế vẫn được phục vụ như
+thật. Cả tám đã đóng và ghim bằng test hồi quy *chạy thật* — và SCORECARD giờ
+có mục riêng ghi lại control nào **chỉ** được kiểm bằng mock, để lần review sau
+không phải đoán.
+
+Vòng audit thứ ba (ADR 0035) chạy lại trên **các lớp vòng trước chưa chạm tới**
+và tìm thêm **năm lỗi cùng lớp** — trong đó một lỗi là *anh em* của một quy
+tắc ADR 0034 vừa sửa: quy tắc *thư mục bị chặn* so phân biệt hoa thường trong
+khi quy tắc *tên file bí mật* ngay cạnh đó thì không, nên `.GIT/config`
+(remote URL + credential helper) đọc được không cần approval; và
+`lsp_client` vẫn dùng `shutil.which` — **chỗ thứ hai** giải chương trình, nơi
+ADR 0034 chỉ sửa chỗ thứ nhất.
+
+Hai mươi lỗi cùng một lớp thì *đếm số lỗi đã sửa* là một con số vô nghĩa:
+lớp lỗi vẫn còn, và thực thể thứ hai mươi mốt chỉ là một dòng code nữa. Vì vậy
+ADR 0035 đóng **lớp**, không đóng từng thực thể: hai module kernel
+(`path_policy`, `exec_policy`) làm chủ sở hữu duy nhất của quy tắc đường dẫn và
+quy tắc giải chương trình; mọi so sánh tên đều không phân biệt hoa thường và
+được kiểm theo **dạng tính chất** (duyệt chính tập quy tắc, nên thêm một tên
+tự đòi hành vi đúng); và một **guard tĩnh** quét AST toàn bộ `src/ai_assistant`
+fail build nếu bất kỳ module nào gọi `shutil.which` — vì lỗi đó **không nhìn
+thấy được lúc chạy**: mock cũ trả về một tên *tương đối*, đúng hình dạng mà
+một CWD-hit thật tạo ra.
+
+CI chạy cổng trên **cả Linux lẫn Windows** (`Build-Python-ci.yml`): sản phẩm
+ship trên Windows, và hai guard bảo mật của sandbox chỉ chạy ở đó
+(`skipUnless(win32)`) — một CI chỉ có Linux sẽ báo xanh trong khi nền tảng
+người dùng thật chưa từng được kiểm tra (ADR 0032).
+
+Vòng review thứ tư (ADR 0037) chạy lại toàn bộ cổng rồi đọc source, và tìm
+ra **bốn lỗi cùng một lớp**: *một quy tắc viết thành một danh sách, và danh
+sách hở chỗ khác*. Sandbox coi **mọi** token bắt đầu bằng `-` là "cờ thường"
+nên **verb thật chưa bao giờ được kiểm** (`git -C <dir> clean -fdx`,
+`pytest -p <mod>`, `ctest --build-and-test --test-command <cmd>`); deny-list
+ghi của nền tảng là một *bảng liệt kê* nên `agents/`, `adapters/persistence/`
+và hai lá kernel `path_policy`/`exec_policy` vẫn ghi được; cổng classification
+so **ngược chiều** (principal yếu hơn thì qua, mạnh hơn thì bị chặn) và mọi
+tool mang cùng một trần nên nó chỉ là phép so sánh với hằng số; và state
+at-rest ràng buộc theo **cột** chứ không theo **dòng**, nên một giá trị chép
+sang dòng khác vẫn mở ra, còn `owner`/`classification`/`status` — cột quyết
+định *ai được đọc dòng này* — là plaintext không xác thực. ADR 0037 đóng lớp:
+bề mặt lệnh thành **ngữ pháp** (verb là token vị trí đầu tiên, cờ dẫn là
+allow-list, cờ import/execute bị từ chối ở mọi vị trí) và cổng isolation
+**mặc định bật**; deny-list thành **luật** ("nguồn của nền tảng không ghi
+được"); clearance **suy ra từ scope được cấp** và so sánh đúng chiều; và
+state at-rest **ràng buộc theo dòng** với một identity bundle đã seal, file
+cũ bị từ chối và người vận hành re-bind một lần bằng
+`scripts/migrate_state_row_binding.py`. Mutant **88 → 105**: mỗi quyết định
+mới có một mutant **trong cùng commit**, theo đúng luật của repo.
+
+Vòng review thứ năm (ADR 0038) đi vào các lớp **chưa ai rà sâu** — `rag/`,
+`llm/`, `internal/`, `config/`, `observability/` — và tìm ra ba lỗi cùng lớp,
+tất cả ở nơi mà **người đọc thứ hai** của hệ cây thư mục đứng: trình dựng
+corpus của RAG. Nó có chính sách riêng — không có luật link, danh sách thư
+mục *thiếu* hai mục mà kernel chung chặn, không có luật tên bí mật — nên một
+**junction** (trên Windows tạo được không cần quyền đặc biệt) bên trong dự án
+được index như thể nó thuộc dự án: một tài liệu riêng tư, hay một
+`secrets.py` chứa API key, đi thẳng vào mô hình và vào cache đã seal. Ảnh
+dưới `Docs/` bị index **hai lần**, và lần quét tính hash cache **khác** lần
+quát index. ADR 0038 đóng lớp: corpus builder dùng **kernel chung** (`path_policy`),
+mỗi file được quét **đúng một lần** bởi lần quét sở hữu nó, và hash cache
+hỏi trên **đúng** tập file đã index. Mutant **105 → 110**.
+
+Vòng review thứ sáu (ADR 0038) làm đúng điều mà năm vòng trước đã lặp lại:
+**rà lại chính code vừa viết**. Nó tìm ra hai lỗi trong code của chính tác
+giả — lần quét vẫn đi *vào* junction trỏ ra ngoài rồi mới từ chối từng file
+(duyệt cả ổ đĩa), và hành động "seal state" có thể **phá** một state đã seal
+(bằng cách ghi version mới lên nội dung cũ). Cả hai đã sửa theo hướng
+fail-closed: cùng một luật áp ở cấp thư mục lẫn cấp file, và không còn đường
+nào ghi một version mà nó không thực sự đã viết. Mutant **110 → 111**.
+
+Vòng review thứ bảy rà **bề mặt tuỳ chọn** của các binary trong allow-list —
+thứ chưa vòng nào chạm tới — và tìm ra một lỗi P1 cùng lớp: `ruff check
+<dir>` **in ra source của mọi file** nó tìm thấy, tức một đường đọc file ngoài
+workspace chỉ với phê duyệt *lệnh*. Cùng kiểu, `ruff --config <file>` (ruff
+echo nội dung file khi không parse được), `pytest --junitxml=<file>` (ghi ra
+ngoài), `git diff --no-index <a> <b>` (in hai file bất kỳ), `git commit
+--template=<file>`. Đã sửa: path positional của `python`/`pytest`/`ruff` phải
+nằm trong workspace, và **một bảng tuỳ chọn nguy hiểm theo từng binary** bị
+từ chối ở *mọi vị trí* trên dòng lệnh — `pytest` không còn là trường hợp
+đặc biệt nữa. Mutant **111 → 112**.
+
+Vòng review 2026-10-22 (ADR 0039) hỏi ba câu mà các vòng trước chưa hỏi: tool
+của plugin có đi cùng catalogue/chính sách với builtin không, các cầu nối
+policy/alias/MCP có fail-closed không, và state theo session có bị giữ vô hạn
+không. Cả ba đều có lỗi trong khi mọi gate xanh: plugin tool *executable* nhưng
+*vô hình* với agent; policy có ba nguồn (một alias `app_action_*` mang policy
+`read_only` cho action `desktop_ack`, nhãn lạ rơi về `read_only`); và 10 000
+session id để lại 10 000 `RLock`. ADR 0039 đóng lớp: một vocabulary/một bảng
+quyền trong `domain/specialists.py`, một bảng alias duy nhất, plugin tool được
+merge vào catalogue với row động, mọi nhãn lạ fail-closed, và `SessionLockPool`
+reference-count để entry biến mất khi người dùng cuối rời đi. Mutant
+**112 → 134**.
+
+Vòng review kế tiếp (ADR 0040) rà *ai thực sự giữ model lease* — thứ ADR 0032
+mới gắn vào `execute`. `approve`, `ui_action_result` và route
+`/v1/chat/completions` đều dùng model mà không giữ lease, nên
+`/admin/reload-model` có thể `del` backend dưới một resume hoặc một stream đang
+chạy. ADR 0040 đóng lớp: mọi entry point chạy graph mở cùng một lease, chat giữ
+lease từ lúc dựng prompt (vision flag) đến token cuối và dùng backend do lease
+trả về; fast-path 503 vẫn còn nhưng không còn là bảo đảm. Mutant **134 → 138**.
 
 * `tests/unit/` — hành vi từng module, gồm cả các ca biên về concurrency, phê
   duyệt và streaming.
 * `tests/integration/` — composition root, orchestration, A2A streaming end-to-end
   và các guard ranh giới layer bằng AST.
+* `tests/integration/test_real_http_surface.py` — **bề mặt HTTP thật**: compose
+  đồ thị đối tượng thật trong một interpreter mới, chỉ thay backend mô hình
+  rồi bắn một request HTTP thật qua router thật. Mọi test router khác dùng
+  double, nên *binding* giữa composition root và router chưa từng được
+  chạy — đúng loại lỗi mà `/v1/chat/completions` chết trong production đã bắt
+  (ADR 0029). Test này **đỏ** khi binding bị hỏng (ADR 0032).
 * `tests/contract/` — hợp đồng Qt ↔ server và wiring multi-agent.
+* `tests/unit/test_at_rest_cipher_contract.py` — hợp đồng chéo ngôn ngữ cho
+  envelope at-rest: hằng số format đọc từ `src/core/AtRestCipher.cpp` và
+  vector tham chiếu đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python.
+  Nhờ vậy một vector chỉ được ghim lại ở một bên sẽ làm CI Python đỏ — không
+  cần trigger chéo ngôn ngữ (ADR 0032).
 * `scripts/mutation_check.py` — đảo từng quyết định trọng yếu (allowlist sandbox,
-  phê duyệt HITL, `/health`, niêm phong cache, các cuộc đua cancel…) và **bắt
+  phê duyệt HITL, `/health`, niêm phong cache, mã hoá at-rest, các cuộc đua cancel…) và **bắt
   buộc** test sở hữu phải fail; CI chạy lại con số này mỗi lần push (mutant recompose
   được ghim bằng timeout 180s — ADR 0022). Con số là một đo lường, không phải mục
-  tiêu: nó tái lập được khi cài `faiss-cpu`, `rank-bm25` và `mcp`
+  tiêu: nó tái lập được khi cài `faiss-cpu`, `rank-bm25`, `mcp` và `cryptography`
   (`requirements-test.lock`).
 * `evals/` — hai eval tất định, offline chạy trong CI trên mọi push/PR chạm
   `AIAssistant/**` (`run_tool_eval.py` cho envelope tool-call — 16 case gồm
   adversarial: tool bịa, tham số lạ, type không coerce, JSON cụt;
   `run_agentic_eval.py` cho chính sách supervisor + gateway thật — 25
-  scenario/114 case gồm grant dùng-một-lần, rollback/cancel, scope và
+  scenario/124 case gồm grant dùng-một-lần, rollback/cancel, scope và
   classification; ADR 0025). `run_model_in_loop_eval.py` chạy tay và cần
   backend thật, có `--baseline` để gate tụt điểm so với report cũ. Cả ba
   script đều tự đặt `src/` lên `sys.path`, và một case **không chạy được** sẽ
@@ -585,9 +751,9 @@ branch toàn package, và **39/39** kill trong mutation check.
 | Tài liệu | Vai trò |
 |----------|---------|
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
-| `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — bản local, không theo git |
+| `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 25 Architecture Decision Record (0001–0025) |
+| [`Docs/adr/`](Docs/adr/) | 40 Architecture Decision Record (0001–0040) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -620,7 +786,18 @@ Các quyết định trọng yếu, theo thứ tự:
 [0022](Docs/adr/0022-true-lazy-strict-10-10.md) root lười đúng nghĩa, strict 10/10,
 [0023](Docs/adr/0023-artifact-pinning-production-gates.md) pin artifact & cổng production fail-closed,
 [0024](Docs/adr/0024-admission-governor.md) governor admission (rate limit, run budget, SLO),
-[0025](Docs/adr/0025-eval-expansion.md) eval mở rộng (adversarial, gateway, multilingual, baseline).
+[0025](Docs/adr/0025-eval-expansion.md) eval mở rộng (adversarial, gateway, multilingual, baseline),
+[0026](Docs/adr/0026-a2a-registry-owned-by-composition-root.md) A2A registry & remote lookup thuộc composition root,
+[0027](Docs/adr/0027-at-rest-encryption-local-state.md) mã hoá at-rest cho state cục bộ,
+[0028](Docs/adr/0028-sealed-rag-cache.md) cache RAG cũng được niêm phong,
+[0029](Docs/adr/0029-prompt-builder-as-a-port.md) prompt builder là một port riêng,
+[0030](Docs/adr/0030-at-rest-key-rotation.md) xoay khoá at-rest,
+[0031](Docs/adr/0031-sealed-chat-attachments.md) file đính kèm chat cũng được niêm phong,
+[0032](Docs/adr/0032-closing-the-last-mile.md) đóng nốt mile cuối của hợp đồng 10/10,
+[0033](Docs/adr/0033-one-spelling-of-a-path.md) cổng ghi so trên *một* cách viết của đường dẫn,
+[0034](Docs/adr/0034-the-controls-the-gates-cannot-see.md) đóng những control mà cổng kiểm không nhìn thấy,
+[0035](Docs/adr/0035-one-rule-one-owner.md) đóng *lớp* lỗi: một quy tắc, một chủ sở hữu,
+[0036](Docs/adr/0036-a-store-with-a-key-never-accepts-what-it-cannot-authenticate.md) một store có khoá không bao giờ chấp nhận nội dung nó không xác thực được.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

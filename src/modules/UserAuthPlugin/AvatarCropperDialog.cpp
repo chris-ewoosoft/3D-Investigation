@@ -133,7 +133,13 @@ void AvatarCropperDialog::accept() {
     }
 
     if (cropped.save(thumbFile)) {
-        UserAuthPlugin::users()->updateAvatar(m_username, thumbFile);
+        // updateProfile() writes the self-service fields only (e-mail and
+        // avatar). The account may write its own record; the core enforces
+        // that, so the plugin does not have to.
+        QString err;
+        if (!UserAuthPlugin::users()->updateProfile(m_username, QString(), thumbFile, err)) {
+            qWarning() << "[UserAuth] Could not store the avatar:" << err;
+        }
     }
 
     QDialog::accept();

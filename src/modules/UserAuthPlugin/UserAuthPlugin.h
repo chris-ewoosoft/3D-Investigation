@@ -4,12 +4,14 @@
 #include <QObject>
 #include "IPlugin.h"
 #include "AppConstants.h"
+#include "OverlayResizer.h"
 
 class IAppContext;
 class ILanguageService;
 class IUserManager;
 class QToolButton;
 class QGroupBox;
+class QWidget;
 
 class UserAuthPlugin : public QObject, public IPlugin {
     Q_OBJECT
@@ -49,6 +51,25 @@ private:
     void loadUserSettings();
     void saveUserPref(const QString &key, const QString &value);
 
+    /// Remove every widget this plugin installed into the shell.
+    ///
+    /// The delete is SYNCHRONOUS on purpose: a deleteLater() may not run
+    /// before the plugin DLL is unloaded, and a widget whose vtable lives in
+    /// that DLL must not survive it. Called by cleanup() and by the logout
+    /// path (which rebuilds the menu bar from scratch).
+    void releaseShellWidgets();
+
+    /// Apply (or remove) the background image on the shell window.
+    ///
+    /// The plugin is the single owner of the overlay and of its event
+    /// filter: the filter's vtable lives in this DLL, so it has to be
+    /// removed before the unload, and a second owner would be a second
+    /// chance to forget it.
+    void applyGlobalBackground(const QString &bgPath, int bgOpacity, bool useBg);
+
+    /// Remove the overlay's event filter from the shell and delete it.
+    void releaseOverlayResizer();
+
     IAppContext *m_context = nullptr;
     QString m_currentUser;
 
@@ -66,6 +87,15 @@ private:
     QGroupBox   *m_groupHelp     = nullptr;
     QToolButton *m_btnSettings   = nullptr;   // single "Cài đặt" ribbon button
     QToolButton *m_btnAbout      = nullptr;
+
+    /// The menu bar's corner widget holding the language and avatar buttons.
+    QWidget     *m_cornerWidget  = nullptr;
+
+    /// The event filter that keeps the background overlay in sync with the
+    /// shell window. It lives in the shell's widget tree while its vtable
+    /// lives in this DLL, so it has to be removed before the unload.
+    /// nullptr means "no filter installed" — the handle IS the state.
+    OverlayResizer *m_overlayResizer = nullptr;
 };
 
 #endif // USER_AUTH_PLUGIN_H

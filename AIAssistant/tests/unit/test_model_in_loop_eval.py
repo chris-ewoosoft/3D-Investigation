@@ -276,10 +276,9 @@ class MainFlowTests(unittest.TestCase):
         self.assertEqual(created["model_path"], "cached.gguf")
         self.assertIsInstance(backend, _FakeBackend)
 
-    def test_without_model_path_the_loaded_singleton_is_used(self) -> None:
+    def test_without_model_path_there_is_no_implicit_backend(self) -> None:
         args = self.eval._parse_args([])
-        with patch("ai_assistant.llm.model_loader.get_backend", return_value=None):
-            self.assertIsNone(self.eval._load_backend(args))
+        self.assertIsNone(self.eval._load_backend(args))
 
 
 class BaselineRegressionTests(unittest.TestCase):

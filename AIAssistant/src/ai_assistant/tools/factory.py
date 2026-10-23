@@ -109,6 +109,8 @@ def create_tool_registry(rag_context: RagContextPort | None = None) -> ToolRegis
             timeout_seconds=contract["timeout_seconds"],
             policy=contract["policy"],
             requires_approval=contract["requires_approval"],
+            classification=contract["classification"],
+            specialists=contract["specialists"],
             handler=handlers.get(name),
         )
         registry.register(spec)
@@ -128,6 +130,9 @@ def create_tool_registry(rag_context: RagContextPort | None = None) -> ToolRegis
             },
             timeout_seconds=contract["timeout_seconds"],
             policy=contract["policy"],
+            requires_approval=contract["requires_approval"],
+            classification=contract["classification"],
+            specialists=contract["specialists"],
             handler=handlers.get("application_action")
         ))
         

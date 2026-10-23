@@ -31,16 +31,20 @@ MODULES: tuple[str, ...] = tuple(sorted(path.stem for path in PACKAGE_DIR.glob("
 
 ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "__init__": frozenset(),
-    "backend": frozenset({"config", "errors"}),
+    # The adapter fingerprints the checkpoint's dataset to prove a resume is
+    # the same experiment, and publishes the run's liveness lease while it
+    # trains: both are facts about the run it owns, so it reads them directly.
+    "backend": frozenset({"config", "dataset", "errors", "fsio", "metrics"}),
     "checks": frozenset(),
     "cli": frozenset({"backend", "config", "errors", "fsio", "logging_setup", "manifest", "trainer"}),
     "config": frozenset(),
     "dataset": frozenset({"checks"}),
     "errors": frozenset(),
     "fsio": frozenset({"errors"}),
-    "gate": frozenset({"config", "dataset", "errors", "fsio", "manifest"}),
+    "gate": frozenset({"config", "dataset", "errors", "fsio", "manifest", "metrics"}),
     "logging_setup": frozenset(),
     "manifest": frozenset({"config", "errors", "fsio"}),
+    "metrics": frozenset(),
     "onnx_contract": frozenset({"checks", "config", "dataset", "errors", "preflight"}),
     "preflight": frozenset({"checks", "config", "dataset"}),
     "progress": frozenset(),
@@ -52,16 +56,20 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
 
 One direction only, and every edge is named here rather than inferred: a new
 edge is a change to this table, reviewed like any other. The shape encodes the
-README diagram — leaves (``config``, ``checks``, ``errors``, ``progress``,
-``logging_setup``) know nothing, ``fsio`` sits on ``errors`` (it raises a typed
-``ConcurrentRunError`` from the advisory lock), ``manifest``/``dataset``/
-``backend`` sit on them, ``gate``/``preflight`` hold the policies, ``trainer``
-orchestrates, and ``cli`` alone is the composition root.
+README diagram — leaves (``config``, ``checks``, ``errors``, ``metrics``,
+``progress``, ``logging_setup``) know nothing, ``fsio`` sits on ``errors`` (it
+raises a typed ``ConcurrentRunError`` from the advisory lock), ``manifest``/
+``dataset``/``backend`` sit on them, ``gate``/``preflight`` hold the policies,
+``trainer`` orchestrates, and ``cli`` alone is the composition root.
+``metrics`` is a leaf shared by the two sides of the quality gate: the adapter
+coerces the framework's result object and the gate reads the manifest, and
+both have to answer "is this a measurement?" the same way.
 """
 
 HEAVY_DEPENDENCIES: dict[str, frozenset[str]] = {
     "ultralytics": frozenset({"backend"}),
     "tensorboard": frozenset({"backend"}),
+    "torch": frozenset({"backend"}),
     "yaml": frozenset({"dataset"}),
     "onnx": frozenset({"onnx_contract"}),
     "onnxruntime": frozenset({"onnx_contract"}),
@@ -71,8 +79,9 @@ HEAVY_DEPENDENCIES: dict[str, frozenset[str]] = {
 
 The ML stack (and even PyYAML) is deliberately unreachable from the rest of
 the package so that ``--help``, ``--check``, ``--dry-run`` and the whole unit
-suite run without it installed. ``ultralytics`` belongs to the one adapter;
-``yaml`` belongs to the one module that parses ``data.yaml``; ``tensorboard``
+suite run without it installed. ``ultralytics`` and ``torch`` belong to the one
+adapter (the latter behind its lazy device probe); ``yaml`` belongs to the one
+module that parses ``data.yaml``; ``tensorboard``
 is the optional sink behind ``--tensorboard``, probed by the same adapter so
 that feature fails fast rather than logging a success it did not have. The
 ONNX stack (``onnx``/``onnxruntime``/``numpy``) belongs to the post-export
@@ -85,23 +94,47 @@ def _tree(path: Path) -> ast.Module:
 
 
 def _internal_imports(tree: ast.Module) -> set[str]:
-    """Names of ``cvtrain`` modules this file imports (``from .x import ...``)."""
+    """Names of ``cvtrain`` modules this file imports, relative or absolute.
 
+    ``from .gate import ...`` and ``from cvtrain.gate import ...`` are the same
+    edge. Only the relative spelling used to be recognised, so an absolute
+    import was a documented way around the dependency map; both are now read
+    through the same package name.
+    """
+
+    package = PACKAGE_DIR.name
     found: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 1:
-            if node.module in MODULES:
-                found.add(node.module)
-            for alias in node.names:
-                # ``from . import __version__, trainer`` mixes a package
-                # attribute with a submodule: only the submodule is an edge.
-                if alias.name in MODULES:
-                    found.add(alias.name)
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 1:
+                if node.module in MODULES:
+                    found.add(node.module)
+                for alias in node.names:
+                    # ``from . import __version__, trainer`` mixes a package
+                    # attribute with a submodule: only the submodule is an edge.
+                    if alias.name in MODULES:
+                        found.add(alias.name)
+            elif node.level == 0 and node.module:
+                if node.module == package:
+                    # ``from cvtrain import gate, __version__``
+                    found.update(alias.name for alias in node.names if alias.name in MODULES)
+                elif node.module.startswith(f"{package}."):
+                    # ``from cvtrain.gate import ...`` names the submodule in
+                    # the module path, not in the imported aliases.
+                    submodule = node.module.split(".", 1)[1].partition(".")[0]
+                    if submodule in MODULES:
+                        found.add(submodule)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                top_level = alias.name.partition(".")[0]
-                if top_level in MODULES:
-                    found.add(top_level)
+                parts = alias.name.split(".")
+                if parts[0] == package and len(parts) > 1:
+                    if parts[1] in MODULES:
+                        found.add(parts[1])
+                elif parts[0] in MODULES:
+                    # Handles ``import backend`` (relative imports are the
+                    # valid spelling, but the guard treats a bare module name
+                    # as the same edge rather than letting it through).
+                    found.add(parts[0])
     return found
 
 
@@ -191,6 +224,34 @@ class ImportGraphTests(unittest.TestCase):
                 self.assertFalse(mentions, f"{name}.py names the concrete backend; only cli.py may")
 
 
+class ImportNormalisationTests(unittest.TestCase):
+    """An absolute ``cvtrain`` import is the same edge as a relative one."""
+
+    def test_absolute_package_imports_are_recognised(self) -> None:
+        source = """
+import cvtrain.gate
+import cvtrain.unknown
+import cvtrain
+import backend
+from cvtrain import gate, __version__, trainer
+from cvtrain.unknown import thing
+from cvtrain.trainer import run
+from other import gate
+from . import config
+"""
+        self.assertEqual(
+            _internal_imports(ast.parse(source)),
+            {"gate", "trainer", "backend", "config"},
+        )
+
+    def test_a_package_only_import_is_not_an_edge(self) -> None:
+        self.assertEqual(_internal_imports(ast.parse("import cvtrain\n")), set())
+        self.assertEqual(_internal_imports(ast.parse("from cvtrain import __version__\n")), set())
+
+    def test_unrelated_imports_are_not_edges(self) -> None:
+        self.assertEqual(_internal_imports(ast.parse("import other.gate\nfrom other import trainer\n")), set())
+
+
 class LazyDependencyTests(unittest.TestCase):
     """The heavy stack is reachable through one seam, and only when training."""
 
@@ -228,6 +289,18 @@ class DocumentationTests(unittest.TestCase):
     ``--verbose``.
     """
 
+    _FOREIGN_FLAGS = frozenset({"--require-hashes", "--files"})
+    """Switches that belong to *another* tool, not to ``cvtrain``'s CLI.
+
+    ``--require-hashes`` is pip's digest-verification switch — the gate
+    toolchain is installed with it (ADR 0012) — and ``--files`` is the
+    mutation sweep's subset switch. They appear in this README because the
+    README documents *how the gates are run*, not because ``TrainModel.py``
+    accepts them. They are listed explicitly rather than widening the check:
+    a new foreign flag has to be added here, which is a reviewable decision
+    instead of a silent hole.
+    """
+
     def test_every_module_has_a_docstring(self) -> None:
         for name in MODULES:
             with self.subTest(module=name):
@@ -248,7 +321,11 @@ class DocumentationTests(unittest.TestCase):
         text = README.read_text(encoding="utf-8")
         documented = set(re.findall(r"--[a-z][a-z0-9-]*", text))
         accepted = set(build_parser()._option_string_actions)
-        self.assertEqual(documented - accepted, set(), "README documents flags the CLI does not accept")
+        self.assertEqual(
+            documented - accepted - self._FOREIGN_FLAGS,
+            set(),
+            "README documents flags the CLI does not accept",
+        )
 
     def test_every_flag_the_cli_accepts_is_documented(self) -> None:
         # The reverse direction: a flag the parser accepts but the README never

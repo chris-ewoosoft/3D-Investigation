@@ -9,7 +9,9 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,7 +21,7 @@ from cvtrain.backend import UltralyticsBackend
 from cvtrain.cli import build_parser, config_from_args, main, parse_metric_threshold
 from cvtrain.config import DEFAULT_MODELS, DEFAULT_OPSET, MANIFEST_NAME, MODEL_REGISTRY, TrainConfig
 from cvtrain.errors import BackendUnavailableError, ExitCode, QualityGateError
-from cvtrain.fsio import LOCK_NAME
+from cvtrain.fsio import LOCK_NAME, RUN_ALIVE_SECONDS
 
 
 class ParserTests(unittest.TestCase):
@@ -84,6 +86,12 @@ class ParserTests(unittest.TestCase):
         # behaviour every existing caller (and the Qt dialog) relies on.
         self.assertFalse(config_from_args(build_parser().parse_args(["--yes"])).skip_unchanged)
         self.assertTrue(config_from_args(build_parser().parse_args(["--skip-unchanged"])).skip_unchanged)
+
+    def test_resume_is_opt_in(self) -> None:
+        # Resuming continues an interrupted run; a fresh run is the
+        # reproducible one, so the flag stays off unless it is asked for.
+        self.assertFalse(config_from_args(build_parser().parse_args(["--yes"])).resume)
+        self.assertTrue(config_from_args(build_parser().parse_args(["--resume"])).resume)
 
     def test_quality_gate_thresholds_are_mapped_and_repeatable(self) -> None:
         args = build_parser().parse_args(["--min-metric", "metrics/mAP50(B)=0.5", "--min-metric", "mAP=0.4"])
@@ -233,7 +241,104 @@ class CompositionRootTests(_CliTestCase):
         self.assertIsInstance(backend, UltralyticsBackend)
 
 
+class PruneRunsCommandTests(_CliTestCase):
+    """``--prune-runs`` is a mode of its own: it never trains anything."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The command must never start a training run — a regression that let
+        # it fall through would train against the machine's real dataset.
+        patcher = mock.patch("cvtrain.cli.trainer.run", return_value=0)
+        self.trainer_run = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _runs_dir(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runs_dir = Path(tmp.name) / "runs"
+        model_dir = runs_dir / "detect"
+        model_dir.mkdir(parents=True)
+        for name, age in (("train-old", 5 * RUN_ALIVE_SECONDS), ("train-new", 4 * RUN_ALIVE_SECONDS)):
+            run_dir = model_dir / name
+            run_dir.mkdir()
+            stamp = time.time() - age
+            os.utime(run_dir, (stamp, stamp))
+        return runs_dir
+
+    def test_old_runs_are_removed_and_the_newest_survives(self) -> None:
+        runs_dir = self._runs_dir()
+
+        code = main(["--prune-runs", "--runs-dir", str(runs_dir)])
+
+        self.assertEqual(code, ExitCode.OK)
+        self.assertEqual([p.name for p in (runs_dir / "detect").iterdir()], ["train-new"])
+        self.trainer_run.assert_not_called()
+
+    def test_the_count_of_kept_runs_can_be_chosen(self) -> None:
+        runs_dir = self._runs_dir()
+
+        code = main(["--prune-runs", "2", "--runs-dir", str(runs_dir)])
+
+        self.assertEqual(code, ExitCode.OK)
+        self.assertEqual(len(list((runs_dir / "detect").iterdir())), 2)
+
+    def test_pruning_never_touches_the_published_models(self) -> None:
+        # The published artifacts and their provenance are not this command's
+        # business: it only ever removes run directories.
+        runs_dir = self._runs_dir()
+        models_dir = Path(runs_dir.parent) / "Models"
+        models_dir.mkdir()
+        artifact = models_dir / "yolo11n.onnx"
+        artifact.write_bytes(b"published")
+
+        main(["--prune-runs", "--runs-dir", str(runs_dir)])
+
+        self.assertTrue(artifact.exists())
+
+    def test_a_negative_count_is_a_usage_error(self) -> None:
+        # "Keep minus three runs" has no meaning: say so before deleting
+        # anything, with the usage exit code the desktop app understands.
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["--prune-runs", "-1"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("non-negative", stderr.getvalue())
+
+    def test_a_non_numeric_count_is_a_usage_error(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as ctx:
+            build_parser().parse_args(["--prune-runs", "many"])
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn("expected a number", stderr.getvalue())
+
+    def test_pruning_cannot_be_combined_with_another_mode(self) -> None:
+        # Same discipline as every other mode: two at once used to give one of
+        # them a silent precedence.
+        for pair in (("--prune-runs", "--check"), ("--prune-runs", "--verify-manifest")):
+            with self.subTest(pair=pair), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as ctx:
+                    build_parser().parse_args(list(pair))
+                self.assertEqual(ctx.exception.code, 2)
+
+
 class ManifestCommandTests(_CliTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # The manifest commands only read or adopt ``Models/``; they must
+        # never start a training run. Patching the orchestrator makes that a
+        # property of the *test* rather than of the current code — and it keeps
+        # a regression that lets a mode fall through from training against the
+        # machine's real dataset and checkpoints.
+        patcher = mock.patch("cvtrain.cli.trainer.run", return_value=0)
+        self.trainer_run = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_manifest_commands_never_start_a_training_run(self) -> None:
+        models_dir = self._models_dir()
+        main(["--write-manifest", "--models-dir", str(models_dir)])
+        main(["--verify-manifest", "--models-dir", str(models_dir)])
+        self.trainer_run.assert_not_called()
+
     def test_write_manifest_scans_and_returns_ok(self) -> None:
         models_dir = self._models_dir()
         (models_dir / MODEL_REGISTRY["det"].output).write_bytes(b"det-bytes")

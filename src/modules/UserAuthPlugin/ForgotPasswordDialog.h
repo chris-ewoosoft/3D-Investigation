@@ -1,6 +1,7 @@
 #ifndef FORGOT_PASSWORD_DIALOG_H
 #define FORGOT_PASSWORD_DIALOG_H
 
+#include "../../utils/BlockingCall.h"
 #include "../../utils/ModernDialog.h"
 
 class QLineEdit;
@@ -12,6 +13,7 @@ class ForgotPasswordDialog : public ModernDialog {
     Q_OBJECT
 public:
     explicit ForgotPasswordDialog(QWidget *parent = nullptr);
+    ~ForgotPasswordDialog() override;
 
 private slots:
     void onSendOtp();
@@ -24,6 +26,10 @@ private:
     void setError(const QString &msg);
 
     QStackedWidget *m_stack;
+
+    /// The background tasks of this dialog (the OTP request). The destructor
+    /// waits for them: a task must not outlive the service it calls.
+    blocking::TaskTracker m_tasks;
 
     // Step 1 – Enter email
     QLineEdit   *m_emailEdit;

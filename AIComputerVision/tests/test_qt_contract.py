@@ -22,7 +22,7 @@ from cvtrain.progress import PROGRESS_PREFIX, ProgressReporter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCK = REPO_ROOT / "src" / "modules" / "AIProcessorPlugin" / "AITrainDockWidget.cpp"
-HEADER = REPO_ROOT / "src" / "core" / "AIConstants.h"
+HEADER = REPO_ROOT / "src" / "include" / "AIConstants.h"
 ENTRY_POINT = Path(__file__).resolve().parents[1] / "TrainModel.py"
 
 _missing_dock = f"AITrainDockWidget.cpp not found at {DOCK}"

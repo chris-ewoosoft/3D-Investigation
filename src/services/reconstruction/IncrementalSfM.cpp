@@ -15,6 +15,22 @@
 #include <tuple>
 #include <unordered_map>
 
+namespace {
+
+/// A triangulated point the caller can use.
+///
+/// Triangulator::triangulate keeps its output index-aligned with the match
+/// list and reports a correspondence it could not triangulate (w ~ 0: the
+/// point lies at infinity) as NaN. Such a point must be skipped explicitly:
+/// every NaN comparison is false, so the depth and reprojection checks below
+/// would otherwise let it through and pollute the cloud.
+bool isFinitePoint(const cv::Point3f &pt)
+{
+    return std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z);
+}
+
+} // namespace
+
 IncrementalSfM::IncrementalSfM(const std::vector<cv::Mat> &images,
                                const std::vector<std::vector<cv::KeyPoint>> &keypoints,
                                const std::vector<cv::Mat> &descriptors,
@@ -211,7 +227,11 @@ bool IncrementalSfM::run() {
         cv::Mat p4 = (cv::Mat_<double>(4,1) << pt.x, pt.y, pt.z, 1.0);
         double depth0 = cv::Mat(P0.row(2) * p4).at<double>(0);
         double depth1 = cv::Mat(P1.row(2) * p4).at<double>(0);
-        if (depth0 <= 0.0 || depth1 <= 0.0) continue;
+        // A degenerate triangulation is NaN, and every comparison against NaN
+        // is false: without the explicit check such a point would pass both
+        // the depth and the reprojection test. Triangulator::triangulate keeps
+        // the index alignment, so rejecting it here cannot shift the rest.
+        if (!isFinitePoint(pt) || depth0 <= 0.0 || depth1 <= 0.0) continue;
         if (computeReprojectionError(P0, pt, bp1[k]) > m_config.reprojectionErrorMax) continue;
         if (computeReprojectionError(P1, pt, bp2[k]) > m_config.reprojectionErrorMax) continue;
 
@@ -392,7 +412,8 @@ bool IncrementalSfM::run() {
             cv::Mat p4 = (cv::Mat_<double>(4,1) << pt.x, pt.y, pt.z, 1.0);
             double depthRef = cv::Mat(P_ref.row(2) * p4).at<double>(0);
             double depthNew = cv::Mat(P_new.row(2) * p4).at<double>(0);
-            if (depthRef <= 0.0 || depthNew <= 0.0) continue;
+            // See the base pair: NaN points must be rejected explicitly.
+            if (!isFinitePoint(pt) || depthRef <= 0.0 || depthNew <= 0.0) continue;
             if (computeReprojectionError(P_ref, pt, pRef[k]) > m_config.reprojectionErrorMax) continue;
             if (computeReprojectionError(P_new, pt, pNew[k]) > m_config.reprojectionErrorMax) continue;
 

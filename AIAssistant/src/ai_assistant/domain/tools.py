@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, cast
 
+from .governance import redact_value
 from .security import DataClassification
 
 
@@ -13,6 +14,12 @@ class SideEffect(StrEnum):
     DESKTOP = "desktop"
     WRITE = "write"
     EXECUTE = "execute"
+
+
+#: The provenance id of the built-in catalogue.  It is always allowed: the
+#: third-party ``plugins.toml`` allow-list decides which plugin distributions
+#: may register, never whether the product's own tools exist.
+BUILTIN_PLUGIN_ID = "builtin.legacy-tools"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,3 +105,48 @@ def tool_result_has_evidence(tool: str, result: object) -> bool:
 
 def _field_has_evidence(value: object) -> bool:
     return bool(value.strip()) if isinstance(value, str) else bool(value)
+
+
+#: Result keys that carry the tool's *payload* — the document it read, the
+#: diff it produced, the rows it found — rather than a fact about the
+#: execution. A log record states what the tool did; it does not copy the
+#: user's file into a plaintext log file next to the ciphertext the very same
+#: content is sealed into (ADR 0032).
+PAYLOAD_KEYS = frozenset({
+    "content", "results", "matches", "entries", "text", "output",
+    "stdout", "stderr", "diff", "body", "data", "patch",
+})
+
+
+def describe_tool_result(result: object) -> str:
+    """Summarise a tool result for a log line, without its payload.
+
+    The result itself reaches the caller — and the sealed task event —
+    intact; only the *log* receives this summary. A tool that read a private
+    document therefore leaves a record of *what* it read and *how much* of it,
+    not a copy of the document.
+
+    Scalar facts (a return code, an error code, a path) survive; values are
+    passed through the shared redaction policy so a secret that a tool echoed
+    back under an innocuous key is masked here too.
+    """
+    if not isinstance(result, dict):
+        return type(result).__name__
+    parts: list[str] = []
+    for key in sorted(str(item) for item in result):
+        value = result[key]
+        if key in PAYLOAD_KEYS:
+            parts.append(f"{key}=<{_payload_size(value)}>")
+        elif isinstance(value, (dict, list, tuple)):
+            parts.append(f"{key}=<{len(value)} items>")
+        else:
+            parts.append(f"{key}={redact_value(value)}")
+    return " ".join(parts)
+
+
+def _payload_size(value: object) -> str:
+    if isinstance(value, str):
+        return f"{len(value)} chars"
+    if isinstance(value, (list, tuple, dict)):
+        return f"{len(value)} items"
+    return type(value).__name__

@@ -5,6 +5,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QMimeDatabase>
@@ -72,11 +73,44 @@ SmtpMailer::SmtpMailer(const QString &senderEmail, const QString &senderPassword
 bool SmtpMailer::waitForCode(QSslSocket *sock, const QString &expectedCode,
                              QString &response, int timeoutMs)
 {
-    while (sock->waitForReadyRead(timeoutMs)) {
-        response += QString::fromLatin1(sock->readAll());
-        if (response.contains('\n')) break;
+    // A reply may span several lines (RFC 5321 §4.2.1): every line but the
+    // last is "<code>-<text>", the last one is "<code><SP><text>". Reading
+    // only up to the FIRST newline and testing that line desynchronises the
+    // dialogue — the leftover line is then read as the answer to the NEXT
+    // command, and the command after that fails with a misleading error.
+    //
+    // The reply therefore ends at the first line whose fourth character is
+    // not a hyphen.
+    QByteArray buffer;
+    QElapsedTimer timer;
+    timer.start();
+
+    while (true) {
+        const int remaining = timeoutMs - static_cast<int>(timer.elapsed());
+        if (remaining <= 0) break;
+        if (!sock->waitForReadyRead(remaining)) {
+            buffer += sock->readAll();
+            break;
+        }
+        buffer += sock->readAll();
+
+        const QList<QByteArray> lines = buffer.split('\n');
+        // The last element is the incomplete remainder (no newline yet): it
+        // cannot be the final line of the reply.
+        for (int i = 0; i < lines.size() - 1; ++i) {
+            const QByteArray line = lines.at(i).trimmed();
+            if (line.size() < 3) continue;
+            if (line.size() > 3 && line.at(3) == '-') continue; // continuation
+            response = QString::fromLatin1(buffer);
+            const bool ok = line.startsWith(expectedCode.toLatin1());
+            if (!ok)
+                qWarning() << "[SMTP] Expected" << expectedCode << "got:" << response.trimmed();
+            return ok;
+        }
     }
-    const bool ok = response.startsWith(expectedCode);
+
+    response = QString::fromLatin1(buffer);
+    const bool ok = response.trimmed().startsWith(expectedCode);
     if (!ok) qWarning() << "[SMTP] Expected" << expectedCode << "got:" << response.trimmed();
     return ok;
 }
@@ -98,23 +132,8 @@ bool SmtpMailer::sendMail(const QString &from, const QString &to,
                     "3D-Reconstruction App", errorMsg);
 }
 
-bool SmtpMailer::sendMail(const QString &from,
-                          const QStringList &to,
-                          const QStringList &cc,
-                          const QStringList &bcc,
-                          const QString &subject,
-                          const QString &htmlBody,
-                          const QStringList &attachmentPaths,
-                          const QString &displayName,
-                          QString &errorMsg)
+bool SmtpMailer::connectAndAuthenticate(QSslSocket &sock, QString &errorMsg)
 {
-    mail::enforceBackgroundThread("SmtpMailer::sendMail");
-
-    if (from.trimmed().isEmpty() || to.isEmpty()) {
-        errorMsg = "Missing sender or recipient.";
-        return false;
-    }
-
     if (!QSslSocket::supportsSsl()) {
         errorMsg = QString("TLS is not available. SSL library build: %1, runtime: %2. "
                            "Please ensure OpenSSL DLLs (libssl, libcrypto) are in the "
@@ -124,10 +143,10 @@ bool SmtpMailer::sendMail(const QString &from,
         return false;
     }
 
-    QSslSocket sock;
     // Verify server certificates against system CAs — never downgrade to
     // VerifyNone: credentials leave the machine otherwise.
     sock.setPeerVerifyMode(QSslSocket::VerifyPeer);
+
     QString response;
 
     // Connect by hostname so SNI and certificate hostname verification both
@@ -173,6 +192,62 @@ bool SmtpMailer::sendMail(const QString &from,
         errorMsg = "SMTP authentication failed. Check the account password or app password.";
         return false;
     }
+    return true;
+}
+
+bool SmtpMailer::testConnection(QString &errorMsg)
+{
+    mail::enforceBackgroundThread("SmtpMailer::testConnection");
+
+    if (m_username.trimmed().isEmpty() || m_password.isEmpty()) {
+        errorMsg = "Mail account is not configured.";
+        return false;
+    }
+
+    QSslSocket sock;
+    if (!connectAndAuthenticate(sock, errorMsg)) return false;
+
+    QString response;
+    sendCmd(&sock, "QUIT", "221", response);
+    sock.disconnectFromHost();
+    return true;
+}
+
+bool SmtpMailer::sendMail(const QString &from,
+                          const QStringList &to,
+                          const QStringList &cc,
+                          const QStringList &bcc,
+                          const QString &subject,
+                          const QString &htmlBody,
+                          const QStringList &attachmentPaths,
+                          const QString &displayName,
+                          QString &errorMsg)
+{
+    mail::enforceBackgroundThread("SmtpMailer::sendMail");
+
+    // The recipient list must contain at least one *usable* address.  The
+    // single-recipient overload wraps its argument into a list, so checking
+    // the list size was not enough: an empty recipient slipped through and
+    // the message was handed to the server without any RCPT TO.
+    bool hasRecipient = false;
+    for (const QString &recipient : to + cc + bcc) {
+        if (!sanitizeHeader(recipient).isEmpty()) {
+            hasRecipient = true;
+            break;
+        }
+    }
+
+    if (from.trimmed().isEmpty() || !hasRecipient) {
+        errorMsg = "Missing sender or recipient.";
+        return false;
+    }
+
+    QSslSocket sock;
+    QString response;
+
+    // The handshake is the same one testConnection() runs: one copy, so the
+    // probe can never disagree with what sending actually does.
+    if (!connectAndAuthenticate(sock, errorMsg)) return false;
 
     const QString cleanFrom = sanitizeHeader(from);
     if (!sendCmd(&sock, "MAIL FROM:<" + cleanFrom + ">", "250", response)) {

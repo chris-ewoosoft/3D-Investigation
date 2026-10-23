@@ -19,24 +19,60 @@ this module is the *comparing* half.
 from __future__ import annotations
 
 import logging
-import math
-import numbers
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 from . import manifest as manifest_mod
 from .config import ModelSpec, TrainConfig
 from .dataset import dataset_content_fingerprint
 from .errors import QualityGateError
 from .fsio import sha256_file
+from .metrics import coerce_metric
 
 LOG = logging.getLogger("cvtrain.gate")
 
 __all__ = [
+    "DatasetSnapshot",
+    "InputSnapshot",
     "already_current",
     "dataset_content_digest",
     "dataset_digest",
     "enforce_quality_gate",
+    "snapshot_dataset",
+    "snapshot_inputs",
     "weights_digest",
 ]
+
+
+@dataclass(frozen=True)
+class DatasetSnapshot:
+    """What the dataset looked like when a run started training.
+
+    ``definition_sha256`` is the digest of ``data.yaml`` itself (cheap, O(1)),
+    ``content_sha256`` the fingerprint of everything the YAML references
+    (O(dataset bytes)). Both are optional because the file can be absent or
+    unreadable; ``None`` means "cannot prove", never "matches".
+    """
+
+    definition_sha256: str | None
+    content_sha256: str | None
+
+
+@dataclass(frozen=True)
+class InputSnapshot:
+    """The inputs one model was trained from, captured *before* training ran.
+
+    Recording after training would describe whatever the filesystem looked like
+    when the export finished: a dataset or checkpoint edited mid-run would be
+    misattributed to the artifact, and ``already_current`` would then trust the
+    wrong inputs. The trainer captures this immediately before ``backend.train``
+    and hands it to the manifest recorder.
+    """
+
+    source_weights_sha256: str | None
+    dataset_sha256: str | None
+    dataset_content_sha256: str | None
 
 
 def _usable_metrics(metrics: object) -> dict[str, float]:
@@ -55,13 +91,8 @@ def _usable_metrics(metrics: object) -> dict[str, float]:
         return {}
     usable: dict[str, float] = {}
     for name, value in metrics.items():
-        # ``bool`` subclasses ``int``, so it *is* a ``numbers.Real`` — but JSON
-        # ``true`` is a flag, not a measurement, and accepting it would let a
-        # hand-edited manifest clear any threshold with ``true``.
-        if isinstance(value, bool) or not isinstance(value, numbers.Real):
-            continue
-        number = float(value)
-        if math.isfinite(number):
+        number = coerce_metric(value)
+        if number is not None:
             usable[str(name)] = number
     return usable
 
@@ -90,15 +121,15 @@ def dataset_digest(cfg: TrainConfig) -> str | None:
 
     Deliberately the *definition*, not the images: this stays O(1) so a
     re-run can cheaply prove the YAML it used. The bytes live in
-    :func:`dataset_content_digest`, which :func:`already_current` also
-    compares whenever the recorded entry carries that digest.
+    :func:`dataset_content_digest`, which :func:`already_current` now requires
+    in addition — an entry without it is retrained, never assumed current.
     """
 
     path = cfg.data_yaml
     return sha256_file(path) if path.exists() else None
 
 
-def dataset_content_digest(cfg: TrainConfig) -> str | None:
+def dataset_content_digest(cfg: TrainConfig, on_file: Callable[[int, int], None] | None = None) -> str | None:
     """Digest of the dataset contents (paths and file bytes), if data.yaml exists.
 
     Complements :func:`dataset_digest` by hashing the actual files under
@@ -106,12 +137,66 @@ def dataset_content_digest(cfg: TrainConfig) -> str | None:
     sizes — an image replaced with different pixels under the same name and
     size is still a different dataset, which is exactly what
     ``--skip-unchanged`` must not miss.
+
+    ``on_file`` is forwarded to the fingerprint so a caller can report
+    progress while the dataset is read.
     """
 
-    return dataset_content_fingerprint(cfg.data_yaml)
+    return dataset_content_fingerprint(cfg.data_yaml, on_file=on_file)
 
 
-def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Manifest, backend_version: str) -> bool:
+def snapshot_dataset(cfg: TrainConfig, on_file: Callable[[int, int], None] | None = None) -> DatasetSnapshot:
+    """Capture the dataset's definition and content digests once per run.
+
+    Computing the content fingerprint once (instead of once per model and again
+    when recording provenance) keeps a multi-model run O(dataset) rather than
+    O(models x dataset), and the single snapshot is what both the skip rule and
+    the manifest recorder compare against.
+    """
+
+    return DatasetSnapshot(
+        definition_sha256=dataset_digest(cfg),
+        content_sha256=dataset_content_digest(cfg, on_file=on_file),
+    )
+
+
+def snapshot_inputs(
+    spec: ModelSpec,
+    cfg: TrainConfig,
+    *,
+    dataset: DatasetSnapshot | None = None,
+    source_weights: Path | None = None,
+) -> InputSnapshot:
+    """Capture everything ``spec`` is about to be trained from.
+
+    Called immediately before ``backend.train``. ``dataset`` lets a caller
+    reuse the run-wide :func:`snapshot_dataset` result; when omitted (direct
+    calls, tests) the dataset is looked at here, so the function is never able
+    to return a snapshot that disagrees with its own observation.
+
+    ``source_weights`` is the file the backend's plan says training will start
+    from. A resumed run starts from the interrupted run's ``last.pt``, not from
+    the base checkpoint the spec names, so hashing ``spec`` would record a
+    digest that never entered the model.
+    """
+
+    ds = dataset if dataset is not None else snapshot_dataset(cfg)
+    source = source_weights if source_weights is not None else cfg.weights_path(spec)
+    return InputSnapshot(
+        source_weights_sha256=sha256_file(source) if source.exists() else None,
+        dataset_sha256=ds.definition_sha256,
+        dataset_content_sha256=ds.content_sha256,
+    )
+
+
+def already_current(
+    spec: ModelSpec,
+    cfg: TrainConfig,
+    manifest: manifest_mod.Manifest,
+    backend_version: str,
+    *,
+    dataset: DatasetSnapshot | None = None,
+) -> bool:
     """Whether the published ONNX already *is* the artifact this run would build.
 
     The rule is deliberately strict, because "skip" must never hide work the
@@ -119,24 +204,47 @@ def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Ma
 
     * the artifact exists at the path the Qt app loads;
     * every recorded hyper-parameter matches this invocation — ``epochs``,
-      ``imgsz``, ``seed``, ``opset``, ``batch`` and ``workers``, plus the
-      dataset. Omitting ``batch``/``workers`` would let a differently-trained
-      run hide behind an identical file name;
+      ``imgsz``, ``seed``, ``opset``, ``batch`` and ``workers``. Omitting
+      ``batch``/``workers`` would let a differently-trained run hide behind an
+      identical file name;
     * the dataset *definition* still hashes the same (``dataset_sha256``) and
       the ``device`` class matches — a re-pointed dataset or a CPU-vs-GPU run
-      is a different artifact behind the same parameters;
+      is a different artifact behind the same parameters. The dataset is
+      compared by its **digests, not by its path**: the path is recorded as
+      provenance, but a copy of the same dataset at another absolute path is
+      the same experiment, and a verdict that depended on where the data
+      happens to live would not survive a checkout on another machine;
+    * the **resolved** device matches too (``device_resolved``). The requested
+      device says what was asked for; the resolved one says what ran. Without
+      the second, a GPU-trained artifact would pass for a CPU run whenever
+      both were requested as ``auto``. Both sides must be known: an
+      unresolved configuration is retrained too, because it cannot know what
+      it would build;
+    * the dataset *content* still hashes the same
+      (``dataset_content_sha256``). An entry without that digest is not
+      comparable at all: "we did not record it" means "not vouchable", so the
+      model is retrained rather than skipped on the strength of the cheaper
+      definition digest alone;
     * the backend that produced it is the backend that would produce it now —
       a framework upgrade changes the export, so it invalidates the claim;
     * its digest matches what the manifest recorded for it (a tampered or
       half-replaced file is retrained, not trusted);
     * the base checkpoint on disk still has the digest that was recorded when
       the artifact was trained. Different starting weights are a different
-      model, even with every other parameter identical.
+      model, even with every other parameter identical;
+    * the artifact was not produced by ``--resume``. A resumed run started
+      from another run's checkpoint and ignored this invocation's arguments,
+      so a fresh run would not reproduce it even when every recorded value
+      happens to agree.
 
     An entry adopted from disk (``--write-manifest``) has no hyper-parameters,
     so it never satisfies the second condition and is retrained: provenance we
     do not have cannot be assumed to match. An entry written before a factor
     was recorded fails the same way, for the same reason.
+
+    ``dataset`` reuses a run-wide :func:`snapshot_dataset` result — a
+    multi-model run then hashes the data once instead of once per model. When
+    omitted, this call reads the dataset itself.
 
     The checks run cheapest-first — the two digests (the published artifact and
     a checkpoint that can be hundreds of megabytes) are only computed once
@@ -149,6 +257,13 @@ def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Ma
     entry = (manifest.get("entries") or {}).get(spec.output)
     if entry is None:
         return False
+    # An artifact produced by a *resumed* run did not start from the base
+    # checkpoint and did not follow this invocation's argument set: the
+    # framework restored the interrupted run's experiment. Even if every
+    # recorded value happens to agree, a non-resume run would not reproduce it,
+    # so the artifact is not "what this invocation would build".
+    if entry.get("resume_from"):
+        return False
     recorded = (
         entry.get("epochs"),
         entry.get("imgsz"),
@@ -156,7 +271,6 @@ def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Ma
         entry.get("opset"),
         entry.get("batch"),
         entry.get("workers"),
-        entry.get("dataset"),
         entry.get("backend_version"),
         entry.get("device"),
     )
@@ -167,20 +281,44 @@ def already_current(spec: ModelSpec, cfg: TrainConfig, manifest: manifest_mod.Ma
         cfg.opset,
         cfg.batch,
         cfg.workers,
-        str(cfg.data_yaml),
         backend_version,
         cfg.device_class,
     )
     if recorded != requested:
         return False
-    recorded_dataset = dataset_digest(cfg)
+    # The requested device is a *request* ("auto" means "let the framework
+    # choose"); the resolved one is the fact. An artifact trained on ``cuda:0``
+    # is not what a CPU run would build, and the request alone cannot tell the
+    # two apart — so the resolved device is compared too. An entry that never
+    # recorded one is unprovable about its device and is retrained.
+    #
+    # *Both* sides fail closed. A configuration that was never resolved cannot
+    # know what this run would train on, so it cannot claim the published
+    # artifact is the same one: "cannot prove" is retrained, exactly like
+    # every other unknown in this function. Comparing only the request would
+    # let two entries that agree on "auto" and disagree on the machine pass
+    # for each other. (The orchestrator always resolves before it asks —
+    # ``trainer._execute`` — so this guard protects the *next* caller rather
+    # than the current path.)
+    if cfg.device_resolved is None:
+        return False
+    if entry.get("device_resolved") != cfg.device_resolved:
+        return False
+    # The dataset *path* is recorded as provenance but deliberately **not**
+    # compared: a path is not a fact about the data, it is a fact about one
+    # machine. What proves "the same dataset" is the digest of ``data.yaml``
+    # plus the fingerprint of every file it reaches — checked below. Comparing
+    # the path as well would make the verdict machine-bound: the very same
+    # dataset, copied to another directory (or checked out at another absolute
+    # path), would be retrained for a difference that cannot change the
+    # artifact.
+    recorded_dataset = dataset.definition_sha256 if dataset is not None else dataset_digest(cfg)
     if recorded_dataset is None or entry.get("dataset_sha256") != recorded_dataset:
         return False
     entry_content = entry.get("dataset_content_sha256")
-    if entry_content is not None:
-        recorded_content = dataset_content_digest(cfg)
-        if recorded_content is None or entry_content != recorded_content:
-            return False
+    recorded_content = dataset.content_sha256 if dataset is not None else dataset_content_digest(cfg)
+    if not isinstance(entry_content, str) or not entry_content or entry_content != recorded_content:
+        return False
     if entry.get("sha256") != sha256_file(target):
         return False
     weights_sha = weights_digest(spec, cfg)

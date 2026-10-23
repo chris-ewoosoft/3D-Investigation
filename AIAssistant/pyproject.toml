@@ -57,8 +57,8 @@ source = ["ai_assistant"]
 exclude_also = [
     "if __name__ == .__main__.:",
 ]
-# Measured, not aspirational (ADR 0015): 100.00% of 8359 statements and 2186
-# branches on 2026-10-16 with the full suite (1791 tests) on Python 3.11 with
+# Measured, not aspirational (ADR 0015): 100.00% of 9642 statements and 2600
+# branches on 2026-10-23 with the full suite (2209 tests) on Python 3.11 with
 # ``faiss``/``sentence-transformers`` installed. The number is recorded in
 # README.md (section ``## Kiểm thử``) together with the excluded entry
 # points; a stripped-down environment (no optional RAG stack) reports less
@@ -71,7 +71,7 @@ show_missing = true
 python_version = "3.11"
 ignore_missing_imports = true
 # Full strictness (ADR 0022): ``python -m mypy src/ai_assistant --strict``
-# reports 0 issues over all 135 files, so the config holds the whole tree to
+# reports 0 issues over all 140 files, so the config holds the whole tree to
 # it — no gradual overrides left. Third-party packages without stubs are
 # imported as Any (ignore_missing_imports). ``warn_unused_ignores`` ships with
 # strict, so a stale ``# type: ignore`` cannot outlive the code it excuses;
@@ -84,7 +84,7 @@ strict = true
 # minimal CI test env (requirements-test.txt): a missing or unstubbed import
 # degrades to Any there, tripping warn_return_any / disallow_subclassing_any
 # while the same code is precisely typed locally. Every other strict flag
-# holds for them, and full strict holds for the other 132 files — CI's mypy
+# holds for them, and full strict holds for the other 137 files — CI's mypy
 # step reports exactly these three errors without this override, nothing else.
 [[tool.mypy.overrides]]
 module = [
@@ -121,7 +121,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Application depends inward only (domain, ports, plugins)"
+name = "Application depends inward only (domain and ports)"
 type = "forbidden"
 source_modules = ["ai_assistant.application"]
 forbidden_modules = [
@@ -129,6 +129,12 @@ forbidden_modules = [
     "ai_assistant.config", "ai_assistant.legacy", "ai_assistant.llm",
     "ai_assistant.observability", "ai_assistant.orchestration", "ai_assistant.rag",
     "ai_assistant.tools",
+    # ADR 0032: the tool catalogue is the ``ToolCatalog`` *port*. The
+    # application layer used to depend on the concrete
+    # ``plugins.registry.PluginRegistry`` — a peer layer's class — so the
+    # policy chokepoint was bound to the plugin implementation instead of to
+    # a contract. The port makes the catalogue replaceable.
+    "ai_assistant.plugins",
     "fastapi", "langgraph", "langchain", "pydantic", "mcp", "httpx", "uvicorn",
 ]
 
@@ -194,3 +200,15 @@ forbidden_modules = ["ai_assistant.adapters"]
 # composition root. AST twin: test_orchestration_does_not_import_any_adapter.
 # The narrower adapters.http guard above is subsumed here and kept for its
 # sharper error message.
+
+[[tool.importlinter.contracts]]
+name = "The RAG layer never imports an adapter (the at-rest cipher is injected)"
+type = "forbidden"
+source_modules = ["ai_assistant.rag"]
+forbidden_modules = ["ai_assistant.adapters"]
+# ADR 0028: the RAG cache is sealed with the same AES-256-GCM cipher as the
+# task store, and the RAG layer reaches it through the FieldCipher *port* in
+# ai_assistant.ports — the composition root injects the implementation. An
+# import of ai_assistant.adapters here would tie the RAG layer to the
+# persistence adapter and undo that inversion. AST twin:
+# test_the_rag_layer_imports_no_adapter.

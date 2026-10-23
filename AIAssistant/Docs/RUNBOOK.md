@@ -11,10 +11,10 @@ giữ nguyên hành vi cũ.
 | Biến | Giá trị production | Vì sao |
 |------|--------------------|--------|
 | `AGENT_SANDBOX_RUNTIME` | `docker` + `AGENT_SANDBOX_IMAGE=<image đã duyệt>` | OS boundary cho tool execution |
-| `AGENT_SANDBOX_REQUIRE_ISOLATION` | `1` | Từ chối chạy nếu container runtime không bật (fail closed) |
+| `AGENT_SANDBOX_REQUIRE_ISOLATION` | `1` (mặc định) | Từ chối chạy nếu container runtime không bật (fail closed) |
 | `AGENT_CHECKPOINT_BACKEND` | `sqlite` hoặc `postgres` (+ `AGENT_CHECKPOINT_URL`) | Durable resume sau restart |
 | `AGENT_CHECKPOINT_REQUIRED` | `1` | Từ chối rơi về memory im lặng |
-| `AGENT_MAX_CONCURRENT_RUNS` | `2`–`8` tuỳ RAM/GPU | Trần burst nhiều session, hết slot trả 503 |
+| `AGENT_MAX_CONCURRENT_RUNS` | `2`–`8` tuỳ RAM/GPU | Trần burst nhiều session cho **mọi** entry point chạy graph (execute, approve, desktop-ack), hết slot trả 503 |
 | `AGENT_RATE_LIMIT_PER_MINUTE` | `60`–`300` tuỳ client | Chặn vòng lặp client lỗi, trả 429 + `Retry-After` |
 | `AGENT_OBSERVABILITY` | `1` (+ `AGENT_OTLP_ENDPOINT` nếu có collector) | Bật counter/histogram cho cảnh báo bên dưới |
 
@@ -27,6 +27,102 @@ python AIAssistant/scripts/generate_sbom.py --output sbom.json
 
 Log khởi động **không được** có `Checkpoint backend unavailable` hay
 `Using MemorySaver`; có nghĩa là cổng chưa ăn.
+
+## 1.1 Dữ liệu lưu cục bộ (threat model hiện tại)
+
+`tasks.sqlite` (message/result/metadata/event log) và
+`pending_agent_actions.json` (đối số tool, bước suy luận, ngữ cảnh chờ duyệt)
+được mã hoá **at-rest theo field** bằng AES-256-GCM (ADR 0027): envelope
+`enc:v1:<base64(nonce||ciphertext)>`. Từ ADR 0037, associated data mang **id
+của dòng** (`task.v2:<id>:<field>`, `event.v2:<id>:data`) nên một giá trị bị
+chép sang dòng khác **không mở được**; và mỗi dòng mang thêm một **identity
+bundle đã seal** (`owner`, `classification`, `status`, `context_id`, `origin`)
+để các cột quyết định *ai được đọc dòng này* không còn là plaintext có thể
+sửa ngoài nền tảng — store đối chiếu và **từ chối dòng** nếu lệch.
+
+Một state đã seal bằng định dạng cũ (chỉ ràng buộc theo tên cột) được store
+**từ chối mở**; người vận hành chạy một lần:
+
+```powershell
+python AIAssistant/scripts/migrate_state_row_binding.py --verify   # xem trạng thái
+python AIAssistant/scripts/migrate_state_row_binding.py             # re-bind một lần
+```
+
+Cột chỉ mô tả (`id`, `status`, `owner`, `context_id`, `classification`,
+`origin`, timestamp) vẫn plaintext để SQL filter/retention/tenant còn chạy
+trên chỉ mục thật — nhưng chúng **không còn là nguồn sự thật**: identity
+bundle đã seal mới là, và store kiểm tra mỗi lần đọc.
+
+`Cache/` cũng đã được niêm phong (ADR 0028) — **cùng một key**: `chunks.pkl`
+(nội dung tài liệu + ảnh base64), `bm25.pkl` và `faiss_index.bin` được seal
+bằng AES-256-GCM, nên **bản sao volume dữ liệu không mang theo corpus tài
+liệu ở dạng đọc được**. Tên file giữ nguyên để không đổi đường dẫn, nhưng
+**nội dung không còn là pickle** — đừng mở bằng công cụ khác. Cache không
+xác thực được (sai key, bị sửa, hoặc cache của version cũ) sẽ bị **dựng
+lại**; cache là artifact dẫn xuất nên cái giá chỉ là thời gian.
+
+**Key** lấy theo thứ tự, và mọi nhánh đều **fail closed** (server không khởi
+động được nếu key hỏng — đó là chủ ý, vì một key sinh lại sẽ làm mọi state cũ
+không đọc được):
+
+| Nguồn | Dùng khi | Ghi chú |
+|-------|----------|---------|
+| `AI_STORAGE_KEY` | production có secret store | `base64:<url-safe>` / `hex:<digits>` / base64 trần; phải giải ra đúng 32 byte |
+| `AI_STORAGE_KEY_FILE` | production mount secret file | File thiếu/không đọc được → **abort lúc khởi động**, không sinh key thay thế |
+| tự sinh một lần | desktop single-user | `%LOCALAPPDATA%\3d-reconstruction\ai_assistant.key` (Windows) hoặc `$XDG_CONFIG_HOME/3d-reconstruction/ai_assistant.key` (POSIX), 0600 — **ngoài** `APP_DATA_DIR` nên backup volume không tự mang theo key |
+
+Vì vậy, trước khi coi deployment là production:
+
+- **backup key cùng quy trình backup volume** — mất key là mất state, và
+  chính sách đó là *fail closed* chứ không phải *cache miss*;
+- đặt `APP_DATA_DIR` trên volume được mã hoá toàn đĩa (BitLocker/LUKS) và chỉ
+  cấp quyền cho account chạy service — mã hoá field-level **không** thay thế
+  mã hoá ở tầng volume, nó chỉ phủ các field nêu trên;
+- không mount chung volume dữ liệu giữa nhiều tenant hoặc giữa host/container
+  không cùng trust boundary;
+- mã hoá backup của volume; coi bản backup là dữ liệu RESTRICTED;
+- không đưa `tasks.sqlite`/`pending_agent_actions.json` vào log, ticket hay artifact
+  CI.
+
+Cơ chế này chống được sao chép volume, đọc backup và account khác trên cùng
+máy; **không** chống được attacker đã chạy được code dưới user đó (họ đọc
+được file key). Cùng giới hạn đã nêu cho HMAC cache RAG. Xoay key (re-key) và
+gọi KMS/DPAPI trực tiếp chưa có trong repo: xem
+[`Docs/adr/0027-at-rest-encryption-local-state.md`](adr/0027-at-rest-encryption-local-state.md).
+
+### 1.2 Xoay khoá at-rest (ADR 0030)
+
+Khoá hiện tại **xoay được** — trước đây đổi khoá là mất toàn bộ state.
+`scripts/rekey_storage.py` làm ba việc, theo đúng thứ tự:
+
+```powershell
+# 1. Kiểm tra khoá đang cầm có phải khoá state được seal không (read-only).
+python AIAssistant/scripts/rekey_storage.py --verify
+
+# 2. Xem trước sẽ xoay bao nhiêu dòng (không ghi gì).
+python AIAssistant/scripts/rekey_storage.py --old-key <khoá-cũ> --new-key <khoá-mới> --dry-run
+
+# 3. Xoay. Task store được mã hoá lại trong MỘT transaction; payload pending
+#    được ghi lại nguyên tử; cache RAG bị XOÁ (nó là artifact dẫn xuất, dựng
+#    lại được).
+python AIAssistant/scripts/rekey_storage.py --old-key <khoá-cũ> --new-key <khoá-mới>
+```
+
+Sau đó **cài khoá mới** vào `AI_STORAGE_KEY` (hoặc `AI_STORAGE_KEY_FILE`) rồi
+khởi động lại. Cho tới lúc đó app **fail closed** bằng `StorageKeyError` — đó
+là chủ ý: khoá cũ không mở được state nữa, và im lặng chấp nhận state không
+đọc được là tệ hơn dừng hẳn.
+
+Quy tắc vận hành:
+
+- **Luôn chạy `--verify` trước.** Nếu khoá không mở được state, đừng xoay —
+  bạn đang cầm nhầm khoá.
+- **Sao lưu volume trước khi xoay.** Công cụ báo trước số dòng sẽ bị
+  mã hoá lại; nếu có sự cố, trả lại bản sao lưu.
+- **Xoay là hành động của người vận hành**, không tự động: đổi khoá mà
+  quên cài khoá mới là mất state.
+- Cache RAG bị xoá có chủ ý — lần khởi động kế tiếp sẽ dựng lại, tốn thời
+  gian chứ không mất dữ liệu.
 
 ## 2. SLO tối thiểu (khởi điểm, chỉnh theo tải thật)
 
@@ -98,8 +194,17 @@ log (đường dẫn/DSN/package thiếu). Cả hai trường hợp là fail clo
 
 ### 4.4 Sandbox isolation
 
+- Cổng `AGENT_SANDBOX_REQUIRE_ISOLATION` **mặc định là `1`**: một deployment
+  không cấu hình gì vẫn chạy tool trong container. Local runtime (không
+  container) là đường *không có OS boundary* — allow-list chỉ lọc lệnh, còn
+  `cmake -P`/`ctest`/`pytest` vốn dĩ thực thi code — nên nó phải là một quyết
+  định được viết ra, không phải một mặc định.
 - Bật `AGENT_SANDBOX_RUNTIME=docker` + image đã duyệt trước khi bật
   `AGENT_SANDBOX_REQUIRE_ISOLATION=1`.
+- Desktop một người dùng (loopback) không có Docker: khai báo rõ
+  `AGENT_SANDBOX_REQUIRE_ISOLATION=0` trong `AIAssistant/.env` (file này được
+  `load_local_dotenv(PACKAGE_ROOT)` nạp khi compose) hoặc trong environment
+  của tiến trình Qt.
 - Docker argv đã cố định `--network none`, `--cap-drop ALL`,
   `--security-opt no-new-privileges`; thêm cờ nới quyền là thay đổi bảo mật —
   cần review riêng.
@@ -146,7 +251,7 @@ hai release là cách kiểm tra dependency trôi.
 ### 4.7 Eval & regression
 
 - CI (`agent-evals.yml`) chạy tool eval (16 case, gồm adversarial),
-  agentic eval (25 scenario/114 case, gồm gateway policy) và model-in-loop
+  agentic eval (25 scenario/124 case, gồm gateway policy) và model-in-loop
   (7 case vi/en, gate coverage 0.9 / accuracy 0.5, model pin theo revision).
   Fallback 3B đã pin đo cục bộ: 6/7 kind đúng, coverage 7/7, p95 ~3.9s.
 - Muốn so theo thời gian: tải artifact `model-in-loop-report`, dùng `--baseline`

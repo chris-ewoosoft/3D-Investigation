@@ -36,12 +36,11 @@ def _rebuild_rag_index(
     if not _rag.enabled:
         return {"status": "skipped", "message": "RAG is disabled"}
     try:
-        with rag_module.rag_lock:
-            rag_module.knowledge_index = None
-            rag_module.knowledge_chunks = []
-            rag_module.bm25_index = None
-            rag_module.embed_model_ref = None
-            rag_module._reranker = None
+        # ADR 0032: the module owns the "the RAG state is empty" transition.
+        # This route used to clear five fields itself and leave ``_pipeline``
+        # holding the previous corpus, so ``/health`` could report zero chunks
+        # while retrieval still served the old corpus.
+        rag_module.reset_index_state()
         gc.collect()
         rag_module._release_ml_memory()
         # Delegate to canonical RAG pipeline (ADR 0018); no module reload needed.
@@ -101,10 +100,12 @@ def build_admin_router(
     @router.post("/release-vram")
     def release_vram() -> dict[str, Any]:
         try:
-            with llm_module.llm_lock:
-                old_llm, llm_module.llm = llm_module.llm, None
-                del old_llm
-                gc.collect()
+            with llm_module.model_reload():
+                # ADR 0041: the runtime module is the only owner of the
+                # backend. Asking it to release is what actually drops the
+                # last reference; the route used to clear ``llm_module.llm``
+                # while a module-level global kept the weights alive.
+                llm_module.release()
                 rag_module._release_ml_memory()
             logger.info("VRAM released successfully")
         except Exception as error:
@@ -120,15 +121,13 @@ def build_admin_router(
                 "[MODEL SWITCH] Reload requested — current index=%d (%s)",
                 model_idx, llm_module.active_model_desc,
             )
-            with llm_module.llm_lock:
-                old_llm, llm_module.llm = llm_module.llm, None
-                del old_llm
-                gc.collect()
+            with llm_module.model_reload():
+                llm_module.release()
                 rag_module._release_ml_memory()
-            rebuild_chatbot_agent_fn()
-            llm_module.load_model()
-            if llm_module.is_vision_model:
-                rag_module.release_embedding_for_vision()
+                rebuild_chatbot_agent_fn()
+                llm_module.load_model()
+                if llm_module.is_vision_model:
+                    rag_module.release_embedding_for_vision()
             logger.info(
                 "[MODEL SWITCH] Model reloaded successfully: %s (vision=%s)",
                 llm_module.active_model_desc, llm_module.is_vision_model,

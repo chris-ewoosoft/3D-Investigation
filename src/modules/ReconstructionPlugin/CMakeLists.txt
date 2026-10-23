@@ -9,7 +9,7 @@ add_library(ReconstructionPlugin SHARED
 
 target_include_directories(ReconstructionPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/core
+    ${PROJECT_SOURCE_DIR}/src/include
     ${PROJECT_SOURCE_DIR}/src/utils
 )
 

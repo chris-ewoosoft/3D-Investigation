@@ -178,7 +178,9 @@ class TestAIAssistant : public QObject {
 private slots:
     void constructorCreatesDefaultSession();
     void newChatAndDeleteKeepCurrentInvariant();
+    void renameSessionStopsAutoTitle();
     void sendMessageWaitsForServerReadyThenUsesInjectedPort();
+    void executeAgentTaskRegistersWorkBeforeRepaint();
     void adminEndpointsHonourInjectedPort();
     void httpErrorBecomesAssistantMessage();
     void missingServerScriptEmitsError();
@@ -224,6 +226,59 @@ void TestAIAssistant::newChatAndDeleteKeepCurrentInvariant()
     QVERIFY(!assistant.currentSessionId().isEmpty());
 }
 
+void TestAIAssistant::renameSessionStopsAutoTitle()
+{
+    Fixture f;
+    auto& assistant = *f.assistant;
+    const QString id = assistant.currentSessionId();
+
+    assistant.renameSession(id, QStringLiteral("  My chat  "));
+    QCOMPARE(assistant.getSessions().first().title, QStringLiteral("My chat"));
+    QVERIFY(!assistant.getSessions().first().titleIsDefault);
+
+    // A later prompt must not overwrite the name the user chose.
+    assistant.sendMessage(QStringLiteral("Do not rename me"));
+    QCOMPARE(assistant.getSessions().first().title, QStringLiteral("My chat"));
+
+    // A blank name and an unknown id are no-ops.
+    assistant.renameSession(id, QStringLiteral("   "));
+    assistant.renameSession(QStringLiteral("missing"), QStringLiteral("Other"));
+    QCOMPARE(assistant.getSessions().first().title, QStringLiteral("My chat"));
+}
+
+void TestAIAssistant::executeAgentTaskRegistersWorkBeforeRepaint()
+{
+    Fixture f;
+    auto& assistant = *f.assistant;
+
+    // The UI reads isSessionThinking() inside the historyChanged slot. Work
+    // must therefore be registered BEFORE the signal, or the chat is repainted
+    // as idle and never shows the "AI đang suy nghĩ..." marker.
+    QList<bool> thinkingAtRepaint;
+    connect(&assistant, &IAIAssistantService::historyChanged, this, [&]() {
+        thinkingAtRepaint.append(
+            assistant.isSessionThinking(assistant.currentSessionId()));
+    });
+
+    assistant.executeAgentTask(assistant.currentSessionId(),
+                               QStringLiteral("Explain the project"));
+
+    QVERIFY(!thinkingAtRepaint.isEmpty());
+    QVERIFY2(thinkingAtRepaint.first(),
+             "the first repaint after Send was rendered as idle");
+    QVERIFY(assistant.isThinking());
+
+    // The sidebar title follows the first prompt, not the placeholder.
+    QCOMPARE(assistant.getSessions().first().title,
+             QStringLiteral("Explain the project"));
+    QVERIFY(!assistant.getSessions().first().titleIsDefault);
+
+    assistant.markServerReady();
+    QTRY_COMPARE(f.network.requests.size(), 1);
+    QTRY_VERIFY(!assistant.isThinking());
+    QVERIFY(!thinkingAtRepaint.last());
+}
+
 void TestAIAssistant::sendMessageWaitsForServerReadyThenUsesInjectedPort()
 {
     Fixture f;
@@ -237,6 +292,9 @@ void TestAIAssistant::sendMessageWaitsForServerReadyThenUsesInjectedPort()
     // until the backend reports ready.
     QCOMPARE(assistant.getHistory().size(), 1);
     QCOMPARE(assistant.getSessions().first().title, QStringLiteral("Hello AI"));
+    // The placeholder flag must be cleared, otherwise the sidebar keeps
+    // displaying "New Session <date>" instead of the prompt.
+    QVERIFY(!assistant.getSessions().first().titleIsDefault);
     QVERIFY(assistant.isThinking());
     QCOMPARE(f.network.requests.size(), 0);
 
@@ -256,9 +314,9 @@ void TestAIAssistant::sendMessageWaitsForServerReadyThenUsesInjectedPort()
     QCOMPARE(payload.value("max_tokens").toInt(),
              AppConstants::AIServer::DEFAULT_MAX_TOKENS);
 
-    const QJsonObject reply = assistant.getHistory().last();
-    QCOMPARE(reply.value("role").toString(), QStringLiteral("assistant"));
-    QCOMPARE(reply.value("content").toString(), QStringLiteral("Mock answer"));
+    const ChatMessage reply = assistant.getHistory().last();
+    QCOMPARE(reply.role, ChatRole::Assistant);
+    QCOMPARE(reply.content, QStringLiteral("Mock answer"));
     QVERIFY(!assistant.isThinking());
     QVERIFY(historyChanged.count() >= 2);
 }
@@ -293,11 +351,10 @@ void TestAIAssistant::httpErrorBecomesAssistantMessage()
     assistant.sendMessage(QStringLiteral("Hi"));
     QTRY_COMPARE(assistant.getHistory().size(), 2);
 
-    const QJsonObject last = assistant.getHistory().last();
-    QCOMPARE(last.value("role").toString(), QStringLiteral("assistant"));
+    const ChatMessage last = assistant.getHistory().last();
+    QCOMPARE(last.role, ChatRole::Assistant);
     // FakeLanguageService returns the key plus its %1 placeholder.
-    QCOMPARE(last.value("content").toString(),
-             QStringLiteral("ai.http_error boom"));
+    QCOMPARE(last.content, QStringLiteral("ai.http_error boom"));
     QVERIFY(!assistant.isThinking());
 }
 
@@ -363,7 +420,7 @@ void TestAIAssistant::sessionsPersistAcrossInstances()
     QCOMPARE(second.getSessions().first().id, firstId);
     QVERIFY(second.getSessions().first().titleIsDefault);
     QCOMPARE(second.getSessions().last().messages.size(), 1);
-    QCOMPARE(second.getSessions().last().messages.first().value("content").toString(),
+    QCOMPARE(second.getSessions().last().messages.first().content,
              QStringLiteral("persist me"));
 }
 

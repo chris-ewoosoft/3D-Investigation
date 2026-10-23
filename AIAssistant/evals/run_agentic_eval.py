@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from ai_assistant.application.approvals import InMemoryApprovalGrantStore
 from ai_assistant.application.tools import ToolExecutionService
-from ai_assistant.domain.security import DataClassification, Principal
+from ai_assistant.domain.security import DataClassification, Principal, principal_for
 from ai_assistant.domain.tools import EVIDENCE_FIELDS, SideEffect, ToolSpec
 from ai_assistant.orchestration.supervisor import (
     CODE_TOOLS,
@@ -276,7 +276,7 @@ def _gateway_registry(executed: list[dict[str, Any]]) -> Any:
                 "type": "object", "additionalProperties": False,
                 "properties": {"path": {"type": "string"}}, "required": ["path"],
             },
-            timeout_seconds=5, side_effect=SideEffect.READ, required_scope="read",
+            timeout_seconds=5, side_effect=SideEffect.READ, required_scope="project.read",
             maximum_classification=DataClassification.INTERNAL,
         ),
         read_executor,
@@ -290,7 +290,7 @@ def _gateway_registry(executed: list[dict[str, Any]]) -> Any:
                 "required": ["path", "text"],
             },
             timeout_seconds=5, side_effect=SideEffect.WRITE,
-            requires_approval=True, required_scope="write",
+            requires_approval=True, required_scope="project.write",
         ),
         write_executor,
     )
@@ -305,8 +305,8 @@ def _eval_tool_gateway_policy() -> list[EvalResult]:
     assert the policy outcomes a reviewer can check in the report:
 
     * an unknown (injected) tool name never reaches an executor;
-    * a principal without the scope, or above the tool's classification, is
-      refused before execution;
+    * a principal without the scope, or whose clearance does not cover the
+      tool's data ceiling, is refused before execution;
     * an approval-gated write without a grant is refused;
     * a grant unlocks *exactly* the approved invocation, once — replayed or
       re-pointed at different parameters it is refused;
@@ -316,7 +316,9 @@ def _eval_tool_gateway_policy() -> list[EvalResult]:
     executed: list[dict[str, Any]] = []
     grants = InMemoryApprovalGrantStore()
     service = ToolExecutionService(_gateway_registry(executed), grants=grants)
-    scoped = Principal(subject="eval-user", scopes=frozenset({"read", "write"}))
+    # The clearance follows the granted scopes, exactly as the platform
+    # derives it: the write scope is an elevated one.
+    scoped = principal_for("eval-user", {"project.read", "project.write"})
 
     def case(tool: str, scenario: str, passed: bool, detail: str = "") -> None:
         results.append(EvalResult(
@@ -335,14 +337,16 @@ def _eval_tool_gateway_policy() -> list[EvalResult]:
     case("eval_read", "gateway-scope-allowed", ok,
          "" if ok else f"payload={allowed.payload}")
 
-    # Classification: regulated data against an INTERNAL-ceiling tool is refused.
-    regulated = Principal(
-        subject="eval-user", scopes=frozenset({"read", "write"}),
-        classification=DataClassification.REGULATED,
+    # Clearance: a principal below the tool's data ceiling is refused. The
+    # write tool touches restricted data, so a public-clearance caller is
+    # refused even though it holds the write scope.
+    public = Principal(
+        subject="eval-user", scopes=frozenset({"project.read", "project.write"}),
+        classification=DataClassification.PUBLIC,
     )
-    classified = service.execute("eval_read", {"path": "a.md"}, regulated)
+    classified = service.execute("eval_write", {"path": "out.txt", "text": "x"}, public)
     ok = not classified.success and classified.error_code == "data_policy_denied"
-    case("eval_read", "gateway-classification", ok,
+    case("eval_write", "gateway-classification", ok,
          "" if ok else f"error_code={classified.error_code}")
 
     # An injected tool name is not in the registry: nothing to execute.
@@ -396,7 +400,7 @@ def _eval_tool_gateway_policy() -> list[EvalResult]:
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 def _eval_a2a_agent_cards() -> list[EvalResult]:
-    """Every Specialist has a valid Agent Card skill entry."""
+    """Every remote Specialist has an Agent Card skill entry — and only those."""
     results: list[EvalResult] = []
     if not _a2a_eval_ok:
         results.append(EvalResult(
@@ -417,14 +421,20 @@ def _eval_a2a_agent_cards() -> list[EvalResult]:
         passed=ok_type, specialist="n/a",
         detail="" if ok_type else f"expected AgentCard, got {type(card).__name__}",
     ))
-    # Every specialist should appear as a skill in the card.
+    # Every remote specialist should appear as a skill in the card. PLUGIN is
+    # a local composition role: no remote peer can implement tools this
+    # process loaded, so advertising it would be a dead skill (ADR 0039).
     skill_ids = {skill.id for skill in card.skills}
     for specialist in Specialist:
-        ok = specialist.value in skill_ids
+        expected = specialist is not Specialist.PLUGIN
+        ok = (specialist.value in skill_ids) is expected
+        if expected:
+            detail = "" if ok else "missing from Agent Card skills"
+        else:
+            detail = "" if ok else "the local plugin role must not be advertised over A2A"
         results.append(EvalResult(
             tool=specialist.value, scenario="a2a-card-skill",
-            passed=ok, specialist=specialist.value,
-            detail="" if ok else "missing from Agent Card skills",
+            passed=ok, specialist=specialist.value, detail=detail,
         ))
     return results
 

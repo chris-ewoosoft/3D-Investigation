@@ -1,7 +1,7 @@
 """Cross-language contract test.
 
 The ONNX file names produced here are hard-coded expectations of the Qt app
-(``src/core/AIConstants.h``). This test fails if the two sides ever drift.
+(``src/include/AIConstants.h``). This test fails if the two sides ever drift.
 """
 
 from __future__ import annotations
@@ -11,11 +11,11 @@ import unittest
 from pathlib import Path
 
 from cvtrain import onnx_contract
-from cvtrain.config import MODEL_REGISTRY, TRACKER_INFO
+from cvtrain.config import MODEL_REGISTRY, SUPPORTED_ROLES, TRACKER_INFO
 from cvtrain.preflight import MAX_OPSET
 
 ROOT = Path(__file__).resolve().parents[2]
-HEADER = ROOT / "src" / "core" / "AIConstants.h"
+HEADER = ROOT / "src" / "include" / "AIConstants.h"
 MANIFEST = ROOT / "src" / "core" / "AppManifest.json"
 CMAKE = ROOT / "CMakeLists.txt"
 POST_PROCESSOR = ROOT / "src" / "services" / "ai" / "AIYoloPostProcessor.h"
@@ -55,6 +55,16 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(manifest.get("contract", {}).get("detection_model"), EXPECTED["detectionModelFile"])
         self.assertEqual(manifest.get("contract", {}).get("segmentation_model"), EXPECTED["segmentationModelFile"])
         self.assertEqual(manifest.get("contract", {}).get("tracking_model"), EXPECTED["trackingModelFile"])
+
+
+class RoleContractTests(unittest.TestCase):
+    def test_every_supported_role_has_an_export_contract(self) -> None:
+        # Preflight accepts exactly ``SUPPORTED_ROLES``; if a role is added
+        # there without a contract branch, the mismatch would otherwise appear
+        # only after training, at export time.
+        for role in sorted(SUPPORTED_ROLES):
+            with self.subTest(role=role):
+                onnx_contract.contract_for(role, 1)
 
 
 class ContractSourcePresenceTests(unittest.TestCase):

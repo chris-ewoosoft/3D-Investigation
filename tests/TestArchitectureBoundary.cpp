@@ -1,7 +1,7 @@
 #include <QtTest>
-#include "core/IReconstructionService.h"
+#include "include/IReconstructionService.h"
 #include "core/mock/IReconstructionServiceMock.h"
-#include "core/PointCloudData.h"
+#include "include/PointCloudData.h"
 
 /**
  * @brief Kiến trúc boundary test: plugin có thể mock cả IReconstructionService

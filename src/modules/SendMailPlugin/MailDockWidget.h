@@ -2,6 +2,7 @@
 #define MAIL_DOCK_WIDGET_H
 
 #include "IMailService.h"
+#include "BlockingCall.h"
 
 #include <QList>
 #include <QObject>
@@ -23,6 +24,7 @@ class MailDockWidget : public QObject {
     Q_OBJECT
 public:
     MailDockWidget(IAppContext *ctx, QObject *parent = nullptr);
+    ~MailDockWidget() override;
 
     QDockWidget *dockWidget() const { return m_dock; }
     void showCompose();
@@ -55,6 +57,11 @@ private:
     IAppContext *m_ctx = nullptr;
     IMailService *m_mail = nullptr;
     QDockWidget *m_dock = nullptr;
+
+    /// The background tasks this widget started. The destructor waits for
+    /// them (bounded) before the plugin releases the mail service: a task
+    /// that outlived the service would call into a destroyed object.
+    blocking::TaskTracker m_tasks;
 
     QWidget *m_root = nullptr;
     QListWidget *m_inboxList = nullptr;

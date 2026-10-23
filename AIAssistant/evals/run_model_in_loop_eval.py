@@ -186,12 +186,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _load_backend(args: argparse.Namespace) -> Any | None:
-    """Resolve the backend: an explicit GGUF path, else the loaded singleton."""
-    if args.model_path:
-        from ai_assistant.llm.llama_cpp_backend import LlamaCppBackend
-        return LlamaCppBackend(model_path=args.model_path)
-    from ai_assistant.llm.model_loader import get_backend
-    return get_backend()
+    """Resolve the backend: an explicit GGUF path, else nothing.
+
+    The eval runs as a standalone process, so there is no in-process model to
+    borrow. The module-global backend accessor was removed (ADR 0041: one
+    owner); passing ``--model-path`` is the only way to grade a model.
+    """
+    if not args.model_path:
+        return None
+    from ai_assistant.llm.llama_cpp_backend import LlamaCppBackend
+    return LlamaCppBackend(model_path=args.model_path)
 
 
 def _baseline_failures(result: dict, baseline: dict, tolerance: float) -> list[str]:
@@ -262,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         # Requesting a gate without a model fails instead: CI going green while
         # having graded nothing would be the exact dishonesty this script exists
         # to prevent.
-        print("SKIP: no backend loaded — pass --model-path (or load a model) first.")
+        print("SKIP: no backend loaded — pass --model-path to grade a model.")
         print("model_coverage=0.00 (no backend; 0 of the golden set was model-graded)")
         gated = (args.min_model_coverage is not None or args.min_accuracy is not None
                  or baseline is not None)

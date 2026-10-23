@@ -1,0 +1,140 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# cvtrain CI — the AIComputerVision training/export pipeline
+#
+# ADR 0012 closes three debts with this file:
+#
+#   1. **The gate toolchain is hash-pinned.** ruff / mypy / coverage decide
+#      whether a build is green; an unpinned release can change what a gate
+#      says without anyone reviewing the change. They come from
+#      `AIComputerVision/requirements-test.lock`, installed with
+#      `--require-hashes` — the same rule the AIAssistant side follows
+#      (ADR 0023).
+#   2. **The gates run on the platform the product ships on.** The package
+#      touches Windows-specific filesystem semantics (the `O_EXCL` advisory
+#      lock, the atomic publish, sharing violations), so a Linux-only CI would
+#      report green while the platform the users run was never checked.
+#   3. **The platform-sensitive decisions are mutation-checked on Windows
+#      too** — the advisory lock, the atomic publish and the retention rules
+#      are the ones a POSIX runner cannot vouch for.
+#
+# The path filters list the C++ files the cross-language contract tests read:
+# a rename or a threshold change on the Qt side has to re-run the Python
+# gates, or the contract between the two sides is only checked by whoever
+# remembers to look.
+# ──────────────────────────────────────────────────────────────────────────────
+name: cvtrain CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "AIComputerVision/**"
+      - "CMakeLists.txt"
+      - "src/include/AIConstants.h"
+      - "src/core/AppManifest.json"
+      - "src/services/ai/AIYoloPostProcessor.h"
+      - "src/services/ai/AIProcessor.cpp"
+  pull_request:
+    branches: [main]
+    paths:
+      - "AIComputerVision/**"
+      - "CMakeLists.txt"
+      - "src/include/AIConstants.h"
+      - "src/core/AppManifest.json"
+      - "src/services/ai/AIYoloPostProcessor.h"
+      - "src/services/ai/AIProcessor.cpp"
+  workflow_dispatch:
+
+concurrency:
+  group: cvtrain-ci-${{ github.ref }}
+  # Never cancel a running gate: a half-finished mutation sweep that is
+  # cancelled is a gate nobody read, and cancelling it buys nothing.
+  cancel-in-progress: false
+
+jobs:
+  gates:
+    name: gates (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Finite budget: the suite (443 tests) plus the coverage report, on the
+    # slowest supported runner.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the hash-pinned gate toolchain
+        run: |
+          python -m pip install --upgrade pip
+          # --require-hashes makes pip refuse any artifact whose digest does
+          # not match, so a republished or tampered wheel cannot enter a gate
+          # run (ADR 0023).
+          python -m pip install --require-hashes -r AIComputerVision/requirements-test.lock
+
+      - name: Ruff lint
+        run: python -m ruff check AIComputerVision
+
+      - name: Type check
+        working-directory: AIComputerVision
+        run: python -m mypy
+
+      - name: Syntax check
+        run: python -m compileall -q AIComputerVision/cvtrain AIComputerVision/TrainModel.py AIComputerVision/tests AIComputerVision/scripts
+
+      - name: "Unit tests (coverage gate: 100%)"
+        working-directory: AIComputerVision
+        # ``&&`` on purpose: the exit code of a step is the exit code of its
+        # *last* command (PowerShell, the default shell on windows-latest), so
+        # a failing test run followed by a successful report would be reported
+        # as green.
+        run: python -m coverage run -m unittest discover -s tests -v && python -m coverage report
+
+  mutation:
+    name: mutation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The mutation sweep runs the whole suite once per mutant (80 decisions,
+    # ADR 0007 + ADR 0011), so the budget has to cover the suite multiplied by
+    # the mutant count plus the baseline run. Measured locally: ~25 s per
+    # suite run, so 80 mutants ≈ 35 min. The Windows job sweeps the
+    # platform-sensitive subset only (11 mutants, ~5 min).
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            sweep: "python scripts/mutation_check.py"
+          - os: windows-latest
+            # The advisory lock, the atomic publish and the retention rules
+            # are the decisions whose behaviour depends on the platform; the
+            # rest of the sweep inverts platform-independent logic and runs
+            # once, on Linux. The floor is checked against the whole declared
+            # set either way, so a subset run can never lower it.
+            sweep: "python scripts/mutation_check.py --files cvtrain/fsio.py"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the hash-pinned gate toolchain
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r AIComputerVision/requirements-test.lock
+
+      - name: Mutation sweep
+        working-directory: AIComputerVision
+        run: ${{ matrix.sweep }}

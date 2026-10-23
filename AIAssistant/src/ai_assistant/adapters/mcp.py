@@ -17,8 +17,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
-from ..domain.security import Principal, bind_principal
+from ..domain.security import (
+    DataClassification,
+    Principal,
+    bind_principal,
+    classification_at_least,
+    principal_for,
+)
 from ..ports import ToolGateway
+from ..tools.aliases import canonical_tool_name
 from ..tools.tool_contract import RUNTIME_UNCONFIGURED_RESULT
 
 logger = logging.getLogger("ai_assistant.adapters.mcp")
@@ -61,7 +68,7 @@ _BUILTIN_TOOLS = (
 # that write or execute (``project.write`` / ``project.execute``), including
 # plugin tools declaring those scopes, are refused by the same chokepoint that
 # refuses them for any other least-privilege caller.
-MCP_PRINCIPAL = Principal("mcp-caller", frozenset({"project.read", "desktop.action"}))
+MCP_PRINCIPAL = principal_for("mcp-caller", frozenset({"project.read", "desktop.action"}))
 
 
 class McpToolServer:
@@ -125,8 +132,10 @@ class McpToolServer:
         catalog never get re-registered (the ``MCPServer`` fallback does not
         expose ``get_tool``).
         """
-        return bind_plugin_tools(self._server, self._dispatch, plugins,
-                                 reserved=set(_BUILTIN_TOOLS))
+        return bind_plugin_tools(
+            self._server, self._dispatch, plugins,
+            reserved=set(_BUILTIN_TOOLS), principal=MCP_PRINCIPAL,
+        )
 
     def list_registered_tools(self) -> list[str]:
         """Names of builtin tools this server exposes (for health/debugging)."""
@@ -203,18 +212,46 @@ class McpToolServer:
         })
 
 
+def _visible_to_principal(spec: Any, principal: Principal | None) -> bool:
+    """Whether a catalogue spec belongs on this principal's MCP surface.
+
+    MCP has no HITL approval flow, so an approval-gated tool must not be
+    advertised at all: advertising it and refusing every call is a broken
+    contract, not a safe default.  A tool whose scope exceeds the principal's
+    grant, or whose data ceiling exceeds its clearance, is filtered the same
+    way.  Aliases are never separate MCP tools.
+    """
+    if canonical_tool_name(str(spec.name)) != spec.name:
+        return False
+    if getattr(spec, "requires_approval", False):
+        return False
+    if principal is None:
+        return True
+    if not principal.permits(getattr(spec, "required_scope", None)):
+        return False
+    ceiling = getattr(spec, "maximum_classification", None)
+    return not (
+        isinstance(ceiling, DataClassification)
+        and not classification_at_least(principal.classification, ceiling)
+    )
+
+
 def bind_plugin_tools(
     server: Any,
     dispatch: Callable[[str, dict[str, Any]], str],
     plugins: Any = None,
     *,
     reserved: set[str] | None = None,
+    principal: Principal | None = None,
 ) -> int:
     """Bind dynamic tools from a PluginRegistry through the given dispatch.
 
     ``dispatch`` is the instance-bound gateway dispatcher of the owning server;
     the composition root never reaches into this module for a global gateway.
     ``reserved`` holds names that must never be shadowed (the builtin catalog).
+    ``principal`` filters the binding to what that caller can actually execute
+    (see :func:`_visible_to_principal`); passing it is the MCP server's
+    contract, while direct unit callers may omit it.
     """
     if server is None or plugins is None:
         return 0
@@ -224,6 +261,8 @@ def bind_plugin_tools(
         for spec in plugins.specs():
             tool_name = spec.name
             if tool_name in reserved:
+                continue
+            if not _visible_to_principal(spec, principal):
                 continue
             if hasattr(server, "get_tool") and server.get_tool(tool_name):
                 continue

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import secrets
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -37,8 +38,6 @@ __all__ = [
 def issue_grant_pair(
     tool_name: str,
     parameters: Mapping[str, Any] | None = None,
-    *,
-    run_id: str = "",
 ) -> tuple[str, str]:
     """The two single-use grants one HITL approval authorises (ADR 0010).
 
@@ -49,12 +48,52 @@ def issue_grant_pair(
     LangGraph resume (:class:`~ai_assistant.agents.approval_service`) and the
     durable A2A deterministic loop
     (:class:`~ai_assistant.adapters.orchestration.deterministic`) — mint them
-    here so the token shape, the ``#direct`` suffix, and the approval-id
-    fallback cannot drift between engines.
+    here so the capability-token policy cannot drift between engines.
+
+    Tokens are minted with :mod:`secrets`, not derived from the action id or
+    the invocation fingerprint: a caller that knows either value must still be
+    unable to guess a live grant.
     """
-    fingerprint = approval_fingerprint(tool_name, parameters)
-    run_token = run_id or f"approval-{fingerprint[:16]}"
-    return run_token, f"{run_token}#direct"
+    # The capability is bound to the invocation by the grant store, not by the
+    # token text; keep the fingerprint out of the token itself.
+    return (f"grant-{secrets.token_urlsafe(32)}",
+            f"grant-{secrets.token_urlsafe(32)}")
+
+
+#: Parameters that carry a per-retry identity rather than a per-invocation
+#: one. Two calls that differ *only* in these are the same call.
+VOLATILE_PARAM_KEYS = frozenset({"request_id", "workflow_id"})
+
+
+def invocation_fingerprint(
+    tool_name: str, parameters: Mapping[str, Any] | None = None, *,
+    ignore_volatile: bool = False,
+) -> str:
+    """Canonical digest of ``(tool, params)`` — the identity of an invocation.
+
+    One owner, two rules (ADR 0032):
+
+    * the default is the **binding** identity: every parameter counts. This
+      is what an approval grant is bound to, so a change in any parameter is a
+      change of the thing the user approved.
+    * ``ignore_volatile=True`` is the **retry** identity: two calls that
+      differ only in a per-retry id are the same call.
+
+    The orchestration layer used to own a second canonicalisation of the same
+    concept with a different rule, so the two could drift without anything
+    noticing.
+    """
+    params = dict(parameters or {})
+    if ignore_volatile:
+        params = {key: value for key, value in params.items()
+                  if key not in VOLATILE_PARAM_KEYS}
+    canonical = json.dumps(
+        {"tool": tool_name, "params": params},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def approval_fingerprint(tool_name: str, parameters: Mapping[str, Any] | None = None) -> str:
@@ -64,13 +103,7 @@ def approval_fingerprint(tool_name: str, parameters: Mapping[str, Any] | None = 
     engine always maps to the same fingerprint as the one shown in the
     approval preview.
     """
-    canonical = json.dumps(
-        {"tool": tool_name, "params": dict(parameters or {})},
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return invocation_fingerprint(tool_name, parameters)
 
 
 def approval_covers_invocation(

@@ -1,3 +1,5 @@
+#include "BlockingCall.h"
+#include "IMailService.h"
 #include "ForgotPasswordDialog.h"
 #include "IUserManager.h"
 #include "UserAuthPlugin.h"
@@ -10,7 +12,7 @@
 #include <QTimer>
 #include "../../utils/ModernMessageBox.h"
 #include <QFutureWatcher>
-#include <QtConcurrent>
+#include <QDebug>
 #include <QRegularExpression>
 
 ForgotPasswordDialog::ForgotPasswordDialog(QWidget *parent)
@@ -19,6 +21,17 @@ ForgotPasswordDialog::ForgotPasswordDialog(QWidget *parent)
     setFixedSize(400, 350);
     setupUi();
     applyStyle();
+}
+
+ForgotPasswordDialog::~ForgotPasswordDialog()
+{
+    // The OTP request may still be running: it must not outlive the dialog
+    // (and the service it calls). The wait is bounded.
+    const int unfinished = m_tasks.waitForFinished(3000);
+    if (unfinished > 0) {
+        qWarning() << "ForgotPasswordDialog:" << unfinished
+                   << "background task(s) did not finish within 3 s";
+    }
 }
 
 void ForgotPasswordDialog::setupUi() {
@@ -86,6 +99,7 @@ void ForgotPasswordDialog::setupUi() {
     vl->addWidget(m_stack);
 
     m_statusLabel = new QLabel(content);
+    m_statusLabel->setObjectName("statusLabel");
     m_statusLabel->setWordWrap(true);
     m_statusLabel->setVisible(false);
     vl->addWidget(m_statusLabel);
@@ -141,11 +155,16 @@ void ForgotPasswordDialog::onSendOtp() {
             setError(result.second);
         }
     });
-    watcher->setFuture(QtConcurrent::run([email]() {
+    // The user manager is captured, not looked up on the worker thread: the
+    // plugin's static binding is cleared in cleanup(), so a worker that
+    // resolved it late would dereference a null pointer. The captured
+    // pointer refers to the process-lifetime service.
+    IUserManager *users = UserAuthPlugin::users();
+    watcher->setFuture(blocking::run([users, email]() {
         QString error;
-        const bool ok = UserAuthPlugin::users()->sendPasswordResetOtp(email, error);
+        const bool ok = users->sendPasswordResetOtp(email, error);
         return qMakePair(ok, error);
-    }));
+    }, &m_tasks));
 }
 
 void ForgotPasswordDialog::onVerifyOtp() {
@@ -163,13 +182,18 @@ void ForgotPasswordDialog::onResetPassword() {
     QString p2 = m_confirmPassEdit->text();
     if (p1.isEmpty() || p1 != p2) { setError(UserAuthPlugin::translate("changepw.err_mismatch")); return; }
 
-    if (UserAuthPlugin::users()->resetPassword(m_pendingEmail, p1)) {
+    // The core resolves the account from the e-mail and consumes the proof of
+    // ownership recorded by verifyOtp() — the dialog does not decide who may
+    // reset a password.
+    QString error;
+    AuthError code = AuthError::None;
+    if (UserAuthPlugin::users()->resetPassword(m_pendingEmail, p1, error, &code)) {
         m_statusLabel->setText(UserAuthPlugin::translate("changepw.success"));
         m_statusLabel->setStyleSheet("color: #4ade80; background: rgba(74,222,128,0.1);");
         m_statusLabel->setVisible(true);
         m_resetBtn->setEnabled(false);
         QTimer::singleShot(2000, this, &QDialog::accept);
     } else {
-        setError(UserAuthPlugin::translate("forgot.err_reset"));
+        setError(error.isEmpty() ? UserAuthPlugin::translate("forgot.err_reset") : error);
     }
 }

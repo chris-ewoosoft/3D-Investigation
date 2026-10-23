@@ -23,12 +23,14 @@ public:
     void cleanup() override { m_log->append("cleanup:" + m_name); }
     int loadOrder() const override { return order; }
     int apiVersion() const override { return version; }
+    quint64 abiFingerprint() const override { return abi; }
     QStringList dependencies() const override { return deps; }
     QString loadPhase() const override { return phase; }
 
     bool initializeSucceeds = true;
     int order = 100;
     int version = IPlugin::kApiVersion;
+    quint64 abi = IPlugin::kAbiFingerprint;
     QStringList deps;
     QString phase = QStringLiteral("default");
 
@@ -57,6 +59,8 @@ private slots:
     void shutdownCleansUpInReverseInitOrder();
     void missingDirectoryIsReported();
     void apiVersionMismatchIsRejected();
+    void abiFingerprintMismatchIsRejected();
+    void abiFingerprintCarriesTheInterfaceHash();
     void loaderFailureIsReported();
 
 private:
@@ -201,13 +205,17 @@ void TestPluginHost::initializeFailureRollsBackEarlierPlugins()
     QVERIFY(host.resolveOrder());
 
     QVERIFY(!host.initializeAll(nullptr));
-    QCOMPARE(log, QStringList({"init:alpha", "init:beta", "cleanup:alpha"}));
+    // The failing plugin is cleaned up as well: it may already have
+    // installed objects into the shell, and its DLL is released right after
+    // the rollback. The order is LIFO: the failing one first, then the
+    // already initialized ones.
+    QCOMPARE(log, QStringList({"init:alpha", "init:beta", "cleanup:beta", "cleanup:alpha"}));
     QVERIFY(host.isEmpty());
     QVERIFY(host.errors().last().contains(QStringLiteral("failed to initialize")));
 
     // shutdown() after a failed init must not clean anything up again.
     host.shutdown();
-    QCOMPARE(log, QStringList({"init:alpha", "init:beta", "cleanup:alpha"}));
+    QCOMPARE(log, QStringList({"init:alpha", "init:beta", "cleanup:beta", "cleanup:alpha"}));
 }
 
 void TestPluginHost::shutdownCleansUpInReverseInitOrder()
@@ -292,6 +300,47 @@ void TestPluginHost::apiVersionMismatchIsRejected()
     QCOMPARE(host.errors().size(), 1);
     QVERIFY(host.errors().first().contains(QStringLiteral("API version")));
     QVERIFY(log.isEmpty());
+}
+
+void TestPluginHost::abiFingerprintMismatchIsRejected()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QDir pluginsDir(dir.filePath("plugins"));
+    QVERIFY(QDir().mkpath(pluginsDir.path()));
+
+    QStringList log;
+    FakePlugin stale("stale-abi", &log);
+    stale.abi = IPlugin::kAbiFingerprint ^ 0x1ULL; // different toolchain/runtime
+    const QMap<QString, FakePlugin *> byFile{{"StaleAbiPlugin.dll", &stale}};
+    QVERIFY(writeFile(pluginsDir.filePath("StaleAbiPlugin.dll")));
+
+    PluginHost host([&byFile](const QString &path, QString *) -> IPlugin * {
+        return byFile.value(QFileInfo(path).fileName());
+    });
+
+    QCOMPARE(host.discover(pluginsDir.path()), 0);
+    QVERIFY(host.isEmpty());
+    QCOMPARE(host.errors().size(), 1);
+    QVERIFY(host.errors().first().contains(QStringLiteral("ABI fingerprint")));
+    QVERIFY(log.isEmpty());
+}
+
+void TestPluginHost::abiFingerprintCarriesTheInterfaceHash()
+{
+    // The fingerprint the host compares must incorporate the content hash of
+    // the plugin-facing interface surface: that is what makes a plugin built
+    // against different I*.h fail the gate even when nobody bumped
+    // kApiVersion. TestInterfaceAbi guards the other half of the contract
+    // (the hash is derived from the CURRENT headers and reacts to a change).
+    QVERIFY(IPlugin::kInterfaceHash != 0);
+    QCOMPARE(IPlugin::kAbiFingerprint,
+             IPlugin::kToolchainFingerprint
+                 ^ (IPlugin::kInterfaceHash * 0x9E3779B97F4A7C15ULL));
+    // A different interface surface must produce a different fingerprint.
+    QVERIFY((IPlugin::kToolchainFingerprint
+             ^ ((IPlugin::kInterfaceHash ^ 0x1ULL) * 0x9E3779B97F4A7C15ULL))
+            != IPlugin::kAbiFingerprint);
 }
 
 void TestPluginHost::loaderFailureIsReported()

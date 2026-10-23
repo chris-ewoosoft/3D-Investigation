@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from ai_assistant.application.tasks import TaskService
+from ai_assistant.domain.errors import TaskCapacityError
 from ai_assistant.domain.tasks import AgentTask, TaskStatus
 
 
@@ -58,7 +59,9 @@ class CloseTests(unittest.TestCase):
         blocker = threading.Event()
         created: dict = {}
         store = _store()
-        store.create.side_effect = lambda task: created.setdefault(task.id, task)
+        store.commit.side_effect = lambda task, **kwargs: (
+            created.setdefault(task.id, task) or True
+        )
         store.get.side_effect = lambda task_id: created.get(task_id)
         service = TaskService(store, lambda task: blocker.wait(10), frozenset({"chat"}))
         service.submit("chat", "hi")
@@ -77,8 +80,7 @@ class CloseTests(unittest.TestCase):
     def test_close_tolerates_a_store_without_close(self):
         """Duck-typed stores are not required to implement ``close``."""
         store = SimpleNamespace(
-            create=lambda task: None, get=lambda task_id: None,
-            save=lambda task: None, append_event=lambda *a: None,
+            commit=lambda task, **kwargs: True, get=lambda task_id: None,
             list=lambda **k: (), events=lambda task_id: (),
         )
         service = TaskService(store, lambda task: {}, frozenset({"chat"}))
@@ -108,17 +110,18 @@ class RunTests(unittest.TestCase):
         executor = MagicMock()
         TaskService(store, executor, frozenset({"chat"}))._run("task-1")
         executor.assert_not_called()
-        store.save.assert_not_called()
+        store.commit.assert_not_called()
 
     def test_a_vanished_task_after_an_executor_crash_stays_silent(self):
         """The executor raised *and* the task is gone: nothing left to fail."""
         store = _store()
-        # read #1: the worker's entry snapshot, read #2: the compare-and-set
-        # probe for the WORKING write, read #3: the crash handler's reload.
-        store.get.side_effect = [_working_task(), _working_task(), None]
+        # read #1: the worker's entry snapshot, read #2: the crash handler's
+        # reload. ADR 0032 removed the separate read the compare-and-set probe
+        # used to need — the guard is one statement now.
+        store.get.side_effect = [_working_task(), None]
         executor = MagicMock(side_effect=RuntimeError("boom"))
         TaskService(store, executor, frozenset({"chat"}))._run("task-1")
-        store.save.assert_called_once()  # the WORKING transition only
+        store.commit.assert_called_once()  # the WORKING transition only
 
     def test_an_executor_crash_marks_the_task_failed(self):
         store = _store()
@@ -126,50 +129,72 @@ class RunTests(unittest.TestCase):
         store.get.return_value = task
         executor = MagicMock(side_effect=RuntimeError("boom"))
         TaskService(store, executor, frozenset({"chat"}))._run("task-1")
-        saved = store.save.call_args_list[-1].args[0]
-        self.assertEqual(saved.status, TaskStatus.FAILED)
-        self.assertIn("boom", saved.error)
+        committed = store.commit.call_args_list[-1].args[0]
+        self.assertEqual(committed.status, TaskStatus.FAILED)
+        self.assertIn("boom", committed.error)
 
 
 
 # ── Durable worker lifecycle (moved from test_coverage_boost3) ──────────
 
 class _MemStore:
-    """In-memory TaskStore double supporting the TaskService lifecycle."""
+    """In-memory TaskStore double supporting the TaskService lifecycle.
+
+    ADR 0032: the store implements the port's single ``commit`` unit of work —
+    the state write and the events that announce it land together, and a
+    refused compare-and-set writes neither.
+    """
 
     def __init__(self) -> None:
         self._tasks: dict[str, AgentTask] = {}
         self._events: dict[str, list[dict[str, Any]]] = {}
         self._lock = threading.Lock()
         self.closed = False
+        self.pruned: list[int] = []
 
-    def create(self, task: AgentTask) -> None:
+    def commit(self, task: AgentTask, *, expected: TaskStatus | None = None,
+               events: tuple[tuple[str, dict[str, Any]], ...] = ()) -> bool:
         with self._lock:
+            if expected is not None:
+                current = self._tasks.get(task.id)
+                if current is None or current.status != expected:
+                    return False
             self._tasks[task.id] = task
-            self._events.setdefault(task.id, [])
+            for kind, data in events:
+                self._events.setdefault(task.id, []).append({"kind": kind, "data": data})
+            return True
 
     def get(self, task_id: str) -> AgentTask | None:
         with self._lock:
             return self._tasks.get(task_id)
 
-    def save(self, task: AgentTask) -> None:
-        with self._lock:
-            self._tasks[task.id] = task
-
-    def append_event(self, task_id: str, kind: str, data: dict) -> None:
-        with self._lock:
-            self._events.setdefault(task_id, []).append({"kind": kind, "data": data})
-
     def events(self, task_id: str) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._events.get(task_id, []))
 
-    def list(self, *, context_id: str | None = None, limit: int = 100) -> list[AgentTask]:
+    def list(self, *, context_id: str | None = None, limit: int = 100,
+             owner: str | None = None) -> list[AgentTask]:
         with self._lock:
             tasks = list(self._tasks.values())
             if context_id:
                 tasks = [t for t in tasks if t.context_id == context_id]
+            if owner is not None:
+                tasks = [t for t in tasks if t.owner == owner]
             return tasks[:limit]
+
+    def close(self) -> None:
+        self.closed = True
+
+    def prune(self, retention_days: int) -> int:
+        self.pruned.append(retention_days)
+        return 2
+
+
+class _BareStore:
+    """A store that predates the pruning contract."""
+
+    def __init__(self) -> None:
+        self.closed = False
 
     def close(self) -> None:
         self.closed = True
@@ -202,6 +227,56 @@ class TaskServiceLifecycleTests(unittest.TestCase):
         self.assertIn("Unsupported capability", task.error or "")
         events = self.service.events(task.id)
         self.assertEqual(events[-1]["kind"], "status")
+
+    def test_the_event_cursor_is_passed_to_a_store_that_supports_it(self) -> None:
+        """The cursor is the store-native sequence.
+
+        A store that offers it must be *asked* for it: the SSE loop then
+        reads only the events added since the last page instead of re-reading
+        the whole log on every tick.
+        """
+        seen: list[int] = []
+
+        class _CursorStore(_MemStore):
+            def events(self, task_id: str, *, since: int = 0) -> list[dict[str, Any]]:
+                seen.append(since)
+                return super().events(task_id)
+
+        store = _CursorStore()
+        task = AgentTask.new("supervisor", "hello")
+        store.commit(task)
+        service = TaskService(store, MagicMock(), frozenset({"supervisor"}))
+        try:
+            service.events(task.id, since=7)
+            self.assertEqual(seen, [7])
+        finally:
+            service.close()
+
+    def test_a_type_error_inside_the_store_is_not_mistaken_for_an_old_signature(self) -> None:
+        """A bug in the store must surface — and the store is called once.
+
+        The old-signature fallback used to be detected by catching the
+        ``TypeError`` the *call* raised, which also caught a ``TypeError``
+        raised **inside** the store and then called the store a second time
+        with the old signature.
+        """
+        calls: list[int] = []
+
+        class _BrokenStore(_MemStore):
+            def events(self, task_id: str, *, since: int = 0) -> list[dict[str, Any]]:
+                calls.append(since)
+                raise TypeError
+
+        store = _BrokenStore()
+        task = AgentTask.new("supervisor", "hello")
+        store.commit(task)
+        service = TaskService(store, MagicMock(), frozenset({"supervisor"}))
+        try:
+            with self.assertRaises(TypeError):
+                service.events(task.id)
+            self.assertEqual(calls, [0])
+        finally:
+            service.close()
 
     def test_submit_to_completed(self) -> None:
         self.executor.return_value = {"status": "completed", "content": "Done"}
@@ -293,6 +368,146 @@ class TaskServiceLifecycleTests(unittest.TestCase):
         only_ctx1 = self.service.list(context_id="ctx-1")
         self.assertEqual(len(only_ctx1), 1)
         self.assertEqual(only_ctx1[0].context_id, "ctx-1")
+
+    def test_task_ownership_scopes_every_operation(self) -> None:
+        self.executor.side_effect = lambda task: time.sleep(0.5) or {"status": "completed"}
+        task = self.service.submit("supervisor", "hello", owner="alpha")
+        self.assertEqual(task.owner, "alpha")
+        self.assertEqual(task.with_metadata({"seen": True}).owner, "alpha")
+
+        self.assertIsNone(self.service.get(task.id, owner="beta"))
+        self.assertEqual(self.service.events(task.id, owner="beta"), ())
+        self.assertIsNone(self.service.cancel(task.id, owner="beta"))
+        self.assertIsNone(self.service.resume(task.id, {"approved": True}, owner="beta"))
+        self.assertEqual(self.service.list(owner="beta"), ())
+        self.assertEqual([item.id for item in self.service.list(owner="alpha")], [task.id])
+
+        self.assertIsNotNone(self.service.cancel(task.id, owner="alpha"))
+
+    def test_prune_delegates_and_zero_disables_the_window(self) -> None:
+        self.assertEqual(self.service.prune(7), 2)
+        self.assertEqual(self.store.pruned, [7])
+        self.assertEqual(self.service.prune(0), 0)
+        self.assertEqual(self.store.pruned, [7])
+
+    def test_prune_is_a_noop_for_stores_without_the_contract(self) -> None:
+        store = _BareStore()
+        service = TaskService(store, self.executor, frozenset({"supervisor"}))
+        try:
+            self.assertEqual(service.prune(30), 0)
+        finally:
+            service.close()
+        self.assertTrue(store.closed)
+
+
+class TaskAdmissionTests(unittest.TestCase):
+    """ADR 0041: a burst is refused before a worker thread is created.
+
+    The executor's own run limit answers only after the task thread exists, so
+    these tests pin the *admission* point: the thread count must never exceed
+    the configured bound, and the refusal must be durable and observable.
+    """
+
+    def test_submit_at_capacity_is_rejected_without_creating_a_thread(self) -> None:
+        store = _MemStore()
+        started = threading.Event()
+        unblock = threading.Event()
+
+        def executor(task: AgentTask) -> dict[str, Any]:
+            started.set()
+            unblock.wait(5)
+            return {"status": "completed"}
+
+        service = TaskService(store, executor, frozenset({"supervisor"}),
+                              max_concurrent_tasks=1)
+        try:
+            first = service.submit("supervisor", "first")
+            self.assertTrue(started.wait(3))
+            second = service.submit("supervisor", "second")
+
+            self.assertEqual(first.status, TaskStatus.SUBMITTED)
+            self.assertEqual(second.status, TaskStatus.REJECTED)
+            self.assertIn("capacity", second.error or "")
+            # The refused task was never started: exactly one worker exists.
+            self.assertEqual(len(service._workers), 1)
+            # The refusal is durable and carries the event that explains it.
+            self.assertEqual(service.get(second.id).status, TaskStatus.REJECTED)
+            events = service.events(second.id)
+            self.assertEqual(events[-1]["kind"], "status")
+            self.assertIn("capacity", events[-1]["data"]["error"])
+
+            # Finishing the run returns the slot; the next submit is admitted.
+            unblock.set()
+            self.assertTrue(_wait_until(
+                lambda: service.get(first.id).status == TaskStatus.COMPLETED))
+            third = service.submit("supervisor", "third")
+            self.assertEqual(third.status, TaskStatus.SUBMITTED)
+        finally:
+            unblock.set()
+            service.close()
+
+    def test_resume_at_capacity_raises_instead_of_claiming_not_resumable(self) -> None:
+        store = _MemStore()
+        blocked = threading.Event()
+        unblock = threading.Event()
+        park_runs = 0
+
+        def executor(task: AgentTask) -> dict[str, Any]:
+            nonlocal park_runs
+            if task.message == "park":
+                park_runs += 1
+                if park_runs == 1:
+                    return {"status": "input_required", "continuation": {"step": 2}}
+                return {"status": "completed"}
+            if task.message == "block":
+                blocked.set()
+                unblock.wait(5)
+            return {"status": "completed"}
+
+        service = TaskService(store, executor, frozenset({"supervisor"}),
+                              max_concurrent_tasks=1)
+        try:
+            parked = service.submit("supervisor", "park")
+            self.assertTrue(_wait_until(
+                lambda: service.get(parked.id).status == TaskStatus.INPUT_REQUIRED))
+            service.submit("supervisor", "block")
+            self.assertTrue(blocked.wait(3))
+
+            with self.assertRaises(TaskCapacityError):
+                service.resume(parked.id, {"approved": True})
+            # The refusal did not consume the parked task.
+            self.assertEqual(service.get(parked.id).status, TaskStatus.INPUT_REQUIRED)
+
+            unblock.set()
+            self.assertTrue(_wait_until(
+                lambda: len(service._workers) == 0))
+            resumed = service.resume(parked.id, {"approved": True})
+            self.assertIsNotNone(resumed)
+            self.assertEqual(resumed.status, TaskStatus.WORKING)
+            self.assertTrue(_wait_until(
+                lambda: service.get(parked.id).status == TaskStatus.COMPLETED))
+        finally:
+            unblock.set()
+            service.close()
+
+    def test_a_resume_after_close_releases_its_slot(self) -> None:
+        """``_start`` refuses while closing; the reserved slot must go back."""
+        store = _MemStore()
+
+        def executor(task: AgentTask) -> dict[str, Any]:
+            return {"status": "input_required", "continuation": {"step": 2}}
+
+        service = TaskService(store, executor, frozenset({"supervisor"}),
+                              max_concurrent_tasks=1)
+        parked = service.submit("supervisor", "park")
+        self.assertTrue(_wait_until(
+            lambda: service.get(parked.id).status == TaskStatus.INPUT_REQUIRED))
+        service.close()
+        with self.assertRaises(RuntimeError):
+            service.resume(parked.id, {"approved": True})
+        # The slot was returned, so a fresh service over the same store can
+        # still admit work (a leaked slot would be invisible until exhaustion).
+        self.assertEqual(service._slots._value, 1)  # type: ignore[attr-defined]
 
 if __name__ == "__main__":
     unittest.main()

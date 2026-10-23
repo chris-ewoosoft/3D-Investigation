@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import unittest
 
-from ai_assistant.tools.tool_contract import _to_tool_specs, build_tool_models
+from ai_assistant.domain.specialists import Specialist
+from ai_assistant.tools.tool_contract import (
+    _to_tool_specs,
+    build_tool_models,
+    tool_contract_for,
+)
 
 
 def _tool(name: str = "read_file", **overrides) -> dict:
@@ -43,6 +48,23 @@ class ToolSpecMappingTests(unittest.TestCase):
         self.assertEqual(spec.timeout_seconds, 120)
         self.assertEqual(spec.policy, "code_execute")
         self.assertTrue(spec.requires_approval)
+
+    def test_an_unknown_tool_has_no_weak_default(self) -> None:
+        """A misspelled/unlisted name is a policy gap, not a read-only tool."""
+        with self.assertRaises(ValueError):
+            tool_contract_for("write_file_typo")
+        with self.assertRaises(ValueError):
+            _to_tool_specs([_tool("write_file_typo")])
+
+    def test_a_desktop_alias_resolves_to_the_canonical_restricted_policy(self) -> None:
+        contract = tool_contract_for("app_action_viewer")
+        self.assertEqual(contract["policy"], "desktop_ack")
+        self.assertEqual(contract["classification"], "restricted")
+        self.assertFalse(contract["requires_approval"])
+
+    def test_the_specialist_row_comes_from_the_domain_table(self) -> None:
+        spec = _to_tool_specs([_tool("read_file")])[0]
+        self.assertEqual(spec.specialists, frozenset({Specialist.RESEARCH, Specialist.CODE}))
 
 
 class BuildToolModelsTests(unittest.TestCase):

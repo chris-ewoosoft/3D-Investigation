@@ -4,11 +4,13 @@
 #include <QString>
 #include <QStringList>
 #include <functional>
+#include <memory>
 #include <vector>
 #include "Global.h"
 
 class IAppContext;
 class IPlugin;
+class QObject;
 class QPluginLoader;
 
 /**
@@ -62,12 +64,32 @@ public:
     bool initializeAll(IAppContext *context);
 
     /// cleanup() in reverse order of successful initialization, then drops the
-    /// plugins and unloads the libraries. Safe to call repeatedly or early
+    /// plugins and releases them. Safe to call repeatedly or early
     /// (before discover/initialize).
+    ///
+    /// The release destroys each plugin's root component, so the plugin's
+    /// QObject tree goes with it. The *library* itself stays mapped for the
+    /// rest of the session: QPluginLoader pins it with
+    /// QLibrary::PreventUnloadHint, and Qt only ever ORs the load hints, so
+    /// the hint cannot be cleared. A plugin object that outlives cleanup()
+    /// is therefore dead UI rather than an immediate crash — but the shell
+    /// outlives the plugin, so the contract still is: **cleanup() must
+    /// release every object the plugin installed into the shell.** That is
+    /// verified by TestPluginSmoke.
     void shutdown();
 
     QList<IPlugin *> plugins() const;
     bool isEmpty() const;
+
+    /// The number of plugin root components that were released (destroyed) so
+    /// far. A plugin whose root is still alive after the shutdown keeps its
+    /// whole QObject tree — and every object it installed in the shell.
+    int releasedPluginCount() const
+    {
+        int count = 0;
+        for (const auto &counter : m_releaseCounters) count += *counter;
+        return count;
+    }
 
     /// Errors accumulated so far (discovery, resolution, initialization).
     QStringList errors() const { return m_errors; }
@@ -80,6 +102,11 @@ private:
 
     Loader m_loader;                        ///< empty → QPluginLoader-based default
     std::vector<QPluginLoader *> m_loaders; ///< default loader's instances
+    std::vector<QObject *> m_pluginRoots;   ///< the root component of each loader
+    /// One counter per loaded plugin, incremented when its root component is
+    /// destroyed. Shared with the destroyed() handler so the handler stays
+    /// valid even if the host is gone first.
+    std::vector<std::shared_ptr<int>> m_releaseCounters;
     QList<IPlugin *> m_plugins;             ///< discovered, then resolved order
     QList<IPlugin *> m_initialized;         ///< successfully initialized (init order)
     QStringList m_errors;

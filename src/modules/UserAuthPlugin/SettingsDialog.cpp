@@ -1,3 +1,4 @@
+#include "BlockingCall.h"
 #include "SettingsDialog.h"
 #include "AdminUserManagerDialog.h"
 #include "IAIService.h"
@@ -5,6 +6,7 @@
 #include "IMailService.h"
 #include "ISceneService.h"
 #include "ISettingsService.h"
+#include "IShellService.h"
 #include "ServiceRegistry.h"
 #include "SignalBus.h"
 #include "ThemeSelectionDialog.h"
@@ -16,6 +18,7 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFutureWatcher>
+#include <QDebug>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -56,6 +59,17 @@ SettingsDialog::SettingsDialog(const QString &username, bool isAdmin,
   resize(1000, 700);
   setMinimumSize(1000, 700);
   setupUi();
+}
+
+SettingsDialog::~SettingsDialog()
+{
+  // The SMTP connection test may still be running: it must not outlive the
+  // dialog (and the service it calls). The wait is bounded.
+  const int unfinished = m_tasks.waitForFinished(3000);
+  if (unfinished > 0) {
+    qWarning() << "SettingsDialog:" << unfinished
+               << "background task(s) did not finish within 3 s";
+  }
 }
 
 void SettingsDialog::setupUi() {
@@ -116,7 +130,8 @@ void SettingsDialog::setupUi() {
     m_stack->addWidget(adminPage);
   }
 
-  QWidget *themePage = new ThemeSelectionDialog(m_username, m_stack);
+  auto *themePage = new ThemeSelectionDialog(m_username, m_stack);
+  themePage->setBackgroundRequest(m_backgroundRequest);
   m_stack->addWidget(themePage);
 
   auto createTitle = [](const QString &titleText) -> QLabel * {
@@ -425,6 +440,7 @@ void SettingsDialog::setupUi() {
 
     QPushButton *testBtn = new QPushButton(
         UserAuthPlugin::translate("settings.mail.test_title"));
+    testBtn->setObjectName("mailTestConnectionButton");
     testBtn->setFixedWidth(160);
     connect(testBtn, &QPushButton::clicked, this,
             [this, smtpServer, port, email, password, testBtn]() {
@@ -468,11 +484,11 @@ void SettingsDialog::setupUi() {
                                       "\n" + result.second);
                             }
                           });
-                  watcher->setFuture(QtConcurrent::run([mailSvc]() {
+                  watcher->setFuture(blocking::run([mailSvc]() {
                     QString errMsg;
                     const bool ok = mailSvc->testConnection(errMsg);
                     return qMakePair(ok, errMsg);
-                  }));
+                  }, &m_tasks));
                   return;
                 }
               }

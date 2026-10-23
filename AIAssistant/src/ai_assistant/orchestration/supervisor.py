@@ -7,13 +7,21 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ai_assistant.config.logging import get_agent_logger
-from ai_assistant.domain.specialists import TRANSFER_TARGETS, Specialist
-from ai_assistant.domain.tools import tool_result_has_evidence
+from ai_assistant.domain.specialists import (
+    CODE_TOOLS,
+    RESEARCH_TOOLS,
+    TOOL_SPECIALISTS,
+    TRANSFER_TARGETS,
+    VERIFICATION_TOOLS,
+    WORKFLOW_TOOLS,
+    Specialist,
+)
+from ai_assistant.domain.tools import tool_result_has_evidence, tool_result_succeeded
 
 logger = logging.getLogger("ai_assistant.orchestration.supervisor")
 
@@ -21,34 +29,18 @@ logger = logging.getLogger("ai_assistant.orchestration.supervisor")
 #
 # The supervisor must never import ``ai_assistant.adapters`` (that created an
 # import cycle with ``a2a_protocol``, which needs ``Specialist`` to advertise
-# skills).  Instead the composition root installs the lookup resolved by the
-# A2A adapter via :func:`set_remote_specialist_lookup`; with nothing installed
-# delegation stays strictly local.
+# skills).  Callers that can reach a remote registry pass its resolver as
+# ``delegate(..., remote_lookup=...)``; with no resolver delegation stays
+# strictly local. There is no process-wide installed lookup.
 RemoteSpecialistLookup = Callable[[str], str | None]
-
-_remote_specialist_lookup: RemoteSpecialistLookup | None = None
-_remote_lookup_lock = threading.Lock()
 
 supervisor_logger = get_agent_logger("supervisor")
 verification_logger = get_agent_logger("verification")
 
 
-def set_remote_specialist_lookup(lookup: RemoteSpecialistLookup | None) -> None:
-    """Install (or clear) the A2A remote-specialist resolver.
-
-    The composition root wires
-    ``adapters.a2a_protocol.resolve_remote_specialist`` here at startup so the
-    orchestration layer stays free of adapter imports (ADR 0002).
-    """
-    global _remote_specialist_lookup
-    with _remote_lookup_lock:
-        _remote_specialist_lookup = lookup
-
-
-def _resolve_remote_endpoint(specialist: Specialist) -> str | None:
-    """Ask the installed lookup for a remote endpoint, failing closed."""
-    with _remote_lookup_lock:
-        lookup = _remote_specialist_lookup
+def _resolve_remote_endpoint(specialist: Specialist,
+                             lookup: RemoteSpecialistLookup | None) -> str | None:
+    """Ask the caller-supplied lookup for a remote endpoint, failing closed."""
     if lookup is None:
         return None
     try:
@@ -67,44 +59,51 @@ class Delegation:
     remote_endpoint: str | None = field(default=None, compare=False)
 
 
-RESEARCH_TOOLS = {"read_file", "list_directory", "find_files", "search_text", "analyze_code", "git_diff", "rag_search"}
-VERIFICATION_TOOLS = {"validate_file", "get_project_status"}
-CODE_TOOLS = {"write_file", "patch_file", "replace_file_content", "multi_replace_file_content", "create_directory", "run_command"}
-WORKFLOW_TOOLS = {"application_action"}
-# ``TRANSFER_TARGETS`` is the domain-owned handoff table; it is re-exported
-# here because the supervisor is its primary consumer (and existing callers
-# import it from this module).
+# The tool classes and the tool → specialist reverse index are domain-owned
+# (``domain.specialists``).  The supervisor re-exports the class names for
+# existing callers, but it no longer keeps a second copy of the least-privilege
+# policy: ``ALLOWED_TOOLS`` below is a pure reverse projection of the one
+# ``TOOL_SPECIALISTS`` table, and the tool policy contract reads the same
+# table.
 
-#: Specialists whose tool rows are spelled out explicitly below. A transfer
-#: target pointing at one of them rides along in that explicit row (CODE runs
-#: its own marker among its tools); any other transfer specialist gets a
-#: derived marker-only row, so a new handoff target cannot be forgotten here.
+#: Specialists whose tool rows are the complete reverse index rather than a
+#: derived marker-only row.  A transfer target pointing at one of them rides
+#: along in that row (CODE runs its own marker among its tools); PLUGIN stays
+#: empty until the composition root binds its dynamic row.
 _EXPLICIT_TOOL_ROWS = frozenset({
     Specialist.SUPERVISOR, Specialist.RESEARCH, Specialist.VERIFICATION,
     Specialist.CODE, Specialist.WORKFLOW,
 })
 
+
+def _build_allowed_tools() -> dict[Specialist, frozenset[str]]:
+    """Project the domain tool→specialist table into specialist→tools rows.
+
+    Every specialist gets a row, including the empty ones: ``authorise``
+    consults this table fail-closed, so a specialist a rule routes to can
+    never be missing from the policy.  ``PLUGIN`` is deliberately empty in the
+    static table — the composition root supplies the live plugin row through
+    ``authorise(..., allowed_tools=...)``.
+    """
+    rows: dict[Specialist, set[str]] = {specialist: set() for specialist in Specialist}
+    for tool_name, specialists in TOOL_SPECIALISTS.items():
+        for specialist in specialists:
+            rows[specialist].add(tool_name)
+    return {specialist: frozenset(tools) for specialist, tools in rows.items()}
+
+
 #: The tools each specialist may execute. ``SUPERVISOR`` executes nothing (it
 #: answers directly); ``CODE`` may also run read/verify tools because a coding
-#: task inspects the repository before it mutates it. Each transfer specialist
-#: not spelled out below is derived from ``TRANSFER_TARGETS`` and may be
-#: handed exactly its own handoff marker. ``authorise`` consults this table
-#: fail-closed, so the tool sets are enforced least privilege rather than
-#: decorative routing labels (review finding 13).
-ALLOWED_TOOLS: dict[Specialist, frozenset[str]] = {
-    Specialist.SUPERVISOR: frozenset(),
-    Specialist.RESEARCH: frozenset(RESEARCH_TOOLS),
-    Specialist.VERIFICATION: frozenset(VERIFICATION_TOOLS),
-    Specialist.CODE: frozenset(RESEARCH_TOOLS | VERIFICATION_TOOLS | CODE_TOOLS | set(TRANSFER_TARGETS)),
-    Specialist.WORKFLOW: frozenset(WORKFLOW_TOOLS),
-    **{
-        specialist: frozenset(
-            name for name, target in TRANSFER_TARGETS.items() if target is specialist
-        )
-        for specialist in dict.fromkeys(TRANSFER_TARGETS.values())
-        if specialist not in _EXPLICIT_TOOL_ROWS
-    },
-}
+#: task inspects the repository before it mutates it.  The table is the reverse
+#: index of the domain's ``TOOL_SPECIALISTS``; ``authorise`` consults it
+#: fail-closed (review finding 13).
+ALLOWED_TOOLS: dict[Specialist, frozenset[str]] = _build_allowed_tools()
+
+#: Tools that are registered and advertised but have no policy row.  The LSP
+#: tools were the last entries (ADR 0035); they are now read-only research
+#: tools, so the set is deliberately empty.  The drift guard keeps it honest:
+#: an advertised tool without a row must either get a row or be declared here.
+REGISTERED_NOT_ENABLED_TOOLS: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -164,15 +163,26 @@ def _get_audit_path() -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "Cache", "agent_audit.jsonl"))
 
 
-def _route(tool: str | None, prefer_code: bool) -> tuple[Specialist, str, str]:
+def _route(
+    tool: str | None,
+    prefer_code: bool,
+    plugin_tools: frozenset[str] = frozenset(),
+) -> tuple[Specialist, str, str]:
     """Resolve the owning specialist from the routing registry (finding 12).
 
-    An explicit handoff and the ordered ``_TOOL_ROUTE_RULES`` table are the
-    whole decision; ``delegate`` itself never branches on a tool name again.
+    An explicit handoff, the composition root's plugin-tool set and the
+    ordered ``_TOOL_ROUTE_RULES`` table are the whole decision; ``delegate``
+    itself never branches on a tool name again.
     """
     if tool in TRANSFER_TARGETS:
         specialist = TRANSFER_TARGETS[tool]
         return specialist, f"explicit supervisor handoff to {specialist.value}", "explicit_transfer"
+    if tool is not None and tool in plugin_tools:
+        return (
+            Specialist.PLUGIN,
+            "tool is contributed by an enabled plugin",
+            "plugin_tool",
+        )
     for route in _TOOL_ROUTE_RULES:
         if (not route.requires_prefer_code or prefer_code) and tool in route.tools:
             return route.specialist, route.reason, route.basis
@@ -185,12 +195,21 @@ def delegate(
     tool: str | None = None,
     parameters: dict[str, Any] | None = None,
     prefer_code: bool = False,
+    *,
+    remote_lookup: RemoteSpecialistLookup | None = None,
+    plugin_tools: frozenset[str] = frozenset(),
 ) -> Delegation:
-    """Select exactly one worker role. Workers never delegate further."""
-    specialist, reason, basis = _route(tool, prefer_code)
+    """Select exactly one worker role. Workers never delegate further.
+
+    ``remote_lookup`` is the caller's A2A resolver (usually the composition
+    root's registry). ``plugin_tools`` is the live set of third-party tool
+    names; it is the only way a tool can be routed to ``Specialist.PLUGIN``.
+    Omitting both keeps routing strictly local and builtin-only.
+    """
+    specialist, reason, basis = _route(tool, prefer_code, plugin_tools)
 
     # A2A: check whether a remote agent can handle this specialist role.
-    remote_endpoint = _resolve_remote_endpoint(specialist)
+    remote_endpoint = _resolve_remote_endpoint(specialist, remote_lookup)
     if remote_endpoint:
         reason += f" (A2A remote: {remote_endpoint})"
         supervisor_logger.info(
@@ -250,18 +269,26 @@ def delegate(
     return delegation
 
 
-def authorise(delegation: Delegation, needs_approval: bool) -> tuple[bool, str | None]:
+def authorise(
+    delegation: Delegation,
+    needs_approval: bool,
+    *,
+    allowed_tools: Mapping[Specialist, frozenset[str]] | None = None,
+) -> tuple[bool, str | None]:
     """Enforce least privilege before calling a tool.
 
-    The specialist's allowed-tool set (``ALLOWED_TOOLS``) is the policy, not an
-    accident of how ``delegate`` classified the call: an unknown
-    ``(specialist, tool)`` pair is refused fail-closed (review finding 13).
+    The specialist's allowed-tool set is the policy, not an accident of how
+    ``delegate`` classified the call: an unknown ``(specialist, tool)`` pair
+    is refused fail-closed (review finding 13).  ``allowed_tools`` lets the
+    composition root add the live plugin row; the default table stays
+    builtin-only, so a bare caller can never execute a plugin tool.
     """
     if delegation.tool is None:
         return True, None
+    policy = ALLOWED_TOOLS if allowed_tools is None else allowed_tools
     if delegation.specialist is Specialist.SUPERVISOR:
         return False, f"No specialist policy exists for tool: {delegation.tool}"
-    if delegation.tool not in ALLOWED_TOOLS.get(delegation.specialist, frozenset()):
+    if delegation.tool not in policy.get(delegation.specialist, frozenset()):
         return False, f"Tool {delegation.tool} is not permitted for specialist {delegation.specialist.value}."
     if delegation.specialist is Specialist.CODE and delegation.tool in CODE_TOOLS and not needs_approval:
         return False, "Code tools must be routed through the approval workflow."
@@ -279,12 +306,14 @@ def verify_result(delegation: Delegation, result: Any) -> dict[str, Any]:
         outcome = {"passed": False, "reason": str(result["error"])}
         verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
         return outcome
-    if result.get("success") is False:
-        outcome = {"passed": False, "reason": "Tool reported an unsuccessful operation."}
-        verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
-        return outcome
-    if result.get("return_code", 0) != 0:
-        outcome = {"passed": False, "reason": f"Command exited with code {result['return_code']}."}
+    # One rule decides whether the call worked (``domain.tools``): the three
+    # checks below only explain *why*, they do not decide it.
+    if not tool_result_succeeded(result):
+        if result.get("success") is False:
+            reason = "Tool reported an unsuccessful operation."
+        else:
+            reason = f"Command exited with code {result.get('return_code')}."
+        outcome = {"passed": False, "reason": reason}
         verification_logger.warning("Verification failed | tool=%s reason=%s", delegation.tool, outcome["reason"])
         return outcome
 
@@ -356,6 +385,5 @@ __all__ = [
     "authorise",
     "delegate",
     "reflect_result",
-    "set_remote_specialist_lookup",
     "verify_result",
 ]

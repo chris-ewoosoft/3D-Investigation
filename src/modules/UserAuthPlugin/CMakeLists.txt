@@ -20,13 +20,15 @@ add_library(UserAuthPlugin SHARED
     AvatarCropperDialog.cpp
     ThemeSelectionDialog.h
     ThemeSelectionDialog.cpp
+    OverlayResizer.h
+    OverlayResizer.cpp
     SettingsDialog.h
     SettingsDialog.cpp
 )
 
 target_include_directories(UserAuthPlugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/src/core
+    ${PROJECT_SOURCE_DIR}/src/include
     ${PROJECT_SOURCE_DIR}/src/utils
 )
 

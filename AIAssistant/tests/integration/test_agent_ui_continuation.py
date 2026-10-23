@@ -8,8 +8,11 @@ backed by a temporary file, so no repository state is touched (ADR 0013).
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from ai_assistant.adapters.persistence import PendingActionStore
@@ -21,7 +24,16 @@ class UiContinuationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # ADR 0040: a resume takes the model lease like any run. The lease is
+        # the runtime's drain contract, not the backend itself, so this test
+        # still needs no model — it only needs a runtime handle that offers it.
+        runtime = SimpleNamespace(
+            llm=None,
+            llm_lock=threading.RLock(),
+            model_lease=lambda: nullcontext(),
+        )
         self.service = AgentService(
+            llm_runtime=runtime,
             pending_actions=PendingActionStore(str(Path(self._tmp.name) / "pending.json")),
         )
 
