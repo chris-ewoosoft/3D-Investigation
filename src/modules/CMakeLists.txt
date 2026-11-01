@@ -1,0 +1,6 @@
+add_subdirectory(ViewerPlugin)
+add_subdirectory(ReconstructionPlugin)
+add_subdirectory(AIProcessorPlugin)
+add_subdirectory(AIAssistantPlugin)
+add_subdirectory(SendMailPlugin)
+add_subdirectory(UserAuthPlugin)

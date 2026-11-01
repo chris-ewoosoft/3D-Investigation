@@ -1,0 +1,542 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Release — Full Build + MSI Installer
+# Triggers on version tags (v*) or manual dispatch.
+# Packages the application into an MSI installer using WiX v4.
+# ──────────────────────────────────────────────────────────────────────────────
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.0.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VCPKG_INSTALLED_DIR: D:/v
+  VCPKG_MAX_CONCURRENCY: 4
+  # Enable vcpkg binary caching via GitHub Actions Cache
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # libaec version pinned to match vcpkg baseline 9432c416
+  LIBAEC_VERSION: "1.1.6"
+  # Pre-provisioned ONNX Runtime.  Configure points FetchContent at this
+  # directory instead of downloading the ~323 MB release zip; the version is
+  # read from CMakeLists.txt so the two cannot drift apart.
+  ONNXRUNTIME_DIR: D:/ort
+
+jobs:
+  release-build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          lfs: true
+
+      # ── ONNX Runtime: provision once, reuse from cache afterwards ─────
+      - name: Read ONNX Runtime version from CMakeLists.txt
+        id: ort
+        shell: pwsh
+        run: |
+          $match = (Select-String -Path CMakeLists.txt -Pattern '^\s*set\(ONNXRUNTIME_VERSION\s+"([^"]+)"\)').Matches
+          if (-not $match) { Write-Error "set(ONNXRUNTIME_VERSION ...) not found in CMakeLists.txt"; exit 1 }
+          "version=$($match.Groups[1].Value)" >> $env:GITHUB_OUTPUT
+          Write-Host "ONNX Runtime version: $($match.Groups[1].Value)"
+
+      - name: Restore ONNX Runtime cache
+        id: ort-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ env.ONNXRUNTIME_DIR }}
+          key: onnxruntime-win-x64-gpu-${{ steps.ort.outputs.version }}
+
+      - name: Provision ONNX Runtime (cache miss)
+        if: steps.ort-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ort.outputs.version }}"
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v$ver/onnxruntime-win-x64-gpu-$ver.zip"
+          # Keep the URL template above in lock-step with CMakeLists.txt.
+          $declared = (Select-String -Path CMakeLists.txt -Pattern '^\s*set\(ONNXRUNTIME_URL\s+"([^"]+)"\)').Matches.Groups[1].Value
+          $declared = $declared.Replace('${ONNXRUNTIME_VERSION}', $ver)
+          if ($declared -ne $url) { Write-Error "CMakeLists.txt ONNXRUNTIME_URL ($declared) does not match the workflow URL ($url)"; exit 1 }
+          $zip = "$env:RUNNER_TEMP/onnxruntime.zip"
+          Write-Host "Downloading $url (cache miss)"
+          curl.exe --fail --location --retry 3 --output $zip $url
+          if ($LASTEXITCODE -ne 0) { Write-Error "curl.exe failed with exit code $LASTEXITCODE"; exit 1 }
+          $extract = "$env:RUNNER_TEMP/ort-extract"
+          Remove-Item $extract -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $extract -Force | Out-Null
+          # bsdtar extracts the ~1.2 GB tree far faster than Expand-Archive.
+          tar -xf $zip -C $extract
+          if ($LASTEXITCODE -ne 0) { Write-Error "tar failed with exit code $LASTEXITCODE"; exit 1 }
+          # The release zip wraps everything in one versioned directory; strip
+          # it so the layout matches FetchContent's (include/, lib/ at the root).
+          $top = @(Get-ChildItem -Path $extract)
+          Remove-Item $env:ONNXRUNTIME_DIR -Recurse -Force -ErrorAction SilentlyContinue
+          if ($top.Count -eq 1 -and $top[0].PSIsContainer) {
+            Move-Item -Path $top[0].FullName -Destination $env:ONNXRUNTIME_DIR
+          } else {
+            New-Item -ItemType Directory -Path $env:ONNXRUNTIME_DIR -Force | Out-Null
+            Move-Item -Path (Join-Path $extract '*') -Destination $env:ONNXRUNTIME_DIR
+          }
+          Write-Host "Provisioned ONNX Runtime $ver at $env:ONNXRUNTIME_DIR"
+
+      # ── Export GitHub Actions cache env for vcpkg binary caching ──────
+      - name: Export GitHub Actions cache env
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL',
+              process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN',
+              process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      # ── Create vcpkg triplet overlay (release-only) ─────────────────
+      - name: Create release-only triplet overlay
+        shell: pwsh
+        run: |
+          $tripletDir = "custom-triplets"
+          New-Item -ItemType Directory -Path $tripletDir -Force | Out-Null
+          @"
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE dynamic)
+          set(VCPKG_BUILD_TYPE release)
+          "@ | Out-File -Encoding utf8 "$tripletDir/x64-windows.cmake"
+          Write-Host "Created release-only triplet at $tripletDir/x64-windows.cmake"
+
+      # ── Determine version ─────────────────────────────────────────────
+      - name: Set version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $ver = "${{ inputs.version }}"
+          } else {
+            $ver = "${{ github.ref_name }}" -replace '^v', ''
+          }
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+          echo "📦 Building version: $ver"
+
+      # ── Qt6 ────────────────────────────────────────────────────────────
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: "6.5.*"
+          modules: "qtimageformats"
+          cache: true
+
+      # ── vcpkg ──────────────────────────────────────────────────────────
+      - name: Restore vcpkg cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ env.VCPKG_INSTALLED_DIR }}
+          key: vcpkg-${{ runner.os }}-rel-${{ hashFiles('vcpkg.json') }}-9432c416
+          restore-keys: |
+            vcpkg-${{ runner.os }}-rel-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-${{ runner.os }}-rel-
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
+        with:
+          vcpkgGitCommitId: "9432c416e5c543eded0b4df35a4d347b2e669208"
+          vcpkgJsonGlob: "vcpkg.json"
+
+      # ── Overlay port: redirect libaec from blocked GitLab → GitHub mirror ─
+      - name: Create libaec overlay port (GitHub mirror)
+        shell: pwsh
+        run: |
+          $ver = $env:LIBAEC_VERSION
+
+          # Download from GitHub — reliably accessible from Actions runners
+          $githubUrl = "https://github.com/MathisRosenhauer/libaec/archive/refs/tags/v$ver.tar.gz"
+          $tmpFile   = "$env:TEMP/libaec-github-v$ver.tar.gz"
+          Write-Host "Downloading libaec v$ver from GitHub mirror..."
+          Invoke-WebRequest -Uri $githubUrl -OutFile $tmpFile -UseBasicParsing -TimeoutSec 120
+
+          # Compute SHA512 so the portfile hash matches exactly
+          $sha512 = (Get-FileHash -Path $tmpFile -Algorithm SHA512).Hash.ToLower()
+          Write-Host "SHA512: $sha512"
+
+          # Place archive in vcpkg downloads directory (vcpkg will reuse it)
+          $dlDir = "$env:VCPKG_ROOT/downloads"
+          New-Item -ItemType Directory -Path $dlDir -Force | Out-Null
+          Copy-Item $tmpFile "$dlDir/MathisRosenhauer-libaec-v$ver.tar.gz" -Force
+
+          # Create overlay port directory
+          $portDir = "${{ github.workspace }}/custom-ports/libaec"
+          New-Item -ItemType Directory -Path $portDir -Force | Out-Null
+
+          # portfile.cmake — uses vcpkg_from_github instead of vcpkg_from_gitlab
+          @"
+          vcpkg_from_github(
+              OUT_SOURCE_PATH SOURCE_PATH
+              REPO MathisRosenhauer/libaec
+              REF "v$ver"
+              SHA512 $sha512
+              HEAD_REF master
+          )
+
+          vcpkg_cmake_configure(
+              SOURCE_PATH "`${SOURCE_PATH}"
+              OPTIONS
+                  -DBUILD_TESTING=OFF
+          )
+
+          vcpkg_cmake_install()
+          vcpkg_cmake_config_fixup(CONFIG_PATH lib/cmake/libaec)
+          vcpkg_fixup_pkgconfig()
+
+          file(REMOVE_RECURSE "`${CURRENT_PACKAGES_DIR}/debug/include")
+          vcpkg_install_copyright(FILE_LIST "`${SOURCE_PATH}/LICENSE.txt")
+          "@ | Out-File -Encoding utf8 "$portDir/portfile.cmake"
+
+          # vcpkg.json for the port
+          @"
+          {
+            "name": "libaec",
+            "version": "$ver",
+            "description": "Adaptive Entropy Coding library",
+            "homepage": "https://github.com/MathisRosenhauer/libaec",
+            "dependencies": [
+              { "name": "vcpkg-cmake", "host": true },
+              { "name": "vcpkg-cmake-config", "host": true }
+            ]
+          }
+          "@ | Out-File -Encoding utf8 "$portDir/vcpkg.json"
+
+          Write-Host "Overlay port created at: $portDir"
+
+      # ── MSVC ───────────────────────────────────────────────────────────
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      # ── Build ──────────────────────────────────────────────────────────
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -B build -S . `
+            "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            "-DVCPKG_INSTALLED_DIR=$env:VCPKG_INSTALLED_DIR" `
+            "-DVCPKG_INSTALL_OPTIONS=--clean-after-build" `
+            "-DVCPKG_OVERLAY_TRIPLETS=${{ github.workspace }}/custom-triplets" `
+            "-DVCPKG_OVERLAY_PORTS=${{ github.workspace }}/custom-ports" `
+            "-DFETCHCONTENT_SOURCE_DIR_ONNXRUNTIME=$env:ONNXRUNTIME_DIR" `
+            "-DBUILD_TESTING=ON" `
+            -Wno-dev
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      # ── Gates ──────────────────────────────────────────────────────────
+      # A release is exactly where an untested tree hurts most, and this job
+      # is triggered by a `v*` tag push — which the C++ CI workflow (branch
+      # filter: main) does not run for. Without this block the only thing
+      # between a regression and the installer was a successful compile.
+      # The tests are built (BUILD_TESTING=ON above) and the same suite as CI
+      # runs here; coverage and mutation stay in the CI workflow.
+      - name: Architecture boundaries
+        shell: pwsh
+        run: cmake -DSOURCE_DIR="${{ github.workspace }}" -P tests/CheckArchitectureBoundaries.cmake
+
+      - name: Run Tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # Windows Error Reporting UI hangs the runner on a crash/missing DLL.
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\Windows Error Reporting" -Name "DontShowUI" -Value 1 -ErrorAction SilentlyContinue
+          # Tests load OpenCV/PCL/VTK DLLs from the vcpkg tree.
+          $env:PATH = "$env:VCPKG_INSTALLED_DIR\x64-windows\bin;$env:PATH"
+          ctest --test-dir build -C Release --output-on-failure --timeout 600
+
+      # ── Package ────────────────────────────────────────────────────────
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          $dist = "dist/3D-Reconstruction"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+          # Find main executable — location varies by generator:
+          #   Multi-config (Visual Studio): build/Release/3D-Reconstruction.exe
+          #   Single-config (Ninja):        build/3D-Reconstruction.exe
+          $exe = Get-ChildItem -Path build -Filter "3D-Reconstruction.exe" -Recurse -ErrorAction SilentlyContinue |
+                 Where-Object { $_.DirectoryName -notmatch 'tests' } |
+                 Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "3D-Reconstruction.exe not found under build/"
+            Get-ChildItem build -Recurse -Filter "*.exe" | Select-Object FullName
+            exit 1
+          }
+          $exeDir = $exe.DirectoryName
+          Write-Host "Found executable at: $($exe.FullName)"
+
+          # The AppCore split was abandoned; a Release tree from that era still
+          # contains AppContracts.dll / AppPlatform.dll / AppRuntime.dll. The
+          # package copies $exeDir/*.dll wholesale, so a stale split DLL would
+          # ship next to AppCore.dll. Fail the package instead of shipping it.
+          $staleSplitDlls = Get-ChildItem $exeDir -Filter "App*.dll" |
+                            Where-Object { $_.Name -ne "AppCore.dll" }
+          if ($staleSplitDlls) {
+            Write-Error ("stale split DLL(s) in ${exeDir}: " +
+                         (($staleSplitDlls | ForEach-Object Name) -join ", ") +
+                         " — the AppCore split was abandoned; clean the build tree")
+            exit 1
+          }
+
+          Copy-Item $exe.FullName "$dist/" -Force
+
+          # Copy all runtime DLLs (from exe directory)
+          Copy-Item "$exeDir/*.dll" $dist/ -Force -ErrorAction SilentlyContinue
+
+          # Copy application icon alongside exe (for portable icon loading)
+          if (Test-Path "src/app/app_icon.png") {
+            Copy-Item "src/app/app_icon.png" "$dist/" -Force
+          }
+
+          # Copy application plugins (only *Plugin.dll files, not Qt runtime DLLs)
+          # Multi-config: build/plugins/Release  |  Single-config: build/plugins
+          $pluginDir = @("build/plugins/Release", "build/plugins") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($pluginDir) {
+            New-Item -ItemType Directory -Path "$dist/plugins" -Force | Out-Null
+            Get-ChildItem $pluginDir -Filter "*Plugin.dll" | Copy-Item -Destination "$dist/plugins/" -Force
+            # Also copy supporting DLLs needed by plugins (non-Qt ones not in main dir)
+            Get-ChildItem $pluginDir -Filter "*.dll" | Where-Object { $_.Name -notlike "*Plugin.dll" } | Copy-Item -Destination "$dist/" -Force
+          }
+
+          # Copy Qt plugins if present (check exe directory for deployed plugins)
+          $qtPlugins = @("platforms", "imageformats", "iconengines", "styles", "tls")
+          foreach ($p in $qtPlugins) {
+            $src = "$exeDir/$p"
+            if (Test-Path $src) { Copy-Item $src "$dist/" -Recurse -Force }
+          }
+
+          # Copy translations
+          if (Test-Path "translations") { Copy-Item "translations" "$dist/" -Recurse -Force }
+
+          # Copy AI Assistant runtime (exclude rebuildable cache/logs) and CV assets.
+          if (Test-Path "AIAssistant") {
+            New-Item -ItemType Directory -Path "$dist/AIAssistant" -Force | Out-Null
+            Get-ChildItem "AIAssistant" -Exclude "Cache","__pycache__","logs","runs" | ForEach-Object {
+              if ($_.PSIsContainer) {
+                Copy-Item $_.FullName "$dist/AIAssistant/$($_.Name)" -Recurse -Force
+              } else {
+                Copy-Item $_.FullName "$dist/AIAssistant/" -Force
+              }
+            }
+          }
+          # CV training assets: exclude generated logs/caches and the test suite,
+          # and ship only the runtime ONNX models + provenance manifest (base
+          # *.pt weights are git-ignored and ultralytics downloads them on demand).
+          if (Test-Path "AIComputerVision") {
+            New-Item -ItemType Directory -Path "$dist/AIComputerVision" -Force | Out-Null
+            Get-ChildItem "AIComputerVision" -Exclude "runs","__pycache__",".cache","tests","Models" | ForEach-Object {
+              if ($_.PSIsContainer) {
+                Copy-Item $_.FullName "$dist/AIComputerVision/$($_.Name)" -Recurse -Force
+              } else {
+                Copy-Item $_.FullName "$dist/AIComputerVision/" -Force
+              }
+            }
+            New-Item -ItemType Directory -Path "$dist/AIComputerVision/Models" -Force | Out-Null
+            Get-ChildItem "AIComputerVision/Models" -File |
+              Where-Object { $_.Extension -in ".onnx", ".json" } |
+              Copy-Item -Destination "$dist/AIComputerVision/Models/" -Force
+          }
+
+          # Copy Config directory (app configuration files)
+          if (Test-Path "Config") { Copy-Item "Config" "$dist/" -Recurse -Force }
+
+          # Copy Models directory (ONNX runtime models)
+          if (Test-Path "Models") { Copy-Item "Models" "$dist/" -Recurse -Force }
+
+          echo "📁 Distribution contents:"
+          Get-ChildItem $dist -Recurse | Select-Object FullName, Length
+
+
+      # ── WiX MSI ────────────────────────────────────────────────────────
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.0.5
+          wix extension add -g WixToolset.UI.wixext/4.0.5
+
+      - name: Create MSI installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.VERSION }}"
+          # Ensure version is valid for MSI (x.y.z.w format)
+          $parts = $version.Split('.')
+          while ($parts.Count -lt 3) { $parts += '0' }
+          $msiVersion = ($parts[0..2]) -join '.'
+
+          # Create a minimal license RTF file (required by WixUI_InstallDir)
+          "{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}} \par \viewkind4\uc1 \pard\sa200\sl276\slmult1\f0\fs22\lang9 3D-Reconstruction License\par }" | Out-File -Encoding ascii license.rtf
+
+          # Copy the pre-generated app_icon.ico for installer shortcuts
+          Copy-Item "src/app/app_icon.ico" "dist/3D-Reconstruction/app_icon.ico" -Force
+          Write-Host "Copied app_icon.ico for shortcuts"
+
+          # Generate WiX Directory and Component XML dynamically
+          $distPath = Resolve-Path "dist/3D-Reconstruction" | Select-Object -ExpandProperty Path
+          $global:componentsXml = ""
+          $global:exeFileId = ""
+          $global:icoFileId = ""
+          
+          function Build-WixTree {
+              param([string]$path, [string]$parentId)
+              $xml = ""
+              $items = Get-ChildItem -Path $path
+              $files = $items | Where-Object { -not $_.PSIsContainer }
+              $dirs = $items | Where-Object { $_.PSIsContainer }
+              
+              if ($files.Count -gt 0) {
+                  foreach ($file in $files) {
+                      $id = "FILE_" + [guid]::NewGuid().ToString("N")
+                      # Track the EXE file ID for shortcuts
+                      if ($file.Name -eq "3D-Reconstruction.exe") {
+                          $global:exeFileId = $id
+                      }
+                      # Track the ICO file ID for shortcut icon
+                      if ($file.Name -eq "app_icon.ico") {
+                          $global:icoFileId = $id
+                      }
+                      $global:componentsXml += "      <Component Id=`"$id`" Directory=`"$parentId`">`n"
+                      $global:componentsXml += "        <File Id=`"$id`" Source=`"$($file.FullName)`" KeyPath=`"yes`" />`n"
+                      $global:componentsXml += "      </Component>`n"
+                  }
+              }
+              
+              foreach ($dir in $dirs) {
+                  $dirId = "DIR_" + [guid]::NewGuid().ToString("N")
+                  $xml += "        <Directory Id=`"$dirId`" Name=`"$($dir.Name)`">`n"
+                  $xml += Build-WixTree -path $dir.FullName -parentId $dirId
+                  $xml += "        </Directory>`n"
+              }
+              return $xml
+          }
+          
+          $directoriesXml = Build-WixTree -path $distPath -parentId "INSTALLFOLDER"
+          $componentsXml = $global:componentsXml
+          $exeFileId = $global:exeFileId
+          $icoFileId = $global:icoFileId
+
+          # Create WiX project with UI, shortcuts, and uninstall
+          @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+            <Package Name="3D-Reconstruction"
+                     Manufacturer="3D-Reconstruction Team"
+                     Version="$msiVersion"
+                     UpgradeCode="E8A3B02D-7F4C-4A1E-9B5D-6C8F0A2E1D3B">
+
+              <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <StandardDirectory Id="ProgramFiles6432Folder">
+                <Directory Id="INSTALLFOLDER" Name="3D-Reconstruction">
+          $directoriesXml
+                </Directory>
+              </StandardDirectory>
+
+              <!-- Desktop shortcut directory -->
+              <StandardDirectory Id="DesktopFolder" />
+
+              <!-- Start Menu shortcut directory -->
+              <StandardDirectory Id="ProgramMenuFolder">
+                <Directory Id="ProgramMenuSubfolder" Name="3D-Reconstruction" />
+              </StandardDirectory>
+
+              <!-- Desktop Shortcut -->
+              <Component Id="DesktopShortcut" Directory="DesktopFolder">
+                <Shortcut Id="DesktopShortcutLink"
+                          Name="3D-Reconstruction"
+                          Description="3D-Reconstruction Application"
+                          Target="[INSTALLFOLDER]3D-Reconstruction.exe"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="AppIcon" />
+                <RegistryValue Root="HKCU" Key="Software\3D-Reconstruction" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+
+              <!-- Start Menu Shortcuts (App + Uninstall) -->
+              <Component Id="StartMenuShortcuts" Directory="ProgramMenuSubfolder">
+                <Shortcut Id="StartMenuShortcutLink"
+                          Name="3D-Reconstruction"
+                          Description="3D-Reconstruction Application"
+                          Target="[INSTALLFOLDER]3D-Reconstruction.exe"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="AppIcon" />
+                <Shortcut Id="StartMenuUninstallLink"
+                          Name="Uninstall 3D-Reconstruction"
+                          Description="Uninstall 3D-Reconstruction"
+                          Target="[SystemFolder]msiexec.exe"
+                          Arguments="/x [ProductCode]" />
+                <RemoveFolder Id="RemoveProgramMenuSubfolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\3D-Reconstruction" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+
+              <!-- Uninstall shortcut in install directory -->
+              <Component Id="UninstallShortcutComponent" Directory="INSTALLFOLDER">
+                <Shortcut Id="UninstallShortcutLink"
+                          Name="Uninstall 3D-Reconstruction"
+                          Description="Uninstall 3D-Reconstruction"
+                          Target="[SystemFolder]msiexec.exe"
+                          Arguments="/x [ProductCode]" />
+                <RegistryValue Root="HKCU" Key="Software\3D-Reconstruction" Name="UninstallShortcut" Type="integer" Value="1" KeyPath="yes" />
+              </Component>
+
+              <!-- Icon definition for shortcuts -->
+              <Icon Id="AppIcon" SourceFile="dist\3D-Reconstruction\app_icon.ico" />
+
+              <!-- UI Configuration -->
+              <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+              <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+              <!-- Add/Remove Programs icon -->
+              <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+              <Feature Id="Main" Title="3D-Reconstruction" Level="1">
+                <ComponentGroupRef Id="Files" />
+                <ComponentRef Id="DesktopShortcut" />
+                <ComponentRef Id="StartMenuShortcuts" />
+                <ComponentRef Id="UninstallShortcutComponent" />
+              </Feature>
+            </Package>
+
+            <Fragment>
+              <ComponentGroup Id="Files">
+          $componentsXml
+              </ComponentGroup>
+            </Fragment>
+          </Wix>
+          "@ | Out-File -Encoding utf8 installer.wxs
+
+          wix build installer.wxs -ext WixToolset.UI.wixext -out "3D-Reconstruction-$version.msi" -arch x64
+
+      # ── Upload ─────────────────────────────────────────────────────────
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: 3D-Reconstruction-${{ steps.version.outputs.VERSION }}-msi
+          path: "*.msi"
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+        with:
+          files: "*.msi"
+          generate_release_notes: true

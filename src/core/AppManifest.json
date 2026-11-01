@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "contract": {
+    "detection_model": "yolo11n.onnx",
+    "segmentation_model": "yolo11n-seg.onnx",
+    "tracking_model": "yolo11x-tracking.onnx"
+  },
+  "onnx_runtime_version": "1.20.1",
+  "max_opset": 21
+}

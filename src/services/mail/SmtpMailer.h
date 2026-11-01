@@ -1,0 +1,58 @@
+#ifndef SMTP_MAILER_H
+#define SMTP_MAILER_H
+
+#include <QObject>
+#include <QString>
+#include <QStringList>
+
+class QSslSocket;
+#include "Global.h"
+
+class APP_EXPORT SmtpMailer {
+public:
+    // Auto-detect SMTP host/port from sender email domain.
+    SmtpMailer(const QString &senderEmail, const QString &senderPassword);
+
+    /// Verify that the SMTP account can connect, start TLS and authenticate.
+    ///
+    /// This is what the mail settings dialog probes: a working IMAP login
+    /// says nothing about whether a message can actually be SENT, and the two
+    /// credentials are entered in the same place. Nothing is transmitted
+    /// except the authentication exchange.
+    bool testConnection(QString &errorMsg);
+
+    bool sendMail(const QString &from, const QString &to,
+                  const QString &subject, const QString &htmlBody,
+                  QString &errorMsg);
+
+    bool sendMail(const QString &from,
+                  const QStringList &to,
+                  const QStringList &cc,
+                  const QStringList &bcc,
+                  const QString &subject,
+                  const QString &htmlBody,
+                  const QStringList &attachmentPaths,
+                  const QString &displayName,
+                  QString &errorMsg);
+
+private:
+    bool waitForCode(QSslSocket *sock, const QString &expectedCode,
+                     QString &response, int timeoutMs = 8000);
+    bool sendCmd(QSslSocket *sock, const QString &cmd,
+                 const QString &expectedCode, QString &response, int timeoutMs = 8000);
+
+    /// Connect, negotiate TLS and authenticate. Nothing is sent afterwards.
+    ///
+    /// Extracted from sendMail() so that "test the connection" exercises the
+    /// exact same handshake a real message goes through — a probe with its
+    /// own copy of the sequence would be free to drift away from it.
+    bool connectAndAuthenticate(QSslSocket &sock, QString &errorMsg);
+
+    QString m_host;
+    int     m_port;
+    QString m_username;
+    QString m_password;
+    bool    m_useSsl; // true = SMTPS port 465, false = STARTTLS port 587
+};
+
+#endif // SMTP_MAILER_H
