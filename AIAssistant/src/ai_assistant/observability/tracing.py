@@ -80,11 +80,12 @@ def span(name: str, **attributes: Any) -> Iterator[None]:
     """Emit an OpenTelemetry span and a nested LangSmith run when enabled."""
     started = time.monotonic()
     tracer = _get_tracer()
-    trace_span = tracer.start_as_current_span(name) if tracer else None
-    if trace_span:
-        trace_span.__enter__()
+    trace_cm = tracer.start_as_current_span(name) if tracer else None
+    trace_span = None
+    if trace_cm:
+        trace_span = trace_cm.__enter__()
         for key, value in attributes.items():
-            if value is not None:
+            if value is not None and hasattr(trace_span, "set_attribute"):
                 trace_span.set_attribute(key, value)
 
     run_id = start_langsmith_run(name, "chain", {"attributes": attributes}, attributes)
@@ -104,9 +105,9 @@ def span(name: str, **attributes: Any) -> Iterator[None]:
         if metrics:
             metrics["requests"].labels(name, outcome).inc()
             metrics["latency"].labels(name).observe(elapsed)
-        if trace_span:
-            trace_span.__exit__(type(error) if error else None, error,
-                                error.__traceback__ if error else None)
+        if trace_cm:
+            trace_cm.__exit__(type(error) if error else None, error,
+                              error.__traceback__ if error else None)
         if run_id:
             finish_langsmith_run(run_id, {
                 "outcome": outcome, "duration_ms": round(elapsed * 1000),

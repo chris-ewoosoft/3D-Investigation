@@ -24,7 +24,7 @@ from ai_assistant.config.logging import get_agent_logger
 from ai_assistant.domain.governance import redact_value
 from ai_assistant.domain.parallel import PARALLEL_MAX_DEFAULT
 from ai_assistant.domain.tools import describe_tool_result
-from ai_assistant.observability import span
+from ai_assistant.observability import langsmith_trace, span
 from ai_assistant.tools.action_manifest import normalize_text, rank_actions_for_step
 
 from ..helpers import plan_step_execution_contract, valid_parallel_group
@@ -338,20 +338,25 @@ def _run_batch(state: AgentState, ctx: ToolContext,
     results: list[dict[str, Any] | None] = [None] * len(calls)
     cancelled = False
     with span("agent.tool_batch", branches=len(calls)):
-        pool = ThreadPoolExecutor(max_workers=min(ctx.max_parallel, len(calls)))
-        futures: dict[int, Any] = {}
-        try:
-            for index, (name, params, _plan_index) in enumerate(calls):
-                if ctx.cancel_checker():
-                    cancelled = True
-                    results[index] = {"error": "Tool batch branch cancelled."}
-                    continue
-                branch_context = contextvars.copy_context()
-                futures[index] = pool.submit(branch_context.run, _execute_one, ctx, name, params)
-            for index, future in futures.items():
-                results[index] = future.result()
-        finally:
-            pool.shutdown(wait=True)
+        with langsmith_trace(
+            "agent.tool_batch",
+            run_type="chain",
+            inputs={"branches": len(calls), "calls": [c[0] for c in calls]},
+        ):
+            pool = ThreadPoolExecutor(max_workers=min(ctx.max_parallel, len(calls)))
+            futures: dict[int, Any] = {}
+            try:
+                for index, (name, params, _plan_index) in enumerate(calls):
+                    if ctx.cancel_checker():
+                        cancelled = True
+                        results[index] = {"error": "Tool batch branch cancelled."}
+                        continue
+                    branch_context = contextvars.copy_context()
+                    futures[index] = pool.submit(branch_context.run, _execute_one, ctx, name, params)
+                for index, future in futures.items():
+                    results[index] = future.result()
+            finally:
+                pool.shutdown(wait=True)
     return _BatchDispatch(
         batch_id=f"batch-{calls[0][2]}-{state.get('iteration', 0)}",
         head_step=head_step,

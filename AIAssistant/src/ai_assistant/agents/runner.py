@@ -52,6 +52,7 @@ def _run_graph(
     granted_fingerprint: str,
     ls_ctx: dict[str, Any],
     ls_ctx_mgr: Any,
+    otel_cm: Any = None,
 ) -> dict[str, Any]:
     """Execute the graph, closing the trace and the task record on failure.
 
@@ -74,6 +75,8 @@ def _run_graph(
             granted_fingerprint=granted_fingerprint,
         ))
     except BaseException as error:
+        if otel_cm is not None:
+            otel_cm.__exit__(type(error), error, error.__traceback__)
         ls_ctx["outputs"] = {"status": "error", "error": str(error)}
         ls_ctx_mgr.__exit__(type(error), error, error.__traceback__)
         # Nothing below runs on this path, so without this call a crash left
@@ -131,7 +134,11 @@ def run_langgraph_agent(
 
     logger.info("Starting LangGraph session %s", session_id)
 
-    # ── LangSmith tracing ────────────────────────────────────────────────────
+    # ── Tracing (LangSmith + OpenTelemetry) ──────────────────────────────────
+    _otel_cm = deps.span_fn("agent.session", session_id=session_id, task=task[:200])
+    if _otel_cm is not None:
+        _otel_cm.__enter__()
+
     _ls_ctx_mgr = deps.langsmith_trace_fn(
         "agent.session", run_type="chain",
         inputs={"task": task[:200], "session_id": session_id,
@@ -150,13 +157,14 @@ def run_langgraph_agent(
         resume_with_reflection=resume_with_reflection, approval_granted=approval_granted,
         approval_scope=approval_scope, granted_fingerprint=granted_fingerprint,
         ls_ctx=_ls_ctx, ls_ctx_mgr=_ls_ctx_mgr,
+        otel_cm=_otel_cm,
     )
 
     # ── State → response ─────────────────────────────────────────────────────
     pending_status = _pending_status(state)
     _finish_task(deps, session_id, state)
     total_ms = round((time.monotonic() - request_started) * 1000)
-    _close_trace(_ls_ctx, _ls_ctx_mgr, pending_status, state, total_ms)
+    _close_trace(_ls_ctx, _ls_ctx_mgr, pending_status, state, total_ms, otel_cm=_otel_cm)
 
     parked = _pending_response(
         deps=deps, session_id=session_id, task=task, state=state,

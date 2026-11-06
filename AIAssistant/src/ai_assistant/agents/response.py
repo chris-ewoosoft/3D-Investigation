@@ -51,11 +51,14 @@ def _finish_task(deps: RunDeps, session_id: str, state: dict[str, Any]) -> None:
 
 
 def _close_trace(ctx: dict[str, Any], ctx_mgr: Any, pending_status: str,
-                 state: dict[str, Any], total_ms: int) -> None:
+                 state: dict[str, Any], total_ms: int,
+                 otel_cm: Any = None) -> None:
     """Record the run outcome on the LangSmith trace and close it."""
     ctx["outputs"] = {"status": pending_status, "iterations": state.get("iteration", 0),
                       "duration_ms": total_ms, "step_count": len(state.get("steps", []))}
     ctx_mgr.__exit__(None, None, None)
+    if otel_cm is not None:
+        otel_cm.__exit__(None, None, None)
 
 
 def _store_pending_action(

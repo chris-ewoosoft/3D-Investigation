@@ -19,7 +19,7 @@ from ..domain.context_budget import (
     completion_token_budget,
     context_exhausted,
 )
-from ..domain.governance import has_sensitive_content
+from ..domain.governance import has_sensitive_content, redact_value
 from ..orchestration.state import CONTEXT_EXHAUSTED_MESSAGE
 from ..ports import AgentToolCatalog, LLMRuntime
 from ..tools.action_manifest import validate_action_params
@@ -68,8 +68,16 @@ def _remote_dispatch(
     remote_payload = {"tool": tool_name, "parameters": params,
                       "session_id": session_id,
                       "idempotency_key": delegation.idempotency_key}
-    with deps.span_fn("agent.a2a_delegate", tool=tool_name):
-        result: dict[str, Any] = deps.a2a_router.route(delegation.specialist.value, task, remote_payload)
+    with deps.span_fn(f"agent.a2a_delegate.{tool_name}", tool=tool_name):
+        with deps.langsmith_trace_fn(
+            f"agent.a2a_delegate.{tool_name}",
+            run_type="tool",
+            inputs={"tool": tool_name, "parameters": redact_value(params)},
+            metadata={"session_id": session_id, "specialist": str(delegation.specialist)},
+        ) as a2a_ls_ctx:
+            result: dict[str, Any] = deps.a2a_router.route(delegation.specialist.value, task, remote_payload)
+            if isinstance(a2a_ls_ctx, dict):
+                a2a_ls_ctx["outputs"] = {"source": result.get("source", "local"), "success": "error" not in result}
     deps.audit_agent_fn("tool_transport", delegation, source=result.get("source", "local"))
     return result
 
@@ -121,13 +129,21 @@ def _execute_tool(
                                   session_id=session_id, tool_name=tool_name,
                                   params=params, approval_token=approval_token)
     else:
-        with deps.span_fn("agent.tool", tool=tool_name, session_id=session_id):
-            if deps.tool_gateway is None:
-                result = dict(RUNTIME_UNCONFIGURED_RESULT)
-            else:
-                result = (deps.tool_gateway.execute_approved(tool_name, params, approval_token)
-                          if approval_token
-                          else deps.tool_gateway.execute(tool_name, params))
+        with deps.span_fn(f"agent.tool.{tool_name}", tool=tool_name, session_id=session_id):
+            with deps.langsmith_trace_fn(
+                f"agent.tool.{tool_name}",
+                run_type="tool",
+                inputs={"tool": tool_name, "params": redact_value(params)},
+                metadata={"session_id": session_id, "tool": tool_name},
+            ) as tool_ls_ctx:
+                if deps.tool_gateway is None:
+                    result = dict(RUNTIME_UNCONFIGURED_RESULT)
+                else:
+                    result = (deps.tool_gateway.execute_approved(tool_name, params, approval_token)
+                              if approval_token
+                              else deps.tool_gateway.execute(tool_name, params))
+                if isinstance(tool_ls_ctx, dict):
+                    tool_ls_ctx["outputs"] = {"success": "error" not in result}
     deps.audit_agent_fn("tool_completed", delegation, success="error" not in result)
     deps.record_tool_fn(tool_name, "error" not in result, time.monotonic() - tool_started)
     return result
@@ -196,11 +212,20 @@ def build_run_graph(
         )
         logger.info("LangGraph calls LLM (%d msgs, ~%d tokens)", len(messages), estimated_tokens)
         from .completion import constrained_completion
-        answer = constrained_completion(
-            messages, max_tokens, current_temp,
-            llm_runtime, deps.backend_mode_fn, deps.openai_compatible_fn,
-            openai_tools, grammar_schema, deps.record_token_usage_fn
-        )
+        with deps.span_fn("agent.llm.completion", estimated_tokens=estimated_tokens, temperature=current_temp):
+            with deps.langsmith_trace_fn(
+                "agent.llm.completion",
+                run_type="llm",
+                inputs={"estimated_tokens": estimated_tokens, "temperature": current_temp, "messages_count": len(messages)},
+                metadata={"max_tokens": max_tokens, "temperature": current_temp},
+            ) as llm_ls_ctx:
+                answer = constrained_completion(
+                    messages, max_tokens, current_temp,
+                    llm_runtime, deps.backend_mode_fn, deps.openai_compatible_fn,
+                    openai_tools, grammar_schema, deps.record_token_usage_fn
+                )
+                if isinstance(llm_ls_ctx, dict):
+                    llm_ls_ctx["outputs"] = {"answer_chars": len(answer)}
         logger.info("LangGraph LLM output (%d chars): %s", len(answer), answer[:120].replace("\n", " "))
         return answer
 
