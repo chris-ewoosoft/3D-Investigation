@@ -199,16 +199,16 @@ reporting a gap.
 |------|----------|-------|
 | `src/services/ai/aimodelloadservice.cpp` | 100.0 % (47/47) | 100 |
 | `src/services/ai/aipredictionlogservice.cpp` | 100.0 % (30/30) | 100 |
-| `src/services/ai/airequestqueue.cpp` | 100.0 % (71/71) | 100 |
+| `src/services/ai/airequestqueue.cpp` | 100.0 % (71/71) | 98 |
 | `src/services/ai/aiyolopostprocessor.cpp` | 100.0 % (84/84) | 100 |
 | `src/services/ai/chatsessionmanager.cpp` | 100.0 % (78/78) | 100 |
 | `src/services/ai/chatsessionstore.cpp` | 100.0 % (62/62) | 100 |
 | `src/services/ai/chatmessage.cpp` | 88.6 % (39/44) | 88 |
 | `src/services/ai/agentactionmanifest.cpp` | 100.0 % (70/70) | 100 |
-| `src/services/ai/agentactiondispatcher.cpp` | 100.0 % (32/32) | 100 |
+| `src/services/ai/agentactiondispatcher.cpp` | 100.0 % (32/32) | 96 |
 | `src/services/ai/aiadminclient.cpp` | 75.7 % (28/37) | 75 |
 | `src/services/ai/aiassistant.cpp` | 65.2 % (305/468) | 64 |
-| `src/services/ai/aiassistantpayloadbuilder.cpp` | 90.0 % (36/40) | 89 |
+| `src/services/ai/aiassistantpayloadbuilder.cpp` | 90.0 % (36/40) | 87 |
 | `src/services/ai/aiserverprocesscontroller.cpp` | 95.3 % (123/129) | 94 |
 | `src/services/ai/aiinferenceguard.cpp` | 75.0 % (30/40) | 75 |
 | `src/services/ai/aiservice.cpp` | 90.4 % (47/52) | 86 |
@@ -294,7 +294,7 @@ references a vertex the trim removed.
 | `src/utils/customprogressdialog.cpp` | 95.2 % (59/62) | 95 |
 | `src/utils/stylemanager.cpp` | 90.2 % (46/51) | 90 |
 | `src/utils/moderndialog.cpp` | 78.6 % (55/70) | 78 |
-| `src/utils/logger.cpp` | 87.1 % (54/62) | 87 |
+| `src/utils/logger.cpp` | 87.1 % (54/62) | 86 |
 | `src/utils/modernmessagebox.cpp` | 46.8 % (22/47) | 46 |
 
 **plugin: AI assistant**
