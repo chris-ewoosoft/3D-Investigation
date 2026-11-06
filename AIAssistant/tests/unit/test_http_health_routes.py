@@ -15,6 +15,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ai_assistant.adapters.http.health_routes import build_health_router
+from ai_assistant.adapters.http.security import TransportPolicy
+
+_ADMIN_HEADERS = {"Authorization": "Bearer admin-token"}
+_AGENT_HEADERS = {"Authorization": "Bearer agent-token"}
 
 
 def _build_client(
@@ -52,6 +56,10 @@ def _build_client(
             chars_per_token=4,
             model_idx=1,
             app=app,
+            policy=TransportPolicy(
+                admin_token="admin-token",
+                agent_token="agent-token",
+            ),
         )
     )
     return TestClient(app, client=("127.0.0.1", 50000))
@@ -124,7 +132,7 @@ class HealthRoutesTest(unittest.TestCase):
     def test_metrics_404_when_observability_disabled(self) -> None:
         client = _build_client()
         with mock.patch("ai_assistant.observability.prometheus_payload", return_value=None):
-            response = client.get("/metrics")
+            response = client.get("/metrics", headers=_ADMIN_HEADERS)
         self.assertEqual(response.status_code, 404)
 
     def test_metrics_exposes_prometheus_payload(self) -> None:
@@ -132,21 +140,40 @@ class HealthRoutesTest(unittest.TestCase):
         with mock.patch(
             "ai_assistant.observability.prometheus_payload", return_value="# HELP fake"
         ):
-            response = client.get("/metrics")
+            response = client.get("/metrics", headers=_ADMIN_HEADERS)
         self.assertEqual(response.status_code, 200)
         self.assertIn("version=0.0.4", response.headers["content-type"])
         self.assertEqual(response.text, "# HELP fake")
 
     def test_models_lists_current_model(self) -> None:
         client = _build_client(llm=object())
-        data = client.get("/v1/models").json()
+        data = client.get("/v1/models", headers=_AGENT_HEADERS).json()
         self.assertEqual(data["data"][0]["id"], "fake-model")
         self.assertEqual(data["data"][0]["object"], "model")
 
     def test_models_is_empty_after_the_model_is_released(self) -> None:
         """A released model must not be advertised to OpenAI-compatible clients."""
         client = _build_client(llm=None)
-        self.assertEqual(client.get("/v1/models").json(), {"data": []})
+        self.assertEqual(
+            client.get("/v1/models", headers=_AGENT_HEADERS).json(),
+            {"data": []},
+        )
+
+    def test_only_health_probes_are_public(self) -> None:
+        client = _build_client(llm=object())
+        for path in ("/health", "/livez", "/readyz"):
+            with self.subTest(path=path):
+                self.assertIn(client.get(path).status_code, (200, 503))
+        self.assertEqual(client.get("/metrics").status_code, 401)
+        self.assertEqual(client.get("/v1/models").status_code, 401)
+        self.assertEqual(
+            client.get("/metrics", headers=_AGENT_HEADERS).status_code,
+            401,
+        )
+        self.assertEqual(
+            client.get("/v1/models", headers=_ADMIN_HEADERS).status_code,
+            401,
+        )
 
 
 if __name__ == "__main__":

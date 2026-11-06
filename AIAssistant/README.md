@@ -31,6 +31,8 @@ AIAssistant/
 │  ├─ settings.py                     # CHỦ SỞ HỮU duy nhất của môi trường process (ADR 0001/0014):
 │  │                                  #   đọc .env, áp mặc định, ArchitectureSettings,
 │  │                                  #   TransportTokens (AI_*_TOKEN), agent_bind_host/port
+│  ├─ exec_policy.py                  # Kernel policy cho executable/argv được phép
+│  ├─ path_policy.py                  # Kernel policy chuẩn hoá và giới hạn đường dẫn
 │  ├─ image_utils.py                  # Trợ giúp ảnh chung cho hai bên vision và retrieval (module lá)
 │  │
 │  ├─ domain/                         # ── LỚP DOMAIN: thuần, không import framework nào ──
@@ -40,6 +42,8 @@ AIAssistant/
 │  │  ├─ context_budget.py            # Chính sách ngân sách context-window (CONTEXT_TOKEN_MARGIN…)
 │  │  ├─ errors.py                    # Exception có kiểu của nền tảng
 │  │  ├─ governance.py                # Quản trị dữ liệu: scrub PII, redact_value, SENSITIVE_KEYS
+│  │  ├─ memory.py                    # Value/policy cho semantic, episodic, procedural memory
+│  │  ├─ parallel.py                  # Hợp đồng nhóm bước có thể fan-out an toàn
 │  │  ├─ pending.py                   # Chính sách chung cho các mục phê duyệt/hành động đang treo
 │  │  ├─ security.py                  # DataClassification, Principal, current_principal, bind_principal
 │  │  ├─ specialists.py               # Từ vựng chuyên gia: TRANSFER_TARGETS (một nguồn đặt tên duy nhất)
@@ -52,6 +56,7 @@ AIAssistant/
 │  │  ├─ agent_runs.py                # Vòng đời task A2A bền vững trên engine điều phối hoán đổi được
 │  │  ├─ approvals.py                 # Grant dùng một lần backing tool gateway (ADR 0009)
 │  │  ├─ coordination.py              # TaskRecord + TaskCoordinator (vòng đời & đo thời gian hủy)
+│  │  ├─ memory.py                    # MemoryService: recall/consolidate qua port
 │  │  ├─ tasks.py                     # TaskService: chạy task trong worker thread, snapshot contextvars
 │  │  ├─ tools.py                     # ToolExecutionService — CỔNG THỰC THI VÀ CHÍNH SÁCH DUY NHẤT
 │  │  └─ validation.py                # Validator JSON-Schema con tối giản ở mọi biên giới protocol công cụ
@@ -68,9 +73,12 @@ AIAssistant/
 │  │  ├─ context.py                   # AgentRunContext: bó wiring dùng chung cho 3 service (ADR 0012)
 │  │  ├─ deps.py                      # RunDeps: dataclass đóng băng các dependency inject (ADR 0013)
 │  │  ├─ completion.py                # Adapter completion: constrained/structured completion + grammar cache
+│  │  ├─ catalog.py                   # Catalogue specialist/tool được inject
 │  │  ├─ prompts.py                   # Build system prompt — không gọi LLM, không I/O
 │  │  ├─ models.py                    # AgentExecuteRequest/AgentApproveRequest/… (schema Pydantic)
 │  │  ├─ ids.py                       # Trợ giúp định danh dùng chung cho lớp agent
+│  │  ├─ session_locks.py             # RLock bounded theo session
+│  │  ├─ short_term_memory.py         # Buffer hội thoại bounded theo session
 │  │  └─ pending_store.py             # MemoryPendingStore — mặc định của chính lớp agent (ADR 0003)
 │  │
 │  ├─ orchestration/                  # ── LỚP ORCHESTRATION: đồ thị LangGraph ──
@@ -104,6 +112,7 @@ AIAssistant/
 │  │  ├─ tool_contract.py             # Ánh xạ và tương thích hợp đồng công cụ
 │  │  ├─ sandbox.py                   # Sandbox policy-first cho công cụ phá huỷ (run_command…)
 │  │  ├─ action_manifest.py           # Hợp đồng hành động desktop có phiên bản (chia sẻ với C++)
+│  │  ├─ aliases.py                   # Alias tên tool tương thích
 │  │  ├─ lsp_client.py                # Client LSP cho công cụ của Coding Agent
 │  │  └─ builtin/
 │  │     ├─ __init__.py               # builtin tools package
@@ -160,6 +169,7 @@ AIAssistant/
 │  │  │  ├─ chat_routes.py            # /v1/chat/completions (JSON)
 │  │  │  ├─ agent_routes.py           # /v1/agent/execute|cancel|approve|ui-action-result
 │  │  │  ├─ admin_routes.py           # /admin/* (reload-model, reload-rag, shutdown…)
+│  │  │  ├─ rate_limit.py             # Admission governor HTTP per-peer
 │  │  │  ├─ security.py               # TransportPolicy: peer loopback, Origin, bearer (ADR 0008)
 │  │  │  └─ _types.py                 # Kiểu cấu trúc cho các dependency được tiêm vào router
 │  │  ├─ orchestration/
@@ -170,6 +180,7 @@ AIAssistant/
 │  │     ├─ __init__.py               # Persistence adapters package
 │  │     ├─ checkpointing.py          # Checkpointer LangGraph hoán đổi được, fallback an toàn
 │  │     ├─ pending_store.py          # PendingActionStore bền vững (file-backed) cho phê duyệt
+│  │     ├─ memory_store.py           # Long-term memory SQLite đã seal
 │  │     ├─ sqlite_store.py           # TaskStore lưu SQLite
 │  │     └─ storage_crypto.py         # AES-256-GCM field cipher cho state at-rest (ADR 0027)
 │  │
@@ -225,7 +236,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 50 Architecture Decision Record (0001–0050)
+├─ Docs/adr/                          # 51 Architecture Decision Record (0001–0051)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -310,17 +321,18 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   bao giờ chạm đĩa ở dạng rõ. Cache không xác thực được (sai key, bị sửa,
   chưa seal, cache của version cũ) là **miss** → dựng lại, không bao giờ
   unpickle payload chưa xác thực.
-* **State cục bộ được mã hoá at-rest** (ADR 0027). `adapters/persistence/storage_crypto.py`
-  bọc **theo field** bằng AES-256-GCM: envelope `enc:v1:<base64(nonce||ciphertext)>`,
-  nonce random 96-bit cho từng field, và **tên field làm associated data** nên
-  ciphertext bị chuyển sang cột khác sẽ fail authentication. `compose()` nạp key
+* **State cục bộ được mã hoá at-rest và ràng buộc theo dòng** (ADR 0027/0037).
+  `adapters/persistence/storage_crypto.py` bọc **theo field** bằng AES-256-GCM:
+  envelope `enc:v1:<base64(nonce||ciphertext)>`, nonce random 96-bit, và AAD
+  mang cả id dòng lẫn tên field (`task.v2:<id>:<field>`). Ciphertext không thể
+  chuyển sang cột hoặc dòng khác mà vẫn xác thực. `compose()` nạp key
   **một lần** (fail-closed) rồi tiêm vào `SqliteTaskStore` và
   `PendingActionStore`; đọc state đã seal mà thiếu/sai key thì **abort**, không
   bao giờ trả ciphertext lên tầng trên. Key lấy từ `AI_STORAGE_KEY` →
   `AI_STORAGE_KEY_FILE` → tự sinh một lần ở `%LOCALAPPDATA%`/`$XDG_CONFIG_HOME`
   (**ngoài** `APP_DATA_DIR`, nên backup volume không mang theo key). Cột chỉ mô tả
-  (id, status, owner, timestamp) vẫn plaintext để SQL filter/retention/tenant
-  còn chạy trên chỉ mục thật.
+  (id, status, owner, timestamp) vẫn plaintext để SQL filter/retention chạy,
+  nhưng identity bundle đã seal mới là nguồn sự thật và được đối chiếu mỗi lần đọc.
 * **Hủy job được đo đúng chỗ runner dừng.** `TaskCoordinator.cancel()` đóng dấu
   `cancelled_at`, `finish()` báo delta qua observer mà composition root tiêm vào
   histogram Prometheus `agent_recovery_seconds`.
@@ -456,10 +468,12 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
   `has_step_type` nằm ở `domain.steps`; `validate_steps` kiểm lại danh sách bước
   đã persist so với `get_args(StepType)`. Không request HTTP/A2A inbound nào
   mang trường `steps` — có test ghim điều đó.
-* **Cứng hoá transport.** ADR 0008 — peer loopback + allow-list `Origin` + bearer
-  tuỳ chọn theo từng bề mặt, A2A remota không thể bật khi thiếu credential:
-  `AI_A2A_TOKEN` (single-tenant) hoặc mapping `AI_A2A_TENANTS` (mỗi token sở
-  hữu task riêng). ADR 0009 — phê duyệt là capability dùng một lần, gắn với đúng
+* **Cứng hoá transport.** ADR 0048/0051 — peer loopback + allow-list `Origin` +
+  bearer **bắt buộc** trên mọi bề mặt đặc quyền. A2A inbound dùng
+  `AI_A2A_TOKEN` (single-tenant) hoặc `AI_A2A_TENANTS`; discovery/dispatch
+  outbound dùng `AI_A2A_OUTBOUND_TOKEN` (fallback tường minh sang token
+  single-tenant). Thiếu credential thì adapter từ chối trước khi chạm mạng.
+  ADR 0009 — phê duyệt là capability dùng một lần, gắn với đúng
   lời gọi (`approval_fingerprint` + grant store). ADR 0010 — domain sở hữu một
   chính sách redaction duy nhất. ADR 0011 — sandbox lệnh từ chối code interpreter
   nội tuyến (`-c`, `-m`, `-`) và shell substitution.
@@ -487,12 +501,13 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
 
 | Bề mặt | Endpoint |
 |--------|----------|
-| Health & metrics | `/health`, `/livez`, `/readyz`, `/metrics` |
+| Health probes (public) | `/health`, `/livez`, `/readyz` |
+| Metrics (admin bearer) | `/metrics` |
 | Chat (tương thích OpenAI) | `/v1/models`, `/v1/chat/completions` (JSON; SSE là ở `/v1/agent/execute`) |
 | Agent | `/v1/agent/execute` (JSON hoặc SSE), `/v1/agent/cancel`, `/v1/agent/approve`, `/v1/agent/ui-action-result` |
 | Admin | `/admin/release-vram`, `/admin/reload-model`, `/admin/reload-rag`, `/admin/reload-agent`, `/admin/shutdown` |
 | A2A | `/.well-known/agent.json`, `/message:send`, `/tasks/*` (`:cancel`, `:resume`, `:subscribe`), `/a2a/tasks/*` (tương thích) |
-| MCP | `/mcp` (chỉ mount khi bật và hợp lệ; loopback-only trừ khi có opt-in tường minh) |
+| MCP | `/mcp` (chỉ mount khi bật **và** có `AI_MCP_TOKEN`) |
 
 **A2A.** Bề mặt chính là `POST /message:send`, `GET /tasks/{id}`, `GET /tasks`,
 `POST /tasks/{id}:cancel`, `POST /tasks/{id}:subscribe`; discovery nằm ở
@@ -502,10 +517,12 @@ Qt làm **tạm dừng** task bền vững ở trạng thái `input-required`; c
 tục qua extension được khai báo
 `urn:3d-reconstruction:a2a:approval-resume:v1` tại `POST /tasks/{id}:resume`;
 ngữ cảnh thực thi được persist nội bộ và không bao giờ lộ trong artifact.
+Mọi route A2A inbound yêu cầu bearer; client outbound dùng cùng hợp đồng cho cả
+Agent Card discovery lẫn task submit (`AI_A2A_OUTBOUND_TOKEN`).
 
 **MCP.** `adapters/mcp.py` là adapter bên ngoài; thực thi agent **không** gọi
-`/mcp` nội bộ. Nếu bind host vươn ra mạng mà thiếu `AI_MCP_TOKEN`, endpoint bị
-từ chối mount (fail closed, ADR 0008).
+`/mcp` nội bộ. Thiếu `AI_MCP_TOKEN` thì endpoint không được mount, kể cả trên
+loopback (fail closed, ADR 0048).
 
 **Plugins.** Tool tương thích builtin được đăng ký trong lúc bootstrap. Plugin
 bên thứ ba dùng entry-point group `ai_assistant.plugins` và chỉ được nạp khi
@@ -559,7 +576,11 @@ Hồ sơ triển khai là TOML nhiều lớp: `config/base.toml` → `config/<pr
 ```powershell
 cd AIAssistant
 
-# Chạy máy chủ trực tiếp (loopback, cổng 8080; AGENT_HOST / AGENT_PORT đổi địa chỉ bind)
+# Chạy thủ công phải sở hữu token; desktop Qt tự sinh và truyền token riêng.
+$env:AI_ADMIN_TOKEN = "replace-with-a-secret"
+$env:AI_AGENT_TOKEN = "replace-with-a-different-secret"
+
+# Loopback, cổng 8080; AGENT_HOST / AGENT_PORT đổi địa chỉ bind.
 python src/ai_assistant/bootstrap/server.py
 # cùng một thứ khi package đã nằm trên path (pip install -e . hoặc PYTHONPATH=src):
 #   python -m ai_assistant.bootstrap.server
@@ -576,6 +597,7 @@ curl http://127.0.0.1:8080/health
 
 # Chạy một nhiệm vụ agent (agent sẽ xin phê duyệt trước khi write_file / run_command)
 curl -X POST http://127.0.0.1:8080/v1/agent/execute \
+  -H "Authorization: Bearer $AI_AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"task": "Liệt kê các file trong src/", "session_id": "demo", "language": "en"}'
 ```
@@ -585,7 +607,11 @@ Container:
 ```powershell
 # Build từ gốc repo để tiền tố AIAssistant/ phân giải đúng
 docker build -f AIAssistant/Dockerfile -t ai-assistant .
-docker run -p 8080:8080 -v ${PWD}/AIAssistant/Models:/app/AIAssistant/Models ai-assistant
+docker run -p 8080:8080 `
+  -e AI_ADMIN_TOKEN="replace-with-a-secret" `
+  -e AI_AGENT_TOKEN="replace-with-a-different-secret" `
+  -v ${PWD}/AIAssistant/Models:/app/data/AIAssistant/Models `
+  ai-assistant
 ```
 
 Image chạy bằng user không phải root và đẩy dữ liệu có thể thay đổi (cache RAG,
@@ -599,10 +625,11 @@ cd AIAssistant
 ruff check .
 python -m mypy src/ai_assistant
 python -m compileall -q evals src
-PYTHONPATH=src lint-imports --no-logo
-PYTHONPATH=src python -m coverage run -m unittest discover -s tests -p "test_*.py"
+$env:PYTHONPATH = "src"
+lint-imports --no-logo
+python -m coverage run -m unittest discover -s tests -p "test_*.py"
 python -m coverage report
-PYTHONPATH=src python scripts/mutation_check.py
+python scripts/mutation_check.py
 ```
 
 Các cổng là **cấu hình**, không phải cờ dòng lệnh: `pyproject.toml` sở hữu breadth
@@ -610,8 +637,8 @@ lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy stri
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
 một thứ. Theo lần đo ngày 2026-11-03 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (10 468 statement / 2 848 branch, 2 485 test), và
-**260/260** kill trong mutation check. Số mutant tối thiểu cũng là một cổng
+branch toàn package (10 508 statement / 2 862 branch, 2 495 test), và
+**269/269** kill trong mutation check. Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
 quyết định *nhìn thấy được*. Từ 2026-10-28, cổng còn có sàn **theo từng file**
 (`PINNED_DECISION_FILES`): một file mang quyết định load-bearing phải khai báo
@@ -780,7 +807,7 @@ artifact đúng SHA đạt **23/24 (95,83%)**, coverage 24/24 và mọi slice xa
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 50 Architecture Decision Record (0001–0050) |
+| [`Docs/adr/`](Docs/adr/) | 51 Architecture Decision Record (0001–0051) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -824,11 +851,22 @@ Các quyết định trọng yếu, theo thứ tự:
 [0033](Docs/adr/0033-one-spelling-of-a-path.md) cổng ghi so trên *một* cách viết của đường dẫn,
 [0034](Docs/adr/0034-the-controls-the-gates-cannot-see.md) đóng những control mà cổng kiểm không nhìn thấy,
 [0035](Docs/adr/0035-one-rule-one-owner.md) đóng *lớp* lỗi: một quy tắc, một chủ sở hữu,
-[0036](Docs/adr/0036-a-store-with-a-key-never-accepts-what-it-cannot-authenticate.md) một store có khoá không bao giờ chấp nhận nội dung nó không xác thực được.
-
-Các quyết định sau tiếp tục chuỗi đánh giá độc lập; mới nhất là
-[0050](Docs/adr/0050-balanced-model-in-loop-release-gate.md), ma trận model-in-loop
-cân bằng theo ngôn ngữ và loại bước.
+[0036](Docs/adr/0036-a-store-with-a-key-never-accepts-what-it-cannot-authenticate.md) một store có khoá không bao giờ chấp nhận nội dung nó không xác thực được,
+[0037](Docs/adr/0037-closing-the-command-surface-the-policy-package-and-the-row-bound-state.md) đóng command surface và state ràng buộc theo dòng,
+[0038](Docs/adr/0038-the-corpus-builder-is-the-second-reader.md) corpus builder là reader thứ hai,
+[0039](Docs/adr/0039-plugin-tools-first-class-fail-closed-bridges-bounded-session-state.md) plugin tool hạng nhất và session state hữu hạn,
+[0040](Docs/adr/0040-one-model-lease-per-entry-point-that-runs-the-graph.md) mỗi entry point chạy graph giữ một model lease,
+[0041](Docs/adr/0041-one-model-owner-and-admission-before-threads.md) một model owner và admission trước khi tạo thread,
+[0042](Docs/adr/0042-the-owner-enforces-the-invariant.md) chính owner thực thi invariant,
+[0043](Docs/adr/0043-memory-short-and-long-term.md) bộ nhớ ngắn hạn và dài hạn,
+[0044](Docs/adr/0044-parallel-tool-batch-in-the-tool-node.md) batch tool song song có kiểm soát,
+[0045](Docs/adr/0045-the-agent-surface-is-a-port-too.md) agent surface cũng là một port,
+[0046](Docs/adr/0046-split-the-composition-root.md) tách composition root,
+[0047](Docs/adr/0047-close-the-fail-open-boundaries.md) đóng các biên fail-open,
+[0048](Docs/adr/0048-authenticated-loopback-and-release-model-gate.md) loopback có xác thực và model release gate,
+[0049](Docs/adr/0049-authenticated-shutdown-in-server-manager.md) shutdown có xác thực,
+[0050](Docs/adr/0050-balanced-model-in-loop-release-gate.md) model-in-loop cân bằng,
+[0051](Docs/adr/0051-end-to-end-authenticated-a2a-and-observable-http-boundaries.md) A2A xác thực end-to-end và HTTP boundary quan sát được.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

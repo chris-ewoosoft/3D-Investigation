@@ -86,9 +86,10 @@ class RemoteAgentRegistry:
     request threads resolve specialists.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, bearer_token: str = "") -> None:
         self._agents: dict[str, RemoteAgent] = {}
         self._lock = threading.RLock()
+        self._bearer_token = bearer_token.strip()
 
     def find(self, specialist_id: str) -> RemoteAgent | None:
         """Return the first agent advertising ``specialist_id``."""
@@ -135,6 +136,9 @@ class RemoteAgentRegistry:
         targets = urls if urls is not None else sorted(a2a_trusted_endpoints())
         if not targets:
             return self.snapshot()
+        if not self._bearer_token:
+            logger.warning("A2A discovery skipped: outbound bearer token is not configured")
+            return self.snapshot()
 
         for base_url in targets:
             if not isinstance(base_url, str) or not _is_http_url(base_url):
@@ -143,7 +147,10 @@ class RemoteAgentRegistry:
             card_url = (base_url if base_url.rstrip("/").endswith(".well-known/agent.json")
                         else base_url.rstrip("/") + "/.well-known/agent.json")
             try:
-                req = Request(card_url, headers={"Accept": "application/json"})
+                req = Request(card_url, headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {self._bearer_token}",
+                })
                 with urlopen(req, timeout=_DISCOVERY_TIMEOUT) as resp:
                     raw = resp.read(_DISCOVERY_MAX_BYTES + 1)
                 if len(raw) > _DISCOVERY_MAX_BYTES:
@@ -253,12 +260,17 @@ class A2ARouter:
     """
 
     def __init__(self, client: Any | None = None,
-                 registry: "RemoteAgentRegistry | None" = None) -> None:
+                 registry: "RemoteAgentRegistry | None" = None,
+                 bearer_token: str = "") -> None:
         # Injectable for tests; otherwise a per-agent allowlist client is built.
         self._client = client
+        self._bearer_token = bearer_token.strip()
         # The composition root passes its registry; a bare router stays
         # local-only with an empty one instead of reaching for module state.
-        self._registry = registry if registry is not None else RemoteAgentRegistry()
+        self._registry = (
+            registry if registry is not None
+            else RemoteAgentRegistry(bearer_token=self._bearer_token)
+        )
 
     def find_remote(self, specialist_id: str) -> Any | None:
         """Find a remote agent whose skills include ``specialist_id``."""
@@ -308,7 +320,10 @@ class A2ARouter:
         the discovered agent's own URL: otherwise the ``submit`` policy check
         would be vacuously true and any discovered card could be called.
         """
-        client = self._client or TrustedA2AClient(trusted_endpoints=a2a_trusted_endpoints())
+        client = self._client or TrustedA2AClient(
+            trusted_endpoints=a2a_trusted_endpoints(),
+            bearer_token=self._bearer_token,
+        )
         # The client's "sensitive data cannot leave the trust boundary" rule is
         # only real if the caller declares what it is sending: a payload holding
         # a credential is classified RESTRICTED here so that check can fire.

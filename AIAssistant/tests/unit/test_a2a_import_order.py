@@ -161,8 +161,12 @@ class CompositionRootWiresTheRemoteLookupTest(unittest.TestCase):
         self.assertIn("delegate_fn", keywords)
 
     def test_the_router_and_resolver_share_one_registry_instance(self) -> None:
-        self.assertIn("A2ARouter(registry=a2a_registry)", self.source)
-        self.assertIn("a2a_registry = RemoteAgentRegistry()", self.source)
+        self.assertIn("registry=a2a_registry,", self.source)
+        self.assertIn("bearer_token=outbound_a2a_token,", self.source)
+        self.assertIn(
+            "a2a_registry = RemoteAgentRegistry(bearer_token=outbound_a2a_token)",
+            self.source,
+        )
 
     def test_no_process_wide_lookup_remains(self) -> None:
         self.assertNotIn("set_remote_specialist_lookup", self.source)

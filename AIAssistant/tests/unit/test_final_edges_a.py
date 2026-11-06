@@ -441,6 +441,7 @@ class AgentCardReadTests(unittest.TestCase):
         response.__enter__.return_value = response
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"http://remote.test"}), timeout_seconds=1,
+            bearer_token="peer-token",
         )
         with patch("ai_assistant.adapters.a2a_client.urlopen", return_value=response):
             card = client._read_card("http://remote.test")

@@ -1,8 +1,9 @@
 # RUNBOOK — AIAssistant vận hành production
 
 Tài liệu này dành cho profile **server/nhiều người dùng**. Desktop single-user
-không cần runbook này: mọi cổng dưới đây là opt-in (ADR 0023/0024) và mặc định
-giữ nguyên hành vi cũ.
+vẫn tuân theo các mặc định fail-closed (token bắt buộc, sandbox isolation mặc
+định bật); Qt composition root tự cấp token và deployment thủ công phải khai
+báo rõ các ngoại lệ (ADR 0048/0051).
 
 ## 1. Checklist bật profile production
 
@@ -10,6 +11,11 @@ giữ nguyên hành vi cũ.
 
 | Biến | Giá trị production | Vì sao |
 |------|--------------------|--------|
+| `AI_ADMIN_TOKEN` | Secret ngẫu nhiên, lấy từ secret store | Bắt buộc cho admin và `/metrics` |
+| `AI_AGENT_TOKEN` | Secret khác admin token | Bắt buộc cho chat, agent và `/v1/models` |
+| `AI_A2A_TOKEN` hoặc `AI_A2A_TENANTS` | Credential inbound | Không có tenant A2A ẩn danh |
+| `AI_A2A_OUTBOUND_TOKEN` | Credential peer cấp cho instance này | Discovery/dispatch A2A có bearer; có thể dùng chung `AI_A2A_TOKEN` chỉ trong single-tenant |
+| `AI_MCP_TOKEN` | Secret riêng cho MCP | Thiếu token thì `/mcp` không được mount |
 | `AGENT_SANDBOX_RUNTIME` | `docker` + `AGENT_SANDBOX_IMAGE=<image đã duyệt>` | OS boundary cho tool execution |
 | `AGENT_SANDBOX_REQUIRE_ISOLATION` | `1` (mặc định) | Từ chối chạy nếu container runtime không bật (fail closed) |
 | `AGENT_CHECKPOINT_BACKEND` | `sqlite` hoặc `postgres` (+ `AGENT_CHECKPOINT_URL`) | Durable resume sau restart |
@@ -86,8 +92,8 @@ Vì vậy, trước khi coi deployment là production:
 
 Cơ chế này chống được sao chép volume, đọc backup và account khác trên cùng
 máy; **không** chống được attacker đã chạy được code dưới user đó (họ đọc
-được file key). Cùng giới hạn đã nêu cho HMAC cache RAG. Xoay key (re-key) và
-gọi KMS/DPAPI trực tiếp chưa có trong repo: xem
+được file key). Cùng giới hạn đã nêu cho HMAC cache RAG. Tích hợp xoay khoá tự
+động qua KMS/DPAPI chưa có trong repo; quy trình re-key offline có ở mục 1.2:
 [`Docs/adr/0027-at-rest-encryption-local-state.md`](adr/0027-at-rest-encryption-local-state.md).
 
 ### 1.2 Xoay khoá at-rest (ADR 0030)
@@ -133,22 +139,28 @@ phải lấy từ metrics của chính bạn. Không có con số nào ở đây
 |-----|----------|-------|
 | Availability (`/readyz`) | probe của orchestrator | ≥ 99% theo tuần |
 | p95 độ trễ node plan/reason/tool/reflect | `p95_latency_by_node()` (SCORECARD #2) | Theo baseline máy chạy; cảnh báo khi tăng > 30% so với tuần trước |
-| Tỉ lệ 5xx | `agent_requests_total{status="503"}` / tổng | < 1% giờ cao điểm |
+| Tỉ lệ 5xx | `agent_http_requests_total{status=~"5.."}` / tổng | < 1% giờ cao điểm |
 | Tỉ lệ throttle | `rate(agent_http_throttled_total[5m])` | < 5% request; cao hơn là quá tải hoặc client lỗi |
 | Recovery cancel-to-stop | p95 `agent_recovery_seconds` (SCORECARD #4) | < 2s |
 | Nguyên vẹn artifact | log `ModelIntegrityError` | 0 lần |
 
 ## 3. Cảnh báo (Prometheus)
 
+`/metrics` dùng admin guard. Cấu hình Prometheus bằng `bearer_token_file` trỏ
+tới secret chứa `AI_ADMIN_TOKEN`; không đưa token trực tiếp vào file cấu hình
+được commit hoặc command line.
+
 ```promql
 # Client bị chặn liên tục — xem peer nào, đừng nới limit ngay
 sum by (surface) (rate(agent_http_throttled_total[5m])) > 0.5
 
 # Hết slot run (503 do budget): điều tra tải, không phải lỗi hệ thống
-rate(agent_requests_total{status="503"}[5m]) > 0.1
+sum(rate(agent_http_requests_total{status="503"}[5m])) > 0.1
 
 # Trade-off: tỉ lệ lỗi tổng
-sum(rate(agent_requests_total{status=~"5.."}[5m])) / sum(rate(agent_requests_total[5m])) > 0.01
+sum(rate(agent_http_requests_total{status=~"5.."}[5m]))
+/
+sum(rate(agent_http_requests_total[5m])) > 0.01
 ```
 
 Log-based (chưa có counter riêng, xác nhận trước khi trông cậy):

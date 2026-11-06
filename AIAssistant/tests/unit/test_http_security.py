@@ -292,6 +292,40 @@ class MCPExposurePolicyTests(unittest.TestCase):
         self.assertFalse(mcp_exposed_without_token("0.0.0.0", TransportPolicy(mcp_token="mcp-secret")))
 
 
+class HttpMetricsMiddlewareTests(unittest.TestCase):
+    """The HTTP counter records real response codes and ignores other scopes."""
+
+    def test_http_response_start_records_method_and_status(self) -> None:
+        from unittest.mock import patch
+
+        from ai_assistant.bootstrap.app_factory import HttpMetricsMiddleware
+
+        async def unavailable(_scope, _receive, send) -> None:
+            await send({"type": "http.response.start", "status": 503, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        app = HttpMetricsMiddleware(unavailable)
+        with patch(
+            "ai_assistant.bootstrap.app_factory.record_http_request",
+        ) as record:
+            asyncio.run(app({"type": "http", "method": "GET"}, _receive, _send))
+        record.assert_called_once_with("GET", 503)
+
+    def test_non_http_scope_passes_through_without_a_metric(self) -> None:
+        from unittest.mock import patch
+
+        from ai_assistant.bootstrap.app_factory import HttpMetricsMiddleware
+
+        recorder = _Recorder()
+        app = HttpMetricsMiddleware(recorder)
+        with patch(
+            "ai_assistant.bootstrap.app_factory.record_http_request",
+        ) as record:
+            asyncio.run(app({"type": "lifespan"}, _receive, _send))
+        self.assertEqual(recorder.scopes, ["lifespan"])
+        record.assert_not_called()
+
+
 class _BodyReader:
     """ASGI app that reads the request body whole, like a JSON route does."""
 

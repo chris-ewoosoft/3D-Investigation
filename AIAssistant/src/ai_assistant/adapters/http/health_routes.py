@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, Response
 
+from .security import TransportPolicy, admin_guards, chat_guards
+
 if TYPE_CHECKING:
     from ._types import LLMModuleLike, PlatformLike, RAGModuleLike
 
@@ -24,6 +26,7 @@ def build_health_router(
     chars_per_token: float,
     model_idx: int,
     app: object,
+    policy: TransportPolicy | None = None,
 ) -> APIRouter:
     """Create the health/metrics/models APIRouter.
 
@@ -31,6 +34,7 @@ def build_health_router(
     module-level globals directly — making it testable and swappable.
     """
     router = APIRouter()
+    resolved = policy or TransportPolicy()
 
     def _degraded_reasons() -> list[str]:
         """Why the process is not fully functional (empty ⇒ healthy)."""
@@ -96,7 +100,7 @@ def build_health_router(
             },
         }
 
-    @router.get("/metrics")
+    @router.get("/metrics", dependencies=admin_guards(resolved))
     async def metrics() -> Response:
         """Prometheus exposition endpoint; enabled with AGENT_OBSERVABILITY=1."""
         from ai_assistant.observability import prometheus_payload
@@ -106,7 +110,7 @@ def build_health_router(
             raise HTTPException(status_code=404, detail="Observability is disabled")
         return Response(payload, media_type="text/plain; version=0.0.4")
 
-    @router.get("/v1/models")
+    @router.get("/v1/models", dependencies=chat_guards(resolved))
     async def list_models() -> dict[str, Any]:
         # No backend ⇒ no model to advertise. Returning an entry with an empty
         # id made a released model look served to OpenAI-compatible clients.

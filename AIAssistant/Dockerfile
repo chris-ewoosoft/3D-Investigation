@@ -1,7 +1,7 @@
 # Build from the repository root so the AIAssistant/ prefix resolves:
 #   docker build -f AIAssistant/Dockerfile -t ai-assistant .
 # The image runs the platform entry point; it does NOT ship model weights
-# (mount them at /app/AIAssistant/Models or set APP_DATA_DIR).
+# (mount them at /app/data/AIAssistant/Models or set APP_DATA_DIR).
 #
 # Multi-stage (10/10 hardening): the builder compiles/installs wheels, the
 # runtime carries only the installed site-packages + source tree, run as a

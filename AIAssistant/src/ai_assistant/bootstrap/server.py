@@ -55,17 +55,18 @@ from ai_assistant.bootstrap.platform_patch import (
 # lets the split modules read the process-wide binding through this module —
 # the single patch point the lifespan/entry-point tests use.
 from ai_assistant.settings import (
-    agent_bind_host as agent_bind_host,
-)
-from ai_assistant.settings import (
-    agent_bind_port as agent_bind_port,
-)
-from ai_assistant.settings import (
+    a2a_outbound_token,
     apply_startup_environment_defaults,
     load_agent_runtime_settings,
     load_local_dotenv,
     settings_config_dir,
     vision_llm_enabled,
+)
+from ai_assistant.settings import (
+    agent_bind_host as agent_bind_host,
+)
+from ai_assistant.settings import (
+    agent_bind_port as agent_bind_port,
 )
 from ai_assistant.settings import (
     task_retention_days as task_retention_days,
@@ -490,7 +491,8 @@ def _compose_once() -> None:
         from ai_assistant.orchestration.supervisor import ALLOWED_TOOLS
         from ai_assistant.orchestration.supervisor import authorise as supervisor_authorise
 
-        a2a_registry = RemoteAgentRegistry()
+        outbound_a2a_token = a2a_outbound_token()
+        a2a_registry = RemoteAgentRegistry(bearer_token=outbound_a2a_token)
         # Always inject the bound delegate: with neither A2A nor plugin tools
         # it behaves exactly like the module default, and composition no
         # longer has a second (None) shape for the graph to reason about.
@@ -536,7 +538,10 @@ def _compose_once() -> None:
             llm_runtime=runtime_modules.llm,
             tool_registry=_tool_registry,
             checkpointer=checkpointer_handle.saver,
-            a2a_router=A2ARouter(registry=a2a_registry),
+            a2a_router=A2ARouter(
+                registry=a2a_registry,
+                bearer_token=outbound_a2a_token,
+            ),
             task_coordinator=platform.coordinator,
             pending_actions=PendingActionStore(
                 _pending_actions_path(), cipher=platform.storage_cipher,
@@ -597,6 +602,7 @@ def _compose_once() -> None:
             chars_per_token=CHARS_PER_TOKEN,
             model_idx=MODEL_IDX,
             app=app,
+            policy=transport_policy,
         ))
         app.include_router(build_chat_router(
             llm_module=runtime_modules.llm,

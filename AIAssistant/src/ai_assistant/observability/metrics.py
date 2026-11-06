@@ -31,6 +31,11 @@ def get_metrics() -> dict[str, Any]:
 
                 _metrics = {
                     "requests": Counter("agent_requests_total", "Agent requests", ["endpoint", "status"]),
+                    "http_requests": Counter(
+                        "agent_http_requests_total",
+                        "HTTP responses",
+                        ["method", "status"],
+                    ),
                     "latency": Histogram("agent_request_duration_seconds", "Agent request latency", ["endpoint"]),
                     "tool": Counter("agent_tool_calls_total", "Tool calls", ["tool", "outcome"]),
                     "tool_latency": Histogram("agent_tool_duration_seconds", "Tool duration", ["tool"]),
@@ -59,6 +64,13 @@ def record_tool(tool: str, success: bool, duration_seconds: float | None = None)
         metrics["tool"].labels(tool, "success" if success else "error").inc()
         if duration_seconds is not None:
             metrics["tool_latency"].labels(tool).observe(max(0.0, duration_seconds))
+
+
+def record_http_request(method: str, status_code: int) -> None:
+    """Record the actual HTTP response code with bounded-cardinality labels."""
+    metrics = get_metrics()
+    if metrics:
+        metrics["http_requests"].labels(method.upper(), str(status_code)).inc()
 
 
 def record_approval(outcome: str) -> None:

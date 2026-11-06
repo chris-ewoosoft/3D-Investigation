@@ -17,6 +17,7 @@ from ..domain.errors import (
     ServiceUnavailableError,
     UnprocessableRequestError,
 )
+from ..observability.metrics import record_http_request
 from ..observability.tracing import attach_inbound_traceparent
 from ..settings import ArchitectureSettings, max_request_bytes, rate_limit_per_minute
 
@@ -110,6 +111,33 @@ class BodySizeLimitMiddleware:
         await self._app(scope, guarded_receive, send)
 
 
+class HttpMetricsMiddleware:
+    """Record the response status emitted by every HTTP request.
+
+    The graph-span counter records semantic ``success``/``error`` outcomes;
+    this transport counter owns real HTTP codes so 429/503/5xx alerts do not
+    query a label vocabulary that can never exist.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: dict[str, object], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def measured_send(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                record_http_request(
+                    str(scope.get("method", "UNKNOWN")),
+                    int(message["status"]),
+                )
+            await send(message)
+
+        await self._app(scope, receive, measured_send)
+
+
 def _register_domain_error_handlers(app: FastAPI) -> None:
     """Translate transport-agnostic domain errors into HTTP responses."""
 
@@ -166,6 +194,9 @@ def create_app(settings: ArchitectureSettings, lifespan: Callable[..., Any]) -> 
     # name the Qt client used.
     if settings.allowed_hosts:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+    # The transport counter wraps rate-limit and route responses, but remains
+    # inside the trace context so future metric exemplars can share that span.
+    app.add_middleware(HttpMetricsMiddleware)
     # Outermost: the inbound traceparent must wrap every other middleware and
     # route so their spans join the caller's trace (ADR 0001).
     app.add_middleware(TraceContextMiddleware)

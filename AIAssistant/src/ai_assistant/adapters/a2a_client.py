@@ -63,9 +63,24 @@ class RemoteAgentCard:
 class TrustedA2AClient:
     """Discovers and calls only endpoints provided by deployment config."""
 
-    def __init__(self, trusted_endpoints: frozenset[str], timeout_seconds: float = 10.0) -> None:
+    def __init__(self, trusted_endpoints: frozenset[str], timeout_seconds: float = 10.0,
+                 bearer_token: str = "") -> None:
         self._trusted_endpoints = frozenset(endpoint.rstrip("/") for endpoint in trusted_endpoints)
         self._timeout_seconds = timeout_seconds
+        self._bearer_token = bearer_token.strip()
+
+    def _headers(self, *, content_type: bool = False) -> dict[str, str]:
+        """Build the mandatory authenticated headers for one peer request."""
+        if not self._bearer_token:
+            msg = "A2A outbound bearer token is not configured"
+            raise ValueError(msg)
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._bearer_token}",
+        }
+        if content_type:
+            headers["Content-Type"] = "application/json"
+        return headers
 
     def discover(self) -> dict[str, RemoteAgentCard]:
         cards: dict[str, RemoteAgentCard] = {}
@@ -82,6 +97,8 @@ class TrustedA2AClient:
         endpoint = endpoint.rstrip("/")
         if endpoint not in self._trusted_endpoints:
             return {"routing": "rejected_policy", "error": "A2A endpoint is not trusted"}
+        if not self._bearer_token:
+            return {"routing": "rejected_policy", "error": "A2A outbound bearer token is not configured"}
         if classification in {DataClassification.RESTRICTED, DataClassification.REGULATED}:
             return {"routing": "rejected_policy", "error": "Sensitive data cannot leave the local trust boundary"}
         # Defence in depth at the last hop before the wire: the caller is
@@ -105,7 +122,7 @@ class TrustedA2AClient:
             # than refused — the peer never needed it.
             "message": {"role": "user", "parts": [{"kind": "text", "text": scrub_credentials(message)}]},
         }
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = self._headers(content_type=True)
         # Propagate the active trace so a remote agent's spans can join this
         # trace (outbound half of W3C propagation; inbound extraction is the
         # receiver's job and is not wired on our own inbound A2A routes yet).
@@ -127,7 +144,10 @@ class TrustedA2AClient:
         return {"routing": "remote_selected", "agent_url": endpoint, **result}
 
     def _read_card(self, endpoint: str) -> RemoteAgentCard:
-        request = Request(urljoin(endpoint + "/", ".well-known/agent.json"), headers={"Accept": "application/json"})
+        request = Request(
+            urljoin(endpoint + "/", ".well-known/agent.json"),
+            headers=self._headers(),
+        )
         with urlopen(request, timeout=self._timeout_seconds) as response:
             payload = json.loads(_read_bounded(response).decode("utf-8"))
         if not isinstance(payload.get("name"), str) or not isinstance(payload.get("skills"), list):

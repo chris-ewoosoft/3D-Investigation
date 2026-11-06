@@ -18,7 +18,11 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
-from ai_assistant.bootstrap.app_factory import TraceContextMiddleware, create_app
+from ai_assistant.bootstrap.app_factory import (
+    HttpMetricsMiddleware,
+    TraceContextMiddleware,
+    create_app,
+)
 from ai_assistant.domain.errors import (
     ApprovalRequiredError,
     AuthorizationError,
@@ -328,6 +332,9 @@ class AppFactoryTests(unittest.TestCase):
         # traceparent must be attached before any route runs.
         self.assertTrue(
             any(m.cls is TraceContextMiddleware for m in app.user_middleware)
+        )
+        self.assertTrue(
+            any(m.cls is HttpMetricsMiddleware for m in app.user_middleware)
         )
 
     def test_the_docs_surface_is_not_served_by_default(self) -> None:

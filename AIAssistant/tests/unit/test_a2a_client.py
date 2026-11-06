@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 from ai_assistant.adapters.a2a_client import RemoteAgentCard, TrustedA2AClient
 from ai_assistant.domain.security import DataClassification
 
+_TOKEN = "peer-token"
+
 
 class TrustedA2AClientTests(unittest.TestCase):
     """Test TrustedA2AClient coverage."""
@@ -22,6 +24,7 @@ class TrustedA2AClientTests(unittest.TestCase):
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}),
             timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         result = client.submit("https://untrusted.example.com", "supervisor", "test")
         self.assertEqual(result["routing"], "rejected_policy")
@@ -31,6 +34,7 @@ class TrustedA2AClientTests(unittest.TestCase):
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}),
             timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         self.assertIsNotNone(client)
 
@@ -39,11 +43,26 @@ class TrustedA2AClientTests(unittest.TestCase):
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://unreachable.example.com"}),
             timeout_seconds=1,
+            bearer_token=_TOKEN,
         )
         with patch("ai_assistant.adapters.a2a_client.urlopen") as mock_urlopen:
             mock_urlopen.side_effect = OSError("Network unreachable")
             cards = client.discover()
         self.assertEqual(cards, {})
+
+    def test_missing_outbound_token_refuses_before_network(self) -> None:
+        client = TrustedA2AClient(
+            trusted_endpoints=frozenset({"https://trusted.example.com"}),
+        )
+        with patch("ai_assistant.adapters.a2a_client.urlopen") as mock_urlopen:
+            result = client.submit(
+                "https://trusted.example.com", "supervisor", "hello",
+            )
+            cards = client.discover()
+        self.assertEqual(result["routing"], "rejected_policy")
+        self.assertIn("bearer token", result["error"])
+        self.assertEqual(cards, {})
+        mock_urlopen.assert_not_called()
 
 
 
@@ -56,6 +75,7 @@ class TrustedA2AClientSubmitTests(unittest.TestCase):
         return TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}),
             timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
 
     def test_submit_happy_path(self) -> None:
@@ -112,6 +132,7 @@ class TrustedA2AClientSubmitTests(unittest.TestCase):
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://a.example.com", "https://b.example.com"}),
             timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         good = RemoteAgentCard(
             endpoint="https://a.example.com", name="A", version="1", skills=frozenset(), streaming=True,
@@ -162,6 +183,7 @@ class TraceContextPropagationTests(unittest.TestCase):
     def _capture_headers(self) -> dict[str, str]:
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}), timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         card = RemoteAgentCard(
             endpoint="https://trusted.example.com", name="Agent", version="1.0.0",
@@ -191,6 +213,10 @@ class TraceContextPropagationTests(unittest.TestCase):
             headers = self._capture_headers()
         self.assertNotIn("traceparent", headers)
 
+    def test_every_submit_carries_the_configured_bearer(self) -> None:
+        headers = self._capture_headers()
+        self.assertEqual(headers["authorization"], f"Bearer {_TOKEN}")
+
 
 class A2ATransportHardeningTests(unittest.TestCase):
     """The transport itself is bounded: no redirects, no unbounded reads."""
@@ -210,6 +236,7 @@ class A2ATransportHardeningTests(unittest.TestCase):
 
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}), timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         card = RemoteAgentCard(
             endpoint="https://trusted.example.com", name="Agent", version="1.0.0",
@@ -230,6 +257,7 @@ class A2ATransportHardeningTests(unittest.TestCase):
     def test_a_normal_sized_response_still_parses(self) -> None:
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({"https://trusted.example.com"}), timeout_seconds=5,
+            bearer_token=_TOKEN,
         )
         card = RemoteAgentCard(
             endpoint="https://trusted.example.com", name="Agent", version="1.0.0",

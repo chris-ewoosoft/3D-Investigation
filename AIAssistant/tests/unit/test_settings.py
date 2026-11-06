@@ -23,6 +23,7 @@ from ai_assistant.settings import (
     a2a_card_url,
     a2a_enabled,
     a2a_max_subscribers,
+    a2a_outbound_token,
     a2a_remote_agent_urls,
     a2a_tenants,
     agent_bind_host,
@@ -470,6 +471,17 @@ class EnvironmentOwnerAccessorTests(unittest.TestCase):
         self.assertEqual(tokens.a2a, "a2a")
         self.assertEqual(tokens.agent, "")
         self.assertEqual(tokens.mcp, "")
+
+    def test_a2a_outbound_token_is_distinct_with_single_token_fallback(self) -> None:
+        self.assertEqual(
+            a2a_outbound_token({
+                "AI_A2A_TOKEN": " inbound ",
+                "AI_A2A_OUTBOUND_TOKEN": " peer ",
+            }),
+            "peer",
+        )
+        self.assertEqual(a2a_outbound_token({"AI_A2A_TOKEN": " shared "}), "shared")
+        self.assertEqual(a2a_outbound_token({}), "")
 
     def test_a2a_tenants_parses_the_json_mapping(self) -> None:
         self.assertEqual(

@@ -325,6 +325,22 @@ def transport_tokens(env: Mapping[str, str] | None = None) -> TransportTokens:
     )
 
 
+def a2a_outbound_token(env: Mapping[str, str] | None = None) -> str:
+    """Credential presented to trusted remote A2A peers.
+
+    A multi-tenant receiver maps *incoming* tokens through
+    ``AI_A2A_TENANTS``; that mapping must never be reused as an egress secret.
+    Deployments with a distinct peer credential set ``AI_A2A_OUTBOUND_TOKEN``.
+    Single-tenant peers may share ``AI_A2A_TOKEN``, which remains the explicit
+    fallback for backward-compatible configuration.
+    """
+    values = os.environ if env is None else env
+    return (
+        values.get("AI_A2A_OUTBOUND_TOKEN", "").strip()
+        or values.get("AI_A2A_TOKEN", "").strip()
+    )
+
+
 def a2a_tenants(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Read the A2A bearer-token → tenant mapping from ``env``.
 

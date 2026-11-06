@@ -118,7 +118,7 @@ class RemoteSpecialistLookupTests(_ReloadableAdapterTest):
         super().setUp()
         _install_fake_a2a()
         importlib.reload(a2a_protocol)
-        self.registry = a2a_protocol.RemoteAgentRegistry()
+        self.registry = a2a_protocol.RemoteAgentRegistry(bearer_token="peer-token")
 
     def test_a_discovered_advertisement_resolves_to_its_endpoint(self):
         self.registry._agents["http://remote.test/a2a"] = SimpleNamespace(
@@ -193,8 +193,15 @@ class AgentCardTests(unittest.TestCase):
 class RemoteDiscoveryTests(unittest.TestCase):
     """Coverage for remote agent discovery on an owned registry instance."""
 
-    def test_discover_no_urls_returns_snapshot(self) -> None:
+    def test_discovery_without_an_outbound_token_is_fail_closed(self) -> None:
         registry = RemoteAgentRegistry()
+        with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
+            result = registry.discover(["https://remote.example.com"])
+        self.assertEqual(result, {})
+        mock_urlopen.assert_not_called()
+
+    def test_discover_no_urls_returns_snapshot(self) -> None:
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch.object(
             a2a_protocol, "a2a_trusted_endpoints", return_value=frozenset()
         ):
@@ -202,7 +209,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_discover_defaults_to_the_deployment_allowlist(self) -> None:
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch.object(
             a2a_protocol, "a2a_trusted_endpoints", return_value=frozenset({"https://remote.test"})
         ), patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
@@ -218,7 +225,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             "url": "https://remote.example.com",
             "skills": [{"id": "supervisor", "name": "Supervisor"}, {"id": "", "name": "ignored"}],
         }
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
@@ -229,13 +236,13 @@ class RemoteDiscoveryTests(unittest.TestCase):
         self.assertIn("supervisor", result["https://remote.example.com"].skills)
 
     def test_discover_failure_is_swallowed(self) -> None:
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen", side_effect=OSError("unreachable")):
             result = registry.discover(["https://remote.example.com"])
         self.assertEqual(result, {})
 
     def test_snapshot_returns_a_copy(self) -> None:
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         registry._agents["u"] = RemoteAgent(url="u", card={}, skills={})
         snapshot = registry.snapshot()
         snapshot.pop("u")
@@ -243,7 +250,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
     def test_discover_uses_well_known_url(self) -> None:
         base = "https://remote.example.com"
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = b'{"name":"R","skills":[]}'
@@ -251,9 +258,10 @@ class RemoteDiscoveryTests(unittest.TestCase):
             registry.discover([base])
         request = mock_urlopen.call_args.args[0]
         self.assertIn(".well-known/agent.json", request.full_url)
+        self.assertEqual(request.get_header("Authorization"), "Bearer peer-token")
 
     def test_discover_refuses_non_http_urls(self) -> None:
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             result = registry.discover(["ftp://evil.example.com", "not-a-url"])
         self.assertEqual(result, {})
@@ -277,7 +285,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
     def test_a_redirecting_peer_does_not_steer_the_discovery_fetch(self) -> None:
         """A 30x during discovery must not be followed to another host."""
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = b'{"name":"R","skills":[]}'
@@ -289,7 +297,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
     def test_discover_refuses_oversized_cards(self) -> None:
         payload = {"name": "R", "skills": [], "pad": "x" * 64}
         body = json.dumps(payload).encode("utf-8")
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen, patch.object(
             a2a_protocol, "_DISCOVERY_MAX_BYTES", 10
         ):
@@ -303,7 +311,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
 
     def test_discover_refuses_invalid_json_and_non_object(self) -> None:
         for body in (b"not-json{", b'["not", "an", "object"]'):
-            registry = RemoteAgentRegistry()
+            registry = RemoteAgentRegistry(bearer_token="peer-token")
             with self.subTest(body=body), patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
                 mock_resp = MagicMock()
                 mock_resp.__enter__.return_value.read.return_value = body
@@ -317,7 +325,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             "url": "https://evil.example.com/a2a",
             "skills": [{"id": "code", "name": "Code"}],
         }
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
@@ -332,7 +340,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             "url": "https://remote.example.com.evil/a2a",
             "skills": [{"id": "code", "name": "Code"}],
         }
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
@@ -347,7 +355,7 @@ class RemoteDiscoveryTests(unittest.TestCase):
             "url": "https://remote.example.com/a2a",
             "skills": [{"id": "code", "name": "Code"}, "not-a-dict"],
         }
-        registry = RemoteAgentRegistry()
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")

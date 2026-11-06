@@ -123,7 +123,9 @@ class ContentShapeEgressTests(unittest.TestCase):
     def test_the_client_refuses_a_payload_that_carries_a_credential(self) -> None:
         from ai_assistant.adapters.a2a_client import TrustedA2AClient
 
-        client = TrustedA2AClient(frozenset({"https://peer.example"}))
+        client = TrustedA2AClient(
+            frozenset({"https://peer.example"}), bearer_token="peer-token",
+        )
         outcome = client.submit(
             "https://peer.example", "chat",
             "hello", metadata={"note": "api_key=sk-abcdef0123456789"},
@@ -152,7 +154,9 @@ class ContentShapeEgressTests(unittest.TestCase):
                 captured.append(data if isinstance(data, bytes) else bytes(data))
             return _Response()
 
-        client = TrustedA2AClient(frozenset({"https://peer.example"}))
+        client = TrustedA2AClient(
+            frozenset({"https://peer.example"}), bearer_token="peer-token",
+        )
         with mock.patch("ai_assistant.adapters.a2a_client.urlopen", side_effect=_fake_urlopen):
             client.submit("https://peer.example", "chat", "my key is ghp_abcdefghijklmnopqrst")
         self.assertEqual(len(captured), 1)

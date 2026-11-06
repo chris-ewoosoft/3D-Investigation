@@ -71,6 +71,7 @@ class MetricsTests(unittest.TestCase):
             metrics_module.record_step_guard("ok")
             metrics_module.record_recovery(0.5)
             metrics_module.record_throttle("http")
+            metrics_module.record_http_request("get", 503)
             self.assertIsNone(metrics_module.prometheus_payload())
 
     def test_missing_sdk_falls_back_to_empty(self):
@@ -101,6 +102,7 @@ class MetricsTests(unittest.TestCase):
                 metrics_module.record_recovery(0.25)
                 metrics_module.record_recovery(-1)
                 metrics_module.record_throttle("http")
+                metrics_module.record_http_request("post", 503)
                 payload = metrics_module.prometheus_payload()
         self.assertEqual(payload, b"prometheus-payload")
         self.assertIn(("labels", ("read", "success")), metrics["tool"].observations)
@@ -116,6 +118,9 @@ class MetricsTests(unittest.TestCase):
         # The admission governor's refusal counter (ADR 0024).
         self.assertIn(("labels", ("http",)), metrics["throttle"].observations)
         self.assertIn(("inc", 1), metrics["throttle"].observations)
+        # HTTP response codes are a separate vocabulary from node outcomes.
+        self.assertIn(("labels", ("POST", "503")), metrics["http_requests"].observations)
+        self.assertIn(("inc", 1), metrics["http_requests"].observations)
 
 
 class LatencyQuantileTests(unittest.TestCase):

@@ -146,7 +146,7 @@ class Mutant:
 #: the per-owner byte budget (and its empty-store guard), the per-owner
 #: session eviction, the facade forwarding that owner, and the desktop ack's
 #: session binding.
-MIN_MUTANTS = 260
+MIN_MUTANTS = 269
 
 MUTANTS: tuple[Mutant, ...] = (
     # ── Sandbox allow-list (ADR 0011) ────────────────────────────────────────
@@ -593,6 +593,75 @@ MUTANTS: tuple[Mutant, ...] = (
         ("tests.unit.test_a2a_client", "tests.unit.test_a2a_protocol_guards"),
         "A2A redirects followed (SSRF behind the endpoint allowlist) — on the "
         "dispatch leg and on the discovery leg, which share one opener",
+    ),
+    Mutant(
+        "src/ai_assistant/settings.py",
+        '        or values.get("AI_A2A_TOKEN", "").strip()\n',
+        '        or ""\n',
+        ("tests.unit.test_settings",),
+        "the documented single-token A2A configuration is not propagated to egress",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/a2a_client.py",
+        "        if not self._bearer_token:\n"
+        "            return {\"routing\": \"rejected_policy\", \"error\": \"A2A outbound bearer token is not configured\"}",
+        "        if False:\n"
+        "            return {\"routing\": \"rejected_policy\", \"error\": \"A2A outbound bearer token is not configured\"}",
+        ("tests.unit.test_a2a_client",),
+        "an outbound A2A call without a credential reaches the wire",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/a2a_client.py",
+        '            "Authorization": f"Bearer {self._bearer_token}",',
+        '            "Authorization": "Bearer",',
+        ("tests.unit.test_a2a_client", "tests.unit.test_a2a_http_router"),
+        "A2A dispatch omits the configured bearer credential",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/a2a_protocol.py",
+        "        if not self._bearer_token:\n"
+        "            logger.warning(\"A2A discovery skipped: outbound bearer token is not configured\")\n"
+        "            return self.snapshot()",
+        "        if False:\n"
+        "            logger.warning(\"A2A discovery skipped: outbound bearer token is not configured\")\n"
+        "            return self.snapshot()",
+        ("tests.unit.test_a2a_protocol_guards",),
+        "A2A discovery without a credential reaches the wire",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/a2a_protocol.py",
+        '                    "Authorization": f"Bearer {self._bearer_token}",',
+        '                    "Authorization": "Bearer",',
+        ("tests.unit.test_a2a_protocol_guards",),
+        "A2A discovery omits the configured bearer credential",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/http/health_routes.py",
+        '@router.get("/metrics", dependencies=admin_guards(resolved))',
+        '@router.get("/metrics")',
+        ("tests.unit.test_http_health_routes",),
+        "the metrics surface is public despite the privileged-surface contract",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/http/health_routes.py",
+        '@router.get("/v1/models", dependencies=chat_guards(resolved))',
+        '@router.get("/v1/models")',
+        ("tests.unit.test_http_health_routes",),
+        "the model inventory is public despite the privileged-surface contract",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/app_factory.py",
+        '                    int(message["status"]),',
+        "                    200,",
+        ("tests.unit.test_http_security",),
+        "HTTP metrics report every response as 200, hiding 429/503/5xx alerts",
+    ),
+    Mutant(
+        "src/ai_assistant/observability/metrics.py",
+        '        metrics["http_requests"].labels(method.upper(), str(status_code)).inc()',
+        '        metrics["http_requests"].labels(method.upper(), "success").inc()',
+        ("tests.unit.test_observability",),
+        "the HTTP counter reuses node outcomes instead of real status codes",
     ),
     Mutant(
         "src/ai_assistant/adapters/a2a_protocol.py",
@@ -2622,6 +2691,9 @@ def floor_violation(mutant_count: int) -> str | None:
 #: ``PINNED_HEADERS`` shape). Add a file in the same commit that adds the
 #: decision; never remove an entry to make the gate pass.
 PINNED_DECISION_FILES: tuple[str, ...] = (
+    "src/ai_assistant/adapters/a2a_client.py",
+    "src/ai_assistant/adapters/a2a_protocol.py",
+    "src/ai_assistant/adapters/http/health_routes.py",
     "src/ai_assistant/adapters/http/security.py",
     "src/ai_assistant/adapters/persistence/checkpointing.py",
     "src/ai_assistant/adapters/persistence/memory_store.py",
@@ -2633,13 +2705,16 @@ PINNED_DECISION_FILES: tuple[str, ...] = (
     "src/ai_assistant/agents/short_term_memory.py",
     "src/ai_assistant/agents/ui_action_service.py",
     "src/ai_assistant/application/memory.py",
+    "src/ai_assistant/bootstrap/app_factory.py",
     "src/ai_assistant/bootstrap/cli.py",
     "src/ai_assistant/bootstrap/lifecycle.py",
     "src/ai_assistant/bootstrap/server.py",
     "src/ai_assistant/bootstrap/server_manager.py",
     "src/ai_assistant/domain/tools.py",
+    "src/ai_assistant/observability/metrics.py",
     "src/ai_assistant/orchestration/nodes/tool.py",
     "src/ai_assistant/rag/embeddings.py",
+    "src/ai_assistant/settings.py",
     "src/ai_assistant/tools/sandbox.py",
 )
 

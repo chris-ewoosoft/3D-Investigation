@@ -1,7 +1,7 @@
 # AIAssistant Scorecard
 
 > Measured signals, each produced by a command in this repository — nothing
-> here is an estimate. **Last measured: 2026-11-03**, Windows, Python 3.11,
+> here is an estimate. **Last measured: 2026-11-06**, Windows, Python 3.11,
 > dependencies per `requirements-test.lock` (hash-pinned: `faiss-cpu`, `rank-bm25`, `mcp`).
 > A stripped environment measures less: the optional-dependency branches flip
 > with it (ADR 0014).
@@ -12,16 +12,16 @@
 
 ## Quality gates
 
-| Gate | Command | Measured 2026-11-03 |
+| Gate | Command | Measured 2026-11-06 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 151 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"` | 2 485 tests, 0 failures, 6 skipped |
-| Coverage | `PYTHONPATH=src python -m coverage run … && python -m coverage report` | **100.00%** — 10 468 statements, 2 848 branches, 0 missed, 0 partial |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py` | **260/260 killed**; the supervisor distinguishes an early child crash from a real readiness timeout, earlier decisions remain pinned by their owning tests, 0 survived, 0 stale |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 260` — deleting a mutant now fails the gate (ADR 0032); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"` | 2 495 tests, 0 failures, 6 skipped |
+| Coverage | `PYTHONPATH=src python -m coverage run … && python -m coverage report` | **100.00%** — 10 508 statements, 2 862 branches, 0 missed, 0 partial |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py` | **269/269 killed**; authenticated A2A egress, privileged read-only routes and real HTTP status labels join the pinned decisions, 0 survived, 0 stale |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 269` — deleting a mutant now fails the gate (ADR 0032/0051); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 132 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025; ADR 0043/0044 added the `memory-policy` and `parallel-policy` scenarios) |
 | Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75` | **23/24 (95.83%)**, model coverage **24/24**, all six language × kind slices pass; weakest slice `vi:direct` = 3/4; p95 17.109 s (ADR 0050) |
 | Model pins | `python scripts/verify_models.py` | 5 artifact local khớp pin, 1 chưa tải, **0 mismatched** (ADR 0023) |
@@ -35,6 +35,28 @@ The 2026-10-26 pass re-ran lint, types, layer contracts, byte-compile, tests,
 coverage, mutation and the agentic eval. The model-pin, SBOM and lock rows
 above show their last measurement (2026-10-23); they were not re-run in that
 pass.
+
+## 10/10 re-validation (2026-11-06): authenticated egress and honest operations (ADR 0051)
+
+An independent review invalidated the previous absolute closure claim in four
+places: inbound A2A required a bearer while outbound discovery/dispatch sent
+none; `/metrics` and `/v1/models` shared the public probe router without a
+guard; the RUNBOOK queried graph-node outcome labels as if they were HTTP
+codes; and the docs contract counted ADRs without checking their links.
+
+ADR 0051 closes the class rather than one example:
+
+- the composition root injects one explicit egress credential into both A2A
+  discovery and dispatch, and a real client-to-router integration test proves
+  the two halves interoperate;
+- only `/health`, `/livez`, and `/readyz` remain public; metrics uses the admin
+  guard and model inventory uses the agent/chat guard;
+- `agent_http_requests_total` records actual status codes independently of
+  graph-node `success`/`error` outcomes;
+- Docker paths, PowerShell commands, auth examples, PromQL, the complete ADR
+  index, and the Linux/Windows CI wording now match executable behavior;
+- nine new mutants raise the floor from 260 to 269 and the docs test derives
+  the current suite/mutation counts from the tree.
 
 ## Final 10/10 closure (2026-11-03): measured balanced model gate (ADR 0050)
 
@@ -1149,7 +1171,7 @@ repository deliberately does not make, with the reason written down):
 
 The `SCORECARD #N` labels below are the historical identifiers used in code
 comments (`observability/metrics.py`, `application/coordination.py`,
-`evals/run_model_in_loop_eval.py`) and in `ARCHITECTURE.md`; they resolve to
+`evals/run_model_in_loop_eval.py`) and in `README.md`; they resolve to
 the rows here.
 
 | Label | Signal | Where it is measured |
@@ -1164,10 +1186,12 @@ removed rather than restated (ADR 0015).
 
 ## How this page stays honest
 
-- Every row is a measurement with the command that reproduces it; CI re-runs
-  the same gates (`Build-Python-ci.yml`, `agent-evals.yml`) — on **both**
-  Linux and Windows, so the numbers describe the platform the product ships
-  on (ADR 0032).
+- Every row is a measurement with the command that reproduces it. Linux runs
+  the complete lint/compile/test/coverage/type/import/mutation gate. Windows,
+  the shipping platform, independently runs the full suite with coverage,
+  import contracts, mypy and the platform-sensitive security subset. The
+  model eval workflow currently runs on Linux; rows do not claim a Windows
+  rerun where the workflow does not provide one (ADR 0032/0051).
 - Coverage and mutation are *outputs* of the suite, not targets set by hand:
   `pyproject.toml` owns the configuration (`branch = true`, `fail_under = 100`,
   `exclude_also`), so a local run and CI measure the same thing.

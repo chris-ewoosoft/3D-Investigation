@@ -16,6 +16,7 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -25,6 +26,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ai_assistant.adapters import a2a_protocol
+from ai_assistant.adapters.a2a_client import TrustedA2AClient
 from ai_assistant.adapters.a2a_protocol import A2ARouter, RemoteAgent, a2a_available
 from ai_assistant.adapters.a2a_router import _task_pages, build_a2a_router
 from ai_assistant.adapters.http.security import TransportPolicy
@@ -147,6 +149,58 @@ def _client(service: _FakeService, policy=None, max_subscribers=None,
         app, client=("127.0.0.1", 50000), headers=headers,
         raise_server_exceptions=False,
     )
+
+
+class AuthenticatedPeerIntegrationTests(unittest.TestCase):
+    """An outbound client can discover and call a token-gated peer router."""
+
+    def test_two_instances_share_the_authenticated_a2a_contract(self) -> None:
+        endpoint = "http://peer.example"
+        service = _FakeService()
+        peer = _client(
+            service,
+            policy=TransportPolicy(a2a_token="shared-peer-token"),
+            card_base_url=endpoint,
+        )
+
+        class _Response:
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            def read(self, amount: int = -1) -> bytes:
+                return self._body if amount < 0 else self._body[:amount]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return None
+
+        def _bridge(request, timeout=0.0):
+            del timeout
+            parsed = urlsplit(request.full_url)
+            target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+            response = peer.request(
+                request.get_method(),
+                target,
+                headers=dict(request.header_items()),
+                content=request.data,
+            )
+            self.assertLess(response.status_code, 400, response.text)
+            return _Response(response.content)
+
+        client = TrustedA2AClient(
+            trusted_endpoints=frozenset({endpoint}),
+            bearer_token="shared-peer-token",
+        )
+        with patch("ai_assistant.adapters.a2a_client.urlopen", side_effect=_bridge):
+            cards = client.discover()
+            outcome = client.submit(endpoint, "supervisor", "hello")
+
+        self.assertEqual(cards[endpoint].name, "assistant")
+        self.assertEqual(outcome["routing"], "remote_selected")
+        self.assertEqual(outcome["task"]["status"]["state"], "submitted")
+        self.assertEqual(service.submitted[0][0], "supervisor")
 
 
 def _send_body(text: str, *, task_id: str | None = None,
