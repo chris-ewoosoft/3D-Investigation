@@ -2202,23 +2202,23 @@ MUTANTS: tuple[Mutant, ...] = (
     ),
     Mutant(
         "src/ai_assistant/orchestration/nodes/tool.py",
-        "                if ctx.cancel_checker():\n"
-        "                    cancelled = True\n"
-        '                    results[index] = {"error": "Tool batch branch cancelled."}\n'
-        "                    continue",
-        "                if False:\n"
-        "                    cancelled = True\n"
-        '                    results[index] = {"error": "Tool batch branch cancelled."}\n'
-        "                    continue",
+        "                    if ctx.cancel_checker():\n"
+        "                        cancelled = True\n"
+        '                        results[index] = {"error": "Tool batch branch cancelled."}\n'
+        "                        continue",
+        "                    if False:\n"
+        "                        cancelled = True\n"
+        '                        results[index] = {"error": "Tool batch branch cancelled."}\n'
+        "                        continue",
         ("tests.unit.test_parallel_batch",),
         "a cancelled run keeps starting the remaining branches (the cancel "
         "gate is checked once, before the fan-out)",
     ),
     Mutant(
         "src/ai_assistant/orchestration/nodes/tool.py",
-        "            for index, future in futures.items():\n"
-        "                results[index] = future.result()",
-        "            pass",
+        "                for index, future in futures.items():\n"
+        "                    results[index] = future.result()",
+        "                pass",
         ("tests.unit.test_parallel_batch",),
         "the batch returns before its branches are joined (the state update "
         "races every worker it started)",
