@@ -76,8 +76,7 @@ def _remote_dispatch(
             metadata={"session_id": session_id, "specialist": str(delegation.specialist)},
         ) as a2a_ls_ctx:
             result: dict[str, Any] = deps.a2a_router.route(delegation.specialist.value, task, remote_payload)
-            if isinstance(a2a_ls_ctx, dict):
-                a2a_ls_ctx["outputs"] = {"source": result.get("source", "local"), "success": "error" not in result}
+            a2a_ls_ctx["outputs"] = {"source": result.get("source", "local"), "success": "error" not in result}
     deps.audit_agent_fn("tool_transport", delegation, source=result.get("source", "local"))
     return result
 
@@ -142,8 +141,7 @@ def _execute_tool(
                     result = (deps.tool_gateway.execute_approved(tool_name, params, approval_token)
                               if approval_token
                               else deps.tool_gateway.execute(tool_name, params))
-                if isinstance(tool_ls_ctx, dict):
-                    tool_ls_ctx["outputs"] = {"success": "error" not in result}
+                tool_ls_ctx["outputs"] = {"success": "error" not in result}
     deps.audit_agent_fn("tool_completed", delegation, success="error" not in result)
     deps.record_tool_fn(tool_name, "error" not in result, time.monotonic() - tool_started)
     return result
@@ -224,8 +222,7 @@ def build_run_graph(
                     llm_runtime, deps.backend_mode_fn, deps.openai_compatible_fn,
                     openai_tools, grammar_schema, deps.record_token_usage_fn
                 )
-                if isinstance(llm_ls_ctx, dict):
-                    llm_ls_ctx["outputs"] = {"answer_chars": len(answer)}
+                llm_ls_ctx["outputs"] = {"answer_chars": len(answer)}
         logger.info("LangGraph LLM output (%d chars): %s", len(answer), answer[:120].replace("\n", " "))
         return answer
 

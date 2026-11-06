@@ -385,7 +385,8 @@ class ServerManagerTests(unittest.TestCase):
             self.assertIsNone(server_manager.find_pid_on_port(8080))
 
     def test_find_pid_on_port_none_on_error(self) -> None:
-        with patch.object(server_manager.subprocess, "check_output", side_effect=OSError("fail")):
+        with patch.object(server_manager.sys, "platform", "win32"), \
+             patch.object(server_manager.subprocess, "check_output", side_effect=OSError("fail")):
             self.assertIsNone(server_manager.find_pid_on_port(8080))
 
     def test_find_pid_on_port_posix_error(self) -> None:

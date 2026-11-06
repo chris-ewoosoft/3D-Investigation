@@ -57,8 +57,7 @@ def _close_trace(ctx: dict[str, Any], ctx_mgr: Any, pending_status: str,
     ctx["outputs"] = {"status": pending_status, "iterations": state.get("iteration", 0),
                       "duration_ms": total_ms, "step_count": len(state.get("steps", []))}
     ctx_mgr.__exit__(None, None, None)
-    if otel_cm is not None:
-        otel_cm.__exit__(None, None, None)
+    otel_cm.__exit__(None, None, None)
 
 
 def _store_pending_action(

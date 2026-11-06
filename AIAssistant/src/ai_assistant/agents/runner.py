@@ -75,8 +75,7 @@ def _run_graph(
             granted_fingerprint=granted_fingerprint,
         ))
     except BaseException as error:
-        if otel_cm is not None:
-            otel_cm.__exit__(type(error), error, error.__traceback__)
+        otel_cm.__exit__(type(error), error, error.__traceback__)
         ls_ctx["outputs"] = {"status": "error", "error": str(error)}
         ls_ctx_mgr.__exit__(type(error), error, error.__traceback__)
         # Nothing below runs on this path, so without this call a crash left
@@ -136,8 +135,7 @@ def run_langgraph_agent(
 
     # ── Tracing (LangSmith + OpenTelemetry) ──────────────────────────────────
     _otel_cm = deps.span_fn("agent.session", session_id=session_id, task=task[:200])
-    if _otel_cm is not None:
-        _otel_cm.__enter__()
+    _otel_cm.__enter__()
 
     _ls_ctx_mgr = deps.langsmith_trace_fn(
         "agent.session", run_type="chain",
