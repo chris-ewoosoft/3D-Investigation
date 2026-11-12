@@ -1,0 +1,166 @@
+name: Agent tool-call evals
+
+on:
+  push:
+    branches: [main]
+    paths: ["AIAssistant/**", "Config/agent_action_manifest.json"]
+  pull_request:
+    branches: [main]
+    paths: ["AIAssistant/**", "Config/agent_action_manifest.json"]
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: agent-evals-${{ github.ref }}
+  # The eval jobs download a model and grade it. Cancelling one halfway
+  # through leaves a half-written report, and the sweep is cheap enough to
+  # finish — so a running evaluation is kept (ADR 0032).
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with: {python-version: "3.11"}
+      # run_agentic_eval.py imports ai_assistant.orchestration.supervisor,
+      # whose package __init__ eagerly imports the LangGraph LocalAgentGraph
+      # (langchain_core + langgraph). pydantic alone covers run_tool_eval.py;
+      # langgraph covers the supervisor import chain. Both are pinned to the
+      # versions requirements.lock resolved for the runtime, so the policy
+      # eval grades the locked stack; a2a-sdk / langsmith / opentelemetry stay
+      # absent on purpose — the eval guards those imports.
+      - name: Install hash-pinned RAG evaluation frameworks
+        run: pip install --require-hashes -r AIAssistant/requirements-eval.lock
+      - run: python AIAssistant/evals/run_tool_eval.py
+      - name: Agentic policy eval (routing / authorisation / verification)
+        run: python AIAssistant/evals/run_agentic_eval.py > AIAssistant/evals/agentic_eval_report.json
+      - name: RAGAS + DeepEval retrieval gate
+        env:
+          DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+        run: python AIAssistant/evals/run_rag_framework_eval.py
+      - name: RAG framework unit and deprecation-boundary tests
+        env:
+          DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+        run: python AIAssistant/tests/unit/test_rag_framework_eval.py -v
+      - run: python AIAssistant/tests/unit/test_action_manifest.py
+      - name: Software bill of materials (lockfile + model artifacts)
+        # CycloneDX over requirements.lock and the pinned GGUF registry
+        # (ADR 0023); published as an artifact so a release can diff it.
+        run: python AIAssistant/scripts/generate_sbom.py --output AIAssistant/evals/sbom.json
+      - name: Publish result summary
+        run: |
+          echo "## Agent tool-call evaluation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat AIAssistant/evals/latest_tool_call_report.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "## RAGAS + DeepEval retrieval evaluation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat AIAssistant/evals/rag_framework_report.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "## Agentic policy evaluation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          python -c "import json;d=json.load(open('AIAssistant/evals/agentic_eval_report.json'));print(json.dumps({k:v for k,v in d.items() if k!='scenarios'},indent=2));print('scenarios:');print(json.dumps({k:{'passed':v['passed'],'failed':v['failed']} for k,v in d['scenarios'].items()},indent=2))" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agent-tool-call-trend
+          path: AIAssistant/evals/latest_tool_call_report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: agentic-policy-trend
+          path: AIAssistant/evals/agentic_eval_report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: rag-framework-trend
+          path: AIAssistant/evals/rag_framework_report.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aiassistant-sbom
+          path: AIAssistant/evals/sbom.json
+
+  # SCORECARD #1: the planner eval graded by a real model in CI, so
+  # "model_coverage" stops being a local-only number. The CPU wheel and the
+  # GGUF (the registry's default fallback, Qwen2.5-3B Q4_K_M) are both cached,
+  # so only the first run pays the download. The import chain of the eval
+  # (settings / llm / orchestration.prompts) is stdlib-only, so no pydantic or
+  # langgraph is installed here — only the runtime that grades.
+  model-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with: {python-version: "3.11"}
+      - name: Cache llama-cpp-python wheel
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/pip
+          key: pip-llamacpp-python-0.3.36-${{ runner.os }}-py311
+      # PyPI ships sdist only, which would compile llama.cpp on the runner;
+      # the project's own index has py3-none manylinux wheels. Pinned so a
+      # future release cannot silently move the numbers this gate reads.
+      - name: Install llama-cpp-python (prebuilt CPU wheel)
+        run: |
+          for i in 1 2 3 4 5; do
+            pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu/ "llama-cpp-python==0.3.36" && break || {
+              if [ "$i" -eq 5 ]; then exit 1; fi
+              echo "pip install failed (attempt $i/5), retrying in 10s..."
+              sleep 10
+            }
+          done
+      - name: Cache the eval model
+        id: model-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/ai-eval-models
+          # Keyed to the pinned registry revision (ADR 0023): a cache hit can
+          # only ever hold the verified artifact below.
+          key: eval-model-qwen2.5-3b-instruct-q4km-rev-f302c64a
+      - name: Download the eval model (pinned registry revision)
+        if: steps.model-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/ai-eval-models
+          curl -L --fail --retry 3 --retry-delay 5 \
+            -o ~/.cache/ai-eval-models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+            "https://huggingface.co/bartowski/Qwen2.5-3B-Instruct-GGUF/resolve/f302c64a2269a69fb27b2f9473b362f5bb8e78d8/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+      - name: Verify the eval model against the pinned SHA-256
+        # The revision and digest are the same pair config/models.toml pins for
+        # the fallback model; a moved "main" cannot change the numbers this
+        # gate reads. Cache hits are re-verified too.
+        run: |
+          echo "9c9f56a391a3abbd5b89d0245bf6106081bcc3173119d4229235dd9d23253f94  $HOME/.cache/ai-eval-models/Qwen2.5-3B-Instruct-Q4_K_M.gguf" | sha256sum -c -
+      - name: Model-in-the-loop planner eval (gated)
+        # The planner set is a balanced 32-case matrix over vi/en ×
+        # direct/rag_search/application_action/web_search. The same loaded
+        # model also grades the exact production chat freshness classifier.
+        # Aggregate floors cannot hide a broken language or decision class:
+        # every four-case planner slice must also keep three correct answers. For a
+        # model swap, download this job's trend artifact and re-run locally
+        # with --baseline <report> to gate on the drop.
+        run: >-
+          python AIAssistant/evals/run_model_in_loop_eval.py
+          --model-path "$HOME/.cache/ai-eval-models/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+          --min-model-coverage 0.9
+          --min-accuracy 0.9
+          --min-slice-accuracy 0.75
+          --min-freshness-accuracy 0.9
+      - name: Publish result summary
+        if: always()
+        run: |
+          {
+            echo "## Model-in-the-loop planner eval"
+            echo '```json'
+            cat AIAssistant/evals/model_in_loop_report.json 2>/dev/null \
+              || echo '{"skipped": "no report — the run died before grading"}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: model-in-loop-trend
+          path: AIAssistant/evals/model_in_loop_report.json
+          if-no-files-found: ignore

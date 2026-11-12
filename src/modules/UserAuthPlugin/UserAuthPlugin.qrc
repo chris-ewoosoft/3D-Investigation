@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="flags/flag_vn.png">resources/flag_vn.png</file>
+        <file alias="flags/flag_en.png">resources/flag_en.png</file>
+    </qresource>
+</RCC>

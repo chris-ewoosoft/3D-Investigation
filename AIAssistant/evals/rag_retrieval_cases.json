@@ -1,0 +1,34 @@
+[
+  {
+    "name": "vi_dense_sparse_agree",
+    "query": "Cơ chế xác thực người dùng nằm ở đâu?",
+    "dense": [{"id": 0, "score": 0.93}, {"id": 1, "score": 0.81}],
+    "sparse": [0, 1],
+    "reference": [0, 1],
+    "result_k": 2
+  },
+  {
+    "name": "en_similarity_threshold_removes_noise",
+    "query": "Where is the reconstruction pipeline state published?",
+    "dense": [{"id": 0, "score": 0.12}, {"id": 1, "score": 0.91}],
+    "sparse": [1, 2],
+    "reference": [1, 2],
+    "result_k": 2
+  },
+  {
+    "name": "vi_complementary_channels",
+    "query": "Tìm hợp đồng dọn dẹp widget của plugin",
+    "dense": [{"id": 0, "score": 0.88}, {"id": 2, "score": 0.79}],
+    "sparse": [1, 0],
+    "reference": [0, 1, 2],
+    "result_k": 3
+  },
+  {
+    "name": "en_one_ranked_decoy_is_tolerated",
+    "query": "How are blocking mail calls kept off the GUI thread?",
+    "dense": [{"id": 0, "score": 0.94}, {"id": 3, "score": 0.70}],
+    "sparse": [1, 2],
+    "reference": [0, 1, 2],
+    "result_k": 4
+  }
+]

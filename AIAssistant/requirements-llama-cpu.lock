@@ -1,0 +1,9 @@
+# Container-local inference backend. Kept separate from requirements-docker.lock
+# because accelerator deployments replace this x86_64 CPU wheel with the wheel
+# matching their CUDA/ROCm/Vulkan runtime. The URL is an official release asset
+# and the digest is published by that GitHub release.
+diskcache==5.6.3 \
+    --hash=sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc \
+    --hash=sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19
+llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.36/llama_cpp_python-0.3.36-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+    --hash=sha256:c8a3e98093e950d7a770f794842e36f2db82b2933e8762ed7b5ffd435011e8e4

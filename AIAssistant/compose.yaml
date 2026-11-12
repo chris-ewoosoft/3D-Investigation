@@ -1,0 +1,100 @@
+name: 3d-reconstruction-ai
+
+services:
+  storage-key-init:
+    image: python:3.11-slim@sha256:e529028263dbe6910a2d96f7d2b8f5266385e917fd45d286ef166977c094a51e
+    restart: "no"
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ai_secrets:/secrets
+    command:
+      - python
+      - -c
+      - |
+        import base64, os, pathlib
+        target = pathlib.Path("/secrets/ai_assistant.key")
+        if not target.exists():
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(base64.urlsafe_b64encode(os.urandom(32)).decode(), encoding="ascii")
+            os.chmod(temporary, 0o444)
+            temporary.replace(target)
+
+  ai-assistant:
+    platform: linux/amd64
+    image: ${AI_ASSISTANT_IMAGE:-3d-reconstruction-ai-assistant:local}
+    build:
+      context: ..
+      dockerfile: AIAssistant/Dockerfile
+    init: true
+    restart: unless-stopped
+    depends_on:
+      storage-key-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      AI_ASSISTANT_PROFILE: server
+      AI_ADMIN_TOKEN: ${AI_ADMIN_TOKEN:?Set AI_ADMIN_TOKEN in AIAssistant/.env}
+      AI_AGENT_TOKEN: ${AI_AGENT_TOKEN:?Set AI_AGENT_TOKEN in AIAssistant/.env}
+      AI_STORAGE_KEY: ""
+      AI_STORAGE_KEY_FILE: /run/secrets/ai_assistant.key
+      AGENT_HOST: 0.0.0.0
+      AGENT_PORT: "8080"
+      AGENT_CHECKPOINT_BACKEND: sqlite
+      AGENT_CHECKPOINT_PATH: /app/data/AIAssistant/Cache/checkpoints.sqlite
+      AGENT_CHECKPOINT_REQUIRED: "1"
+      # Docker-in-Docker is deliberately not enabled by mounting the daemon
+      # socket: doing so would make the non-root service equivalent to root on
+      # the host and the sandbox's /app paths do not exist in the host daemon.
+      AGENT_SANDBOX_ENABLED: "0"
+      AGENT_SANDBOX_REQUIRE_ISOLATION: "1"
+      APP_DATA_DIR: /app/data
+      HF_HOME: /app/data/AIAssistant/Cache/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /app/data/AIAssistant/Cache/sentence-transformers
+      PYTHONDONTWRITEBYTECODE: "1"
+      XDG_CACHE_HOME: /app/data/AIAssistant/Cache/xdg
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        test -n "$${AI_ADMIN_TOKEN}"
+        test -n "$${AI_AGENT_TOKEN}"
+        test "$${AI_ADMIN_TOKEN}" != "$${AI_AGENT_TOKEN}"
+        exec python -m ai_assistant.bootstrap.server
+    ports:
+      - "${AI_ASSISTANT_BIND_IP:-127.0.0.1}:${AI_ASSISTANT_PORT:-8080}:8080"
+    volumes:
+      - ai_data:/app/data
+      - ai_secrets:/run/secrets:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/livez', timeout=4)"
+      interval: 30s
+      timeout: 5s
+      start_period: 10m
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  ai_data:
+  ai_secrets:

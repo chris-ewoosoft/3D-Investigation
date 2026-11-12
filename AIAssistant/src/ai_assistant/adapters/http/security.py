@@ -1,0 +1,273 @@
+"""Transport trust policy for the HTTP, A2A and MCP surfaces (ADR 0008).
+
+The desktop server binds to loopback, but binding is a deployment detail and
+must not be the only control.  Every mutating surface therefore fails closed on
+three independent checks:
+
+1. **Peer check** — the socket peer must be loopback unless the deployment
+   explicitly opts the surface into remote access.
+2. **Origin check** — a browser-sent ``Origin``/``Referer`` must match the
+   configured allow-list, which blocks cross-site request forgery even for
+   endpoints that accept ``application/json``.
+3. **Bearer token** — mandatory on every privileged surface, including
+   loopback. The Qt owner generates one 256-bit token per child process and
+   sends it on every request; standalone deployments provide their own.
+
+Tokens are read from the child environment. Loopback is still required for
+desktop-only surfaces, but no local process can reach them merely by guessing
+the port.
+"""
+from __future__ import annotations
+
+import hmac
+from dataclasses import dataclass, field
+from ipaddress import ip_address
+from typing import Any, NoReturn
+from urllib.parse import urlsplit
+
+from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from ...settings import DEFAULT_HOST, DEFAULT_PORT, a2a_tenants, transport_tokens
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "::1", "127.0.0.1"})
+# The deployment bind plus the dev-server port are implicitly allowed loopback
+# origins; both derive from the canonical host/port instead of a literal list.
+_ALLOWED_LOOPBACK_PORT = frozenset({DEFAULT_PORT, 8000})
+
+
+@dataclass(frozen=True, slots=True)
+class TransportPolicy:
+    """Parsed once by the composition root and injected into the adapters."""
+
+    allowed_origins: tuple[str, ...] = ()
+    admin_token: str = ""
+    agent_token: str = ""
+    a2a_token: str = ""
+    mcp_token: str = ""
+    allow_remote_a2a: bool = False
+    #: Bearer token → tenant id for the A2A surface. Empty means single-tenant:
+    #: the single ``a2a_token`` maps every task to ``"default"``.
+    a2a_tenants: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_env(cls, *, allowed_origins: tuple[str, ...] = (), allow_remote_a2a: bool = False,
+                 env: dict[str, str] | None = None) -> "TransportPolicy":
+        tokens = transport_tokens(env)
+        return cls(
+            allowed_origins=tuple(allowed_origins),
+            admin_token=tokens.admin,
+            agent_token=tokens.agent,
+            a2a_token=tokens.a2a,
+            mcp_token=tokens.mcp,
+            allow_remote_a2a=allow_remote_a2a,
+            a2a_tenants=a2a_tenants(env),
+        )
+
+
+def _is_loopback(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.casefold() in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return bool(ip_address(host).is_loopback)
+    except ValueError:
+        # Unknown/unparseable peer (including test client labels): fail closed.
+        return host.casefold().endswith(".localhost")
+
+
+def _reject(status_code: int, detail: str) -> NoReturn:
+    raise HTTPException(status_code=status_code, detail=detail)
+
+def require_loopback(request: Request, surface: str) -> None:
+    """Reject any peer that is not loopback (403)."""
+    peer = request.client.host if request.client else None
+    if not _is_loopback(peer):
+        _reject(403, f"{surface} is restricted to loopback callers")
+
+
+def _origin_of(value: str) -> str:
+    """Reduce an ``Origin``/``Referer`` header to ``scheme://host[:port]``.
+
+    ``Origin`` already has that shape, but ``Referer`` is a **full URL**: the
+    old verbatim comparison against an origin-only allow-list rejected every
+    browser that sent one (the path made it differ). ``urlsplit`` normalises
+    both, and a value without a scheme or a netloc (``"null"``,
+    ``about:blank``) is returned as-is so it can only ever match a literal
+    allow-list entry — fail-closed.
+    """
+    parts = urlsplit(value)
+    if not parts.scheme or not parts.netloc:
+        return value.rstrip("/")
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def require_local_origin(request: Request, policy: TransportPolicy, surface: str) -> None:
+    """Reject browser requests whose Origin is outside the deployment allow-list."""
+    raw = request.headers.get("origin") or request.headers.get("referer")
+    if not raw:
+        return  # non-browser caller (Qt, curl, tests) — the peer check applies
+    origin = _origin_of(raw)
+    allowed = {item.rstrip("/").lower() for item in policy.allowed_origins}
+    allowed.update(f"http://{DEFAULT_HOST}:{port}" for port in _ALLOWED_LOOPBACK_PORT)
+    allowed.update(f"http://localhost:{port}" for port in _ALLOWED_LOOPBACK_PORT)
+    allowed.add(f"http://{DEFAULT_HOST}")
+    allowed.add("http://localhost")
+    if origin not in allowed:
+        _reject(403, f"{surface} does not accept this origin")
+
+
+def require_token(request: Request, token: str, surface: str) -> None:
+    """Validate ``Authorization: Bearer <token>`` in constant time."""
+    header = request.headers.get("authorization", "")
+    scheme, _, value = header.partition(" ")
+    if scheme.casefold() != "bearer" or not hmac.compare_digest(value.strip(), token):
+        _reject(401, f"Missing or invalid {surface} credentials")
+
+
+def _evaluate(request: Request, *, policy: TransportPolicy, surface: str, token: str,
+              allow_remote: bool, token_configured: bool | None = None) -> None:
+    """One surface's trust checks, shared by the route guards and mounted apps."""
+    has_token = bool(token) if token_configured is None else token_configured
+    if not has_token:
+        _reject(503, f"{surface} requires a configured access token")
+    if not allow_remote:
+        require_loopback(request, surface)
+    if token:
+        require_token(request, token, surface)
+    require_local_origin(request, policy, surface)
+
+
+def _guards(policy: TransportPolicy, *, surface: str, token: str, allow_remote: bool,
+            token_configured: bool | None = None) -> list[Any]:
+    def guard(request: Request) -> None:
+        _evaluate(request, policy=policy, surface=surface, token=token,
+                  allow_remote=allow_remote, token_configured=token_configured)
+
+    return [Depends(guard)]
+
+
+def admin_guards(policy: TransportPolicy | None) -> list[Any]:
+    """Destructive management surface: loopback + origin + mandatory bearer."""
+    resolved = policy or TransportPolicy()
+    return _guards(resolved, surface="admin", token=resolved.admin_token, allow_remote=False)
+
+
+def agent_guards(policy: TransportPolicy | None) -> list[Any]:
+    """Qt agent surface: loopback + origin + mandatory bearer."""
+    resolved = policy or TransportPolicy()
+    return _guards(resolved, surface="agent", token=resolved.agent_token, allow_remote=False)
+
+
+def chat_guards(policy: TransportPolicy | None) -> list[Any]:
+    """Qt completion surface: loopback + origin + mandatory bearer."""
+    resolved = policy or TransportPolicy()
+    return _guards(resolved, surface="chat", token=resolved.agent_token, allow_remote=False)
+
+
+def a2a_guards(policy: TransportPolicy | None) -> list[Any]:
+    """A2A surface: loopback until remote access is opted into *with* a token."""
+    resolved = policy or TransportPolicy()
+    # A multi-tenant mapping is an access-token configuration even when the
+    # single ``AI_A2A_TOKEN`` is unset; the tenant dependency validates the
+    # bearer against the mapping.
+    return _guards(resolved, surface="a2a", token=resolved.a2a_token,
+                   allow_remote=resolved.allow_remote_a2a,
+                   token_configured=bool(resolved.a2a_token or resolved.a2a_tenants))
+
+
+def resolve_a2a_tenant(request: Request, policy: TransportPolicy) -> str:
+    """Resolve the A2A tenant from the bearer token and stash it on the request.
+
+    Multi-tenant mode (``AI_A2A_TENANTS`` configured): the token must be a key
+    in the mapping and the resolved tenant owns the task. Single-tenant mode:
+    the configured ``AI_A2A_TOKEN`` is required. A missing credential source
+    is a deployment error, never an anonymous ``"default"`` tenant.
+    """
+    header = request.headers.get("authorization", "")
+    _, _, value = header.partition(" ")
+    token = value.strip()
+    if policy.a2a_tenants:
+        tenant = policy.a2a_tenants.get(token)
+        if tenant is None:
+            _reject(401, "Missing or invalid a2a credentials")
+    elif policy.a2a_token:
+        if not token or not hmac.compare_digest(token, policy.a2a_token):
+            _reject(401, "Missing or invalid a2a credentials")
+        tenant = "default"
+    else:
+        _reject(503, "a2a requires a configured access token")
+    request.state.a2a_tenant = tenant
+    return tenant
+
+
+def mcp_exposed_without_token(host: str | None, policy: TransportPolicy) -> bool:
+    """True when MCP has no credential, regardless of the bind address.
+
+    Binding is a deployment detail (ADR 0008), not authentication. The
+    composition root keeps the mount closed when ``AI_MCP_TOKEN`` is absent
+    instead of serving an anonymously reachable loopback tool surface.
+    """
+    del host
+    return not policy.mcp_token
+
+
+class GuardedMountedApp:
+    """Apply one surface's transport checks to a mounted ASGI sub-application.
+
+    ``FastAPI.mount`` takes no route ``dependencies``, so a mounted sub-app —
+    the MCP surface — would otherwise skip exactly the peer/origin/token checks
+    every other surface applies. This wrapper runs the shared policy on each
+    HTTP scope and answers with the same status codes; non-HTTP scopes
+    (lifespan, websocket) pass through untouched.
+    """
+
+    def __init__(self, app: Any, *, policy: TransportPolicy, surface: str, token: str,
+                 allow_remote: bool) -> None:
+        self._app = app
+        self._policy = policy
+        self._surface = surface
+        self._token = token
+        self._allow_remote = allow_remote
+
+    def _refusal(self, scope: Any) -> JSONResponse | None:
+        try:
+            _evaluate(Request(scope), policy=self._policy, surface=self._surface,
+                      token=self._token, allow_remote=self._allow_remote)
+        except HTTPException as error:
+            return JSONResponse({"detail": error.detail}, status_code=error.status_code)
+        return None
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        refusal = self._refusal(scope)
+        if refusal is not None:
+            await refusal(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+def mcp_guarded_app(app: Any, policy: TransportPolicy | None) -> GuardedMountedApp:
+    """Wrap the MCP sub-app so the mount enforces the MCP surface policy."""
+    resolved = policy or TransportPolicy()
+    return GuardedMountedApp(app, policy=resolved, surface="mcp", token=resolved.mcp_token,
+                             allow_remote=bool(resolved.mcp_token))
+
+
+__all__ = [
+    "GuardedMountedApp",
+    "TransportPolicy",
+    "a2a_guards",
+    "admin_guards",
+    "agent_guards",
+    "chat_guards",
+    "mcp_exposed_without_token",
+    "mcp_guarded_app",
+    "require_local_origin",
+    "require_loopback",
+    "require_token",
+    "resolve_a2a_tenant",
+]

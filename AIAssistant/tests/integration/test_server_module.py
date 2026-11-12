@@ -1,0 +1,616 @@
+"""Unit tests for the composition-root helpers in ``bootstrap/server.py``.
+
+The module is imported once at test-collection time (its module-level wiring is
+pinned by :mod:`tests.integration.test_composition_root_bootstrap`). These tests
+drive the *branches* that import-time execution cannot reach: the optional
+A2A/MCP registration matrix, the lifespan lifecycle, the chatbot-agent holder,
+win32 platform shims and the A2A task executor.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import ANY, MagicMock, patch
+
+from ai_assistant.adapters.http.security import GuardedMountedApp, TransportPolicy
+from ai_assistant.bootstrap import server
+
+# These tests read composed names (``server.runtime_modules``, ``server.app``),
+# which composes the graph via PEP 562. Compose builds the long-term memory
+# store eagerly (ADR 0043), so the first access has to happen against a
+# temporary data root or a standalone run of this module leaves a real
+# ``memory.sqlite`` in the checkout. In the full suite the graph is already
+# composed by ``test_composition_root_bootstrap``; this block is then a no-op
+# and the directory is simply dropped.
+_DATA_ROOT = tempfile.mkdtemp(prefix="aiassistant-server-tests-")
+_OWNS_GRAPH = "memory_store" not in vars(server)
+if _OWNS_GRAPH:
+    with patch.dict(os.environ, {"APP_DATA_DIR": _DATA_ROOT}):
+        server.compose()
+
+
+def tearDownModule() -> None:
+    if _OWNS_GRAPH:
+        handle = getattr(server, "checkpointer_handle", None)
+        if handle is not None:
+            handle.close()
+        store = getattr(server, "memory_store", None)
+        if store is not None:
+            store.close()
+    shutil.rmtree(_DATA_ROOT, ignore_errors=True)
+
+
+class _AsyncCM:
+    """Trivial ``async with`` double recording enter/exit."""
+
+    def __init__(self) -> None:
+        self.entered = False
+        self.exited = False
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        self.exited = True
+        return False
+
+
+class PackageRootBootstrapTests(unittest.TestCase):
+    def test_ensure_package_root_adds_missing_root(self) -> None:
+        fake_root = "fake-root-not-on-path"
+        try:
+            sys.path.remove(fake_root)
+        except ValueError:
+            pass
+        try:
+            server._ensure_package_root_on_path(fake_root)
+            self.assertIn(fake_root, sys.path)
+        finally:
+            sys.path.remove(fake_root)
+
+    def test_ensure_package_root_skips_existing_root(self) -> None:
+        fake_root = "fake-root-on-path"
+        sys.path.append(fake_root)
+        try:
+            server._ensure_package_root_on_path(fake_root)
+            self.assertEqual(sys.path.count(fake_root), 1)
+        finally:
+            sys.path.remove(fake_root)
+
+
+class ProactorShimTests(unittest.TestCase):
+    def test_silence_connection_reset_calls_original(self) -> None:
+        received: list = []
+
+        class _FakeTransport:
+            @staticmethod
+            def _call_connection_lost(self_, exc):
+                received.append(exc)
+
+        server._silence_connection_reset(_FakeTransport)
+        _FakeTransport._call_connection_lost("self", ValueError("other"))
+        self.assertEqual(len(received), 1)
+        self.assertIsInstance(received[0], ValueError)
+        self.assertEqual(received[0].args, ("other",))
+
+    def test_silence_connection_reset_swallows_reset(self) -> None:
+        received: list = []
+
+        class _FakeTransport:
+            @staticmethod
+            def _call_connection_lost(self_, exc):
+                received.append(exc)
+                raise ConnectionResetError("reset")
+
+        server._silence_connection_reset(_FakeTransport)
+        _FakeTransport._call_connection_lost("self", ConnectionResetError("x"))
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].args, ("x",))
+        # The reset was swallowed, so the wrapping returned normally.
+
+    def test_patch_proactor_transport_is_noop_on_posix(self) -> None:
+        with (
+            patch.object(server.sys, "platform", "linux"),
+            patch.object(server, "_silence_connection_reset") as silence,
+        ):
+            server._patch_proactor_transport()  # returns before importing asyncio internals
+            # POSIX returns first: the proactor transport class is never touched.
+            silence.assert_not_called()
+
+    def test_patch_proactor_transport_installs_shim_on_windows(self) -> None:
+        import asyncio.proactor_events as proactor_events
+
+        original = lambda self_, exc: None  # noqa: E731
+        fake_transport_cls = SimpleNamespace(_call_connection_lost=original)
+        with patch.object(server.sys, "platform", "win32"), \
+                patch.object(proactor_events, "_ProactorBasePipeTransport", fake_transport_cls):
+            server._patch_proactor_transport()
+        self.assertIsNot(fake_transport_cls._call_connection_lost, original)
+
+
+class ChatbotAgentHolderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        server.runtime_modules.chatbot_agent._agent = None
+
+    def tearDown(self) -> None:
+        server.runtime_modules.chatbot_agent._agent = None
+
+    def test_get_chatbot_agent_creates_once_and_rebuild_replaces(self) -> None:
+        holder = server.runtime_modules.chatbot_agent
+        first, second = MagicMock(), MagicMock()
+        with patch("ai_assistant.orchestration.specialists.ChatbotAgent", side_effect=[first, second]) as mock_cls:
+            got_a = holder.get()
+            got_b = holder.get()
+            holder.rebuild()
+            got_c = holder.get()
+            mock_cls.assert_called_with(
+                server.runtime_modules.llm,
+                server.runtime_modules.rag,
+                server.runtime_modules.chatbot_agent._prompt_builder,
+                server.runtime_modules.chatbot_agent._web_search,
+                ANY,
+            )
+        self.assertIs(got_a, first)
+        self.assertIs(got_b, first)
+        self.assertIs(got_c, second)
+        self.assertIsNot(got_a, got_c)
+
+
+class A2ATaskExecutorTests(unittest.TestCase):
+    def test_execute_a2a_task_requires_loaded_llm(self) -> None:
+        with patch.object(server.runtime_modules.llm, "llm", None):
+            with self.assertRaisesRegex(RuntimeError, "LLM is not initialized"):
+                server.runtime_modules.execute_a2a_task(MagicMock())
+
+    def test_execute_a2a_task_requires_the_run_service(self) -> None:
+        with patch.object(server.runtime_modules.llm, "llm", object()), \
+                patch.object(server.runtime_modules, "agent_run_service", None):
+            with self.assertRaisesRegex(RuntimeError, "Agent run service is not initialized"):
+                server.runtime_modules.execute_a2a_task(MagicMock())
+
+    def test_execute_a2a_task_delegates_to_agent_run_service(self) -> None:
+        task = MagicMock()
+        mock_service = MagicMock()
+        with patch.object(server.runtime_modules.llm, "llm", object()), \
+                patch.object(server.runtime_modules, "agent_run_service", mock_service):
+            server.runtime_modules.execute_a2a_task(task)
+        mock_service.run.assert_called_once_with(task)
+
+
+class SupervisorDelegateBindingTests(unittest.TestCase):
+    def test_binds_the_remote_resolver_and_live_plugin_row(self) -> None:
+        registry = MagicMock()
+        bound = server._build_supervisor_delegate(True, registry, frozenset({"plugin_echo"}))
+        self.assertIs(bound.keywords["remote_lookup"], registry.resolve)
+        self.assertEqual(bound.keywords["plugin_tools"], frozenset({"plugin_echo"}))
+
+    def test_a2a_disabled_does_not_bind_a_remote_resolver(self) -> None:
+        registry = MagicMock()
+        bound = server._build_supervisor_delegate(False, registry, frozenset())
+        self.assertNotIn("remote_lookup", bound.keywords)
+        self.assertEqual(bound.keywords["plugin_tools"], frozenset())
+
+
+class AgentRouteRefreshTests(unittest.TestCase):
+    def test_refresh_agent_routes_resets_state_and_schema(self) -> None:
+        with patch.object(server, "agent_service") as mock_service:
+            server.app.openapi_schema = "stale"
+            server._refresh_agent_routes()
+        mock_service.reset_state.assert_called_once()
+        self.assertIsNone(server.app.openapi_schema)
+
+
+class LifespanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._logger_patch = patch.object(server, "logger")
+        self.mock_logger = self._logger_patch.start()
+        self.addCleanup(self._logger_patch.stop)
+        # The lifespan now closes the checkpointer handle, and this module
+        # shares the process-wide composed graph with the rest of the suite:
+        # a real close here would release the saver every later test sees.
+        self._checkpointer_patch = patch.object(server, "checkpointer_handle", MagicMock())
+        self._checkpointer_patch.start()
+        self.addCleanup(self._checkpointer_patch.stop)
+        self._stream_workers_patch = patch.object(server, "agent_stream_workers", MagicMock())
+        stream_workers = self._stream_workers_patch.start()
+        stream_workers.close.return_value = True
+        self.addCleanup(self._stream_workers_patch.stop)
+
+    def _run_lifespan(self, platform: object, mcp_server: object,
+                      app: object | None = None) -> str:
+        async def drive() -> str:
+            async with server.lifespan(app if app is not None else MagicMock()):
+                return "yielded"
+
+        # lifespan reads the *module-level* platform/mcp_server globals, so the
+        # doubles must be installed before the async run starts.
+        with patch.object(server, "platform", platform), \
+                patch.object(server, "mcp_server", mcp_server):
+            return asyncio.run(drive())
+
+    def test_lifespan_without_a_registry_skips_discovery(self) -> None:
+        app = SimpleNamespace(state=SimpleNamespace(a2a_registry=None))
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"), \
+                patch.object(server, "task_retention_days", return_value=0), \
+                patch.object(server, "_discover_a2a_peers") as discover:
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=MagicMock()),
+                MagicMock(available=False),
+                app=app,
+            )
+        self.assertEqual(result, "yielded")
+        discover.assert_not_called()
+
+    def test_lifespan_yields_when_mcp_disabled_and_logs_cleanup_error(self) -> None:
+        with patch("builtins.print"), \
+                patch(
+                    "ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints",
+                    side_effect=RuntimeError("boom"),
+                ):
+            result = self._run_lifespan(
+                SimpleNamespace(
+                    settings=SimpleNamespace(enable_mcp=False),
+                    tasks=MagicMock(),
+                ),
+                MagicMock(available=True),
+            )
+        self.assertEqual(result, "yielded")
+        self.mock_logger.warning.assert_called_once()
+        self.assertIn("Lỗi dọn dẹp checkpoint", self.mock_logger.warning.call_args.args[0])
+        self.mock_logger.info.assert_any_call("MCP endpoint disabled by configuration")
+
+    def test_a2a_discovery_noops_without_configured_endpoints(self) -> None:
+        registry = MagicMock()
+        with patch("ai_assistant.settings.a2a_trusted_endpoints", return_value=frozenset()):
+            asyncio.run(server._discover_a2a_peers(registry))
+        registry.discover.assert_not_called()
+
+    def test_a2a_discovery_fetches_the_allowlist_in_sorted_order(self) -> None:
+        registry = MagicMock()
+        registry.discover.return_value = {"https://a.test": object()}
+        with patch(
+            "ai_assistant.settings.a2a_trusted_endpoints",
+            return_value=frozenset({"https://b.test", "https://a.test"}),
+        ):
+            asyncio.run(server._discover_a2a_peers(registry))
+        registry.discover.assert_called_once_with(["https://a.test", "https://b.test"])
+        self.mock_logger.info.assert_any_call(
+            "A2A discovery: %d/%d endpoint(s) reachable", 1, 2,
+        )
+
+    def test_lifespan_logs_a_discovery_failure_without_blocking_startup(self) -> None:
+        async def boom(_registry: object) -> None:
+            msg = "discovery boom"
+            raise RuntimeError(msg)
+
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"), \
+                patch.object(server, "_discover_a2a_peers", side_effect=boom):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=MagicMock()),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        self.mock_logger.warning.assert_any_call("A2A discovery failed: discovery boom")
+
+    def test_lifespan_uses_mcp_lifespan_when_available(self) -> None:
+        settings = SimpleNamespace(enable_mcp=True)
+        tasks = MagicMock()
+        mcp = MagicMock(available=True)
+        cm = _AsyncCM()
+        mcp.lifespan.return_value = cm
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"):
+            result = self._run_lifespan(SimpleNamespace(settings=settings, tasks=tasks), mcp)
+        self.assertEqual(result, "yielded")
+        self.assertTrue(cm.entered)
+        self.assertTrue(cm.exited)
+        tasks.close.assert_called_once()
+
+    def test_lifespan_closes_the_memory_store_when_one_is_composed(self) -> None:
+        """The lifespan owns the store's close: a composed store must be
+        released before the task store on shutdown (ADR 0043)."""
+        store = MagicMock()
+        with patch.object(server, "memory_store", store):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False),
+                                tasks=MagicMock()),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        store.close.assert_called_once()
+
+    def test_lifespan_does_not_close_stores_under_a_live_sse_worker(self) -> None:
+        streams = MagicMock()
+        streams.close.return_value = False
+        handle = MagicMock()
+        store = MagicMock()
+        tasks = MagicMock()
+        with patch.object(server, "agent_stream_workers", streams), \
+                patch.object(server, "checkpointer_handle", handle), \
+                patch.object(server, "memory_store", store):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        streams.close.assert_called_once()
+        handle.close.assert_not_called()
+        store.close.assert_not_called()
+        tasks.close.assert_called_once()
+        self.mock_logger.warning.assert_any_call(
+            "Runtime workers did not drain before shutdown; shared stores remain open",
+        )
+
+    def test_non_drained_worker_does_not_suppress_the_request_exception(self) -> None:
+        """Skipping dependency close must not turn a failed request into success."""
+        streams = MagicMock()
+        streams.close.return_value = False
+        platform = SimpleNamespace(
+            settings=SimpleNamespace(enable_mcp=False),
+            tasks=MagicMock(),
+        )
+
+        async def drive() -> None:
+            async with server.lifespan(MagicMock()):
+                raise RuntimeError("request failed")  # noqa: TRY003 - deliberate test sentinel
+
+        with patch.object(server, "agent_stream_workers", streams), \
+                patch.object(server, "platform", platform), \
+                patch.object(server, "mcp_server", MagicMock(available=False)):
+            with self.assertRaisesRegex(RuntimeError, "request failed"):
+                asyncio.run(drive())
+        platform.tasks.close.assert_called_once()
+
+    def test_task_or_tool_workers_must_drain_before_shared_stores_close(self) -> None:
+        for blocked_owner in ("tasks", "tools"):
+            with self.subTest(blocked_owner=blocked_owner):
+                tasks = MagicMock()
+                tools = MagicMock()
+                tasks.close.return_value = blocked_owner != "tasks"
+                tools.close.return_value = blocked_owner != "tools"
+                handle = MagicMock()
+                store = MagicMock()
+                with patch.object(server, "checkpointer_handle", handle), \
+                        patch.object(server, "memory_store", store):
+                    self._run_lifespan(
+                        SimpleNamespace(
+                            settings=SimpleNamespace(enable_mcp=False),
+                            tasks=tasks,
+                            tools=tools,
+                        ),
+                        MagicMock(available=False),
+                    )
+                tasks.close.assert_called_once()
+                tools.close.assert_called_once()
+                handle.close.assert_not_called()
+                store.close.assert_not_called()
+
+    def test_lifespan_closes_the_checkpointer_handle(self) -> None:
+        """The handle owns the Postgres/Redis context manager or the SQLite
+        connection; the lifespan is the owner that releases it."""
+        handle = MagicMock()
+        with patch.object(server, "checkpointer_handle", handle):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False),
+                                tasks=MagicMock()),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        handle.close.assert_called_once()
+
+    def test_lifespan_skips_the_checkpointer_close_when_absent(self) -> None:
+        """An embedding that composes no handle must not make shutdown fail."""
+        with patch.object(server, "checkpointer_handle", None):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False),
+                                tasks=MagicMock()),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+
+    def test_a_failing_checkpointer_close_does_not_skip_the_stores(self) -> None:
+        handle = MagicMock()
+        handle.close.side_effect = RuntimeError("checkpoint boom")
+        store = MagicMock()
+        tasks = MagicMock()
+        with patch.object(server, "checkpointer_handle", handle), \
+                patch.object(server, "memory_store", store):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        store.close.assert_called_once()
+        tasks.close.assert_called_once()
+        self.mock_logger.warning.assert_any_call(
+            "Closing the checkpoint store failed: checkpoint boom",
+        )
+
+    def test_lifespan_skips_the_memory_store_close_when_disabled(self) -> None:
+        """``AGENT_MEMORY_ENABLED=0`` composes no store; shutdown must not
+        trip over the missing one."""
+        with patch.object(server, "memory_store", None):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False),
+                                tasks=MagicMock()),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+
+    def test_a_failing_memory_close_does_not_skip_the_task_store(self) -> None:
+        """One handle failing must not leave the other open on shutdown.
+
+        The previous shape closed the memory store first and let an exception
+        escape the ``finally`` block, so the task store's connection stayed
+        open for the rest of the process (and the WAL was never checkpointed).
+        """
+        store = MagicMock()
+        store.close.side_effect = RuntimeError("wal boom")
+        tasks = MagicMock()
+        with patch.object(server, "memory_store", store):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        tasks.close.assert_called_once()
+        self.mock_logger.warning.assert_any_call(
+            "Closing the long-term memory store failed: wal boom",
+        )
+
+    def test_a_failing_task_close_is_logged_not_raised(self) -> None:
+        """An unknown task-drain state keeps shared stores open and is contained."""
+        tasks = MagicMock()
+        tasks.close.side_effect = RuntimeError("task boom")
+        handle = MagicMock()
+        store = MagicMock()
+        with patch.object(server, "checkpointer_handle", handle), \
+                patch.object(server, "memory_store", store):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        handle.close.assert_not_called()
+        store.close.assert_not_called()
+        self.mock_logger.warning.assert_any_call("Closing the task store failed: task boom")
+
+    def test_lifespan_logs_a_pruning_failure_without_blocking_startup(self) -> None:
+        tasks = MagicMock()
+        tasks.prune.side_effect = RuntimeError("prune boom")
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"), \
+                patch.object(server, "task_retention_days", return_value=30):
+            result = self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        self.mock_logger.warning.assert_any_call("Task retention pruning failed: prune boom")
+
+    def test_lifespan_skips_pruning_when_the_window_is_disabled(self) -> None:
+        tasks = MagicMock()
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"), \
+                patch.object(server, "task_retention_days", return_value=0):
+            self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        tasks.prune.assert_not_called()
+
+    def test_lifespan_does_not_log_when_no_task_was_pruned(self) -> None:
+        tasks = MagicMock()
+        tasks.prune.return_value = 0
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"), \
+                patch.object(server, "task_retention_days", return_value=30):
+            self._run_lifespan(
+                SimpleNamespace(settings=SimpleNamespace(enable_mcp=False), tasks=tasks),
+                MagicMock(available=False),
+            )
+        self.assertFalse(
+            [call for call in self.mock_logger.info.call_args_list if "Pruned" in str(call)],
+        )
+
+    def test_lifespan_warns_when_mcp_unavailable(self) -> None:
+        tasks = MagicMock()
+        with patch("builtins.print"), \
+                patch("ai_assistant.adapters.persistence.checkpointing.cleanup_old_checkpoints"):
+            result = self._run_lifespan(
+                SimpleNamespace(
+                    settings=SimpleNamespace(enable_mcp=True),
+                    tasks=tasks,
+                ),
+                MagicMock(available=False),
+            )
+        self.assertEqual(result, "yielded")
+        self.mock_logger.warning.assert_called_once()
+        self.assertIn("MCP SDK is not installed", self.mock_logger.warning.call_args.args[0])
+        tasks.close.assert_called_once()
+
+
+class OptionalProtocolTests(unittest.TestCase):
+    def _run(self, *, enable_a2a: bool, enable_mcp: bool, mcp_available: bool,
+             bind_host: str = "127.0.0.1", policy: TransportPolicy | None = None):
+        app = MagicMock()
+        mcp = MagicMock()
+        mcp.available = mcp_available
+        platform = SimpleNamespace(
+            settings=SimpleNamespace(enable_a2a=enable_a2a, enable_mcp=enable_mcp,
+                                    a2a_card_url="https://ai.internal:8443"),
+            tasks=object(),
+            plugins=object(),
+        )
+        with patch("ai_assistant.adapters.a2a.build_a2a_router", return_value="router") as mock_build, \
+                patch.object(server, "agent_bind_host", return_value=bind_host), \
+                patch.object(server, "logger") as mock_logger:
+            server._register_optional_protocols(
+                app, platform, mcp, policy if policy is not None else TransportPolicy(),
+            )
+        return SimpleNamespace(app=app, mcp=mcp, platform=platform,
+                               mock_build=mock_build, logger=mock_logger)
+
+    def test_registers_a2a_and_mcp_when_enabled_and_available(self) -> None:
+        run = self._run(enable_a2a=True, enable_mcp=True, mcp_available=True,
+                        policy=TransportPolicy(mcp_token="mcp-secret"))
+        run.mock_build.assert_called_once_with(
+            run.platform.tasks,
+            "3D-Reconstruction AI Assistant",
+            "3.0.0",
+            policy=ANY,
+            card_base_url="https://ai.internal:8443",
+        )
+        self.assertIsInstance(run.mock_build.call_args.kwargs["policy"], TransportPolicy)
+        run.app.include_router.assert_called_once_with("router")
+        run.mcp.register_plugin_tools.assert_called_once_with(run.platform.plugins)
+        # The sub-app is mounted behind the transport guard: ``mount`` cannot
+        # take route dependencies, so the wrapper carries the MCP policy.
+        run.app.mount.assert_called_once()
+        path, mounted = run.app.mount.call_args.args
+        self.assertEqual(path, "/mcp")
+        self.assertIsInstance(mounted, GuardedMountedApp)
+        run.logger.warning.assert_not_called()
+
+    def test_skips_mcp_when_sdk_unavailable(self) -> None:
+        run = self._run(enable_a2a=True, enable_mcp=True, mcp_available=False)
+        run.mock_build.assert_called_once()
+        run.app.include_router.assert_called_once()
+        run.mcp.register_plugin_tools.assert_not_called()
+        run.app.mount.assert_not_called()
+
+    def test_disables_a2a_and_mcp_when_deployment_profile_says_so(self) -> None:
+        run = self._run(enable_a2a=False, enable_mcp=False, mcp_available=True)
+        run.mock_build.assert_not_called()
+        run.app.include_router.assert_not_called()
+        run.mcp.register_plugin_tools.assert_not_called()
+        run.app.mount.assert_not_called()
+
+    def test_any_bind_without_a_token_keeps_mcp_unmounted(self) -> None:
+        # Loopback is routing, not authentication: without AI_MCP_TOKEN there
+        # is nothing for the guard to authenticate, so the surface stays
+        # closed even in the desktop profile.
+        run = self._run(enable_a2a=True, enable_mcp=True, mcp_available=True,
+                        bind_host="127.0.0.1")
+        run.app.mount.assert_not_called()
+        run.mcp.register_plugin_tools.assert_not_called()
+        run.logger.warning.assert_called_once()
+        self.assertIn("AI_MCP_TOKEN", run.logger.warning.call_args.args[0])
+
+    def test_exposed_bind_with_a_token_still_mounts_mcp(self) -> None:
+        run = self._run(enable_a2a=True, enable_mcp=True, mcp_available=True,
+                        bind_host="0.0.0.0", policy=TransportPolicy(mcp_token="mcp-secret"))
+        run.app.mount.assert_called_once()
+        run.logger.warning.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

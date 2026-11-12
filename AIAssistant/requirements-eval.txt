@@ -1,0 +1,11 @@
+# Hash-pinned dependencies for the deterministic RAG framework gate.
+# Keep these separate from the production and unit-test environments: RAGAS
+# and DeepEval bring evaluation-only SDKs (datasets/pyarrow and judge clients).
+ragas==0.4.3
+deepeval==4.3.3
+# RAGAS 0.4.3 imports chat_models.vertexai during package initialisation;
+# langchain-community 0.4 removed that module. Pin the last compatible line.
+langchain-community==0.3.31
+# Policy eval imports; keep these aligned with the production runtime lock.
+pydantic==2.14.1
+langgraph==1.2.16

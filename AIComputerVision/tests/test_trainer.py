@@ -1,0 +1,1471 @@
+"""Unit tests for the pipeline orchestrator.
+
+``trainer`` is the module that decides *what happens* — preflight, dry-run, the
+retrain prompt, per-model train/export/publish, manifest durability and the
+progress protocol. It is exercised end-to-end here against a fake backend, so
+the whole flow runs offline in milliseconds and without the ML stack.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import types
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest import mock
+
+import onnx
+from onnx import TensorProto, helper
+
+from cvtrain import gate
+from cvtrain import manifest as manifest_mod
+from cvtrain.backend import RunFacts, TrainedModel, TrainPlan, UltralyticsBackend
+from cvtrain.checks import module_available
+from cvtrain.config import (
+    MANIFEST_NAME,
+    MODEL_REGISTRY,
+    ModelSpec,
+    TrainConfig,
+    canonical_device,
+)
+from cvtrain.errors import (
+    ConcurrentRunError,
+    ExitCode,
+    ExportContractError,
+    ManifestIntegrityError,
+    QualityGateError,
+)
+from cvtrain.fsio import BACKUP_SUFFIX, LOCK_NAME, sha256_file
+from cvtrain.progress import PROGRESS_PREFIX
+from cvtrain.trainer import confirm_retrain, run
+
+VALID_DATASET = "train: images/train\nval: images/val\nnames:\n  0: part\n"
+
+
+def _write_fake_onnx(path: Path, spec: ModelSpec) -> None:
+    """Write a minimal graph that satisfies the Qt loader's tensor contract.
+
+    The orchestrator validates every export before publishing, so a fake
+    backend has to produce a *real* ONNX file — one where the smoke inference
+    can actually run — instead of arbitrary bytes.
+    """
+
+    def _constant(name: str, dims: list[int]) -> onnx.NodeProto:
+        count = 1
+        for extent in dims:
+            count *= extent
+        tensor = helper.make_tensor(f"{name}_value", TensorProto.FLOAT, dims, [0.0] * count)
+        return helper.make_node("Constant", [], [name], value=tensor)
+
+    outputs: list[tuple[str, list[int]]] = [("output0", [1, 4 + 1, 5])]
+    if spec.role == "segmentation":
+        outputs = [
+            ("output0", [1, 4 + 1 + 32, 5]),
+            ("output1", [1, 32, 8, 8]),
+        ]
+    graph = helper.make_graph(
+        [_constant(name, dims) for name, dims in outputs],
+        "fake-export",
+        [helper.make_tensor_value_info("images", TensorProto.FLOAT, [1, 3, 640, 640])],
+        [helper.make_tensor_value_info(name, TensorProto.FLOAT, dims) for name, dims in outputs],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 12)])
+    model.ir_version = 8
+    onnx.save(model, str(path))
+
+
+class FakeBackend:
+    """Deterministic stand-in for :class:`cvtrain.backend.UltralyticsBackend`."""
+
+    version = "9.9.9-fake"
+
+    def __init__(self, *, fail_on: str | None = None) -> None:
+        self.calls: list[str] = []
+        self.fail_on = fail_on
+        self.prepared: TrainConfig | None = None
+        self.epochs_reported: int | None = None
+        """The epoch budget the framework reports, when it can say one."""
+        self.epochs_completed_reported: int | None = None
+        """The completed count the framework reports, when it can say one."""
+        self.batch_reported: int | None = None
+        """The batch the framework resolved, when it differs from the request."""
+        self.imgsz_reported: int | None = None
+        """The image size the framework resolved, when it differs from the request."""
+        self.resumed_from_reported: str | None = None
+        """The checkpoint this run continued, when it was a resumed run."""
+        self.plan_source_weights: Path | None = None
+        """The file the plan claims training starts from (overrides the base)."""
+
+    def required_modules(self, cfg: TrainConfig) -> tuple[str, ...]:
+        # The fake drives preflight through the *backend-owned* dependency list
+        # without asking for any framework module: the offline suite must not
+        # need the ML stack to exercise this path.
+        return ()
+
+    def check_device(self, cfg: TrainConfig) -> tuple[bool, str]:
+        if cfg.device == "invalid_hardware":
+            return False, "device invalid_hardware not found"
+        return True, "device ok"
+
+    def check_importable(self, cfg: TrainConfig) -> tuple[bool, str]:
+        # The fake stack is always loadable; a broken one is modelled by
+        # ``fail_on`` below, so the preflight report can be exercised without
+        # the ML stack.
+        if self.fail_on == "import":
+            return False, "ultralytics is not importable (broken install)"
+        return True, "framework importable"
+
+    def resolve_device(self, cfg: TrainConfig) -> str:
+        # The real policy on a machine without a CUDA device: "auto" is
+        # resolved to CPU *before* training; an explicit request is its own
+        # answer, in the framework's spelling. The fake applies the same
+        # policy on purpose — a fake that hands the request back cannot expose
+        # the difference between the request the manifest records and the fact
+        # the framework reports.
+        if cfg.device_class == "auto":
+            return "cpu"
+        return canonical_device(cfg.device_class)
+
+    def prepare(self, cfg: TrainConfig) -> None:
+        self.prepared = cfg
+        self.calls.append("prepare")
+
+    def plan(
+        self,
+        spec: Any,
+        cfg: TrainConfig,
+        *,
+        dataset_content_sha256: str | None = None,
+    ) -> TrainPlan:
+        self.calls.append(f"plan:{spec.key}")
+        return TrainPlan(
+            source_weights=self.plan_source_weights or cfg.weights_path(spec),
+            dataset_content_sha256=dataset_content_sha256,
+        )
+
+    def train(self, spec: Any, cfg: TrainConfig, on_epoch: Any, plan: TrainPlan) -> TrainedModel[Any]:
+        self.calls.append(f"train:{spec.key}")
+        if self.fail_on == spec.key:
+            raise RuntimeError(f"backend exploded on {spec.key}")
+        for epoch in range(cfg.epochs):
+            on_epoch(epoch, cfg.epochs)
+        run_dir = cfg.runs_dir / spec.runs_subdir / "train-test"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "args.yaml").write_text(f"epochs: {cfg.epochs}\n", encoding="utf-8")
+        # ``--batch -1`` is a request the framework answers from the machine:
+        # the fake stands in for a machine that picked 8.
+        resolved_batch = self.batch_reported
+        if resolved_batch is None:
+            resolved_batch = 8 if cfg.batch == -1 else cfg.batch
+        resolved_imgsz = self.imgsz_reported if self.imgsz_reported is not None else cfg.imgsz
+        return TrainedModel(
+            metrics={"metrics/mAP50(B)": 0.42},
+            run_dir=run_dir,
+            handle=spec.key,
+            facts=RunFacts(
+                epochs=self.epochs_reported,
+                epochs_completed=self.epochs_completed_reported,
+                # The framework's effective argument set, which for a device
+                # is the concrete value it was told, not the request. The
+                # recorder must never mistake one for the other (P1).
+                imgsz=resolved_imgsz,
+                batch=resolved_batch,
+                device_resolved=cfg.device_resolved,
+                source_weights=str(plan.source_weights),
+                resumed_from=self.resumed_from_reported,
+            ),
+        )
+
+    def export_args(self, cfg: TrainConfig) -> dict[str, object]:
+        return {"format": "onnx", "imgsz": cfg.imgsz, "opset": cfg.opset}
+
+    def export(self, model: TrainedModel[Any], cfg: TrainConfig) -> Path:
+        self.calls.append(f"export:{model.handle}")
+        generated = cfg.runs_dir / f"{model.handle}.onnx"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        _write_fake_onnx(generated, MODEL_REGISTRY[str(model.handle)])
+        return generated
+
+
+def _config(root: Path, **overrides: Any) -> TrainConfig:
+    """Build a config whose dataset always passes preflight.
+
+    Preflight now fails fast when a referenced ``train``/``val`` directory is
+    missing, so the sandbox must contain those directories alongside the YAML.
+
+    The base checkpoints are materialised in a sandbox ``weights_dir`` too:
+    ``_already_current`` records and re-checks their digest, so proving what a
+    run trained from has to work without ever touching the real
+    ``AIComputerVision/*.pt``.
+    """
+
+    data_yaml = root / "data.yaml"
+    data_yaml.write_text(VALID_DATASET, encoding="utf-8")
+    for name in ("images/train", "images/val"):
+        (root / name).mkdir(parents=True, exist_ok=True)
+    weights_dir = root / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    for spec in MODEL_REGISTRY.values():
+        (weights_dir / spec.ckpt).write_bytes(f"base-weights:{spec.ckpt}".encode())
+    kwargs: dict[str, Any] = {
+        "models": ("det", "seg"),
+        "data_yaml": data_yaml,
+        "models_dir": root / "Models",
+        "runs_dir": root / "runs",
+        "weights_dir": weights_dir,
+        "epochs": 3,
+        "auto_confirm": True,
+    }
+    kwargs.update(overrides)
+    return TrainConfig(**kwargs)
+
+
+class _SandboxedTestCase(unittest.TestCase):
+    """Gives each test an isolated temp directory as ``self.root``."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+
+
+class HappyPathTests(_SandboxedTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.cfg = _config(self.root)
+        self.backend = FakeBackend()
+
+    def test_succeeds_and_publishes_every_selected_model(self) -> None:
+        code = run(self.cfg, backend=self.backend)
+        self.assertEqual(code, ExitCode.OK)
+        for key in self.cfg.models:
+            target = self.cfg.output_path(MODEL_REGISTRY[key])
+            self.assertTrue(target.exists(), f"{target} was not published")
+            # The published bytes are the validated graph, not a marker: the
+            # pipeline only reaches this point after the contract check.
+            self.assertGreater(target.stat().st_size, 0)
+            self.assertEqual(onnx.load(str(target)).graph.name, "fake-export")
+
+    def test_backend_is_prepared_exactly_once_before_any_training(self) -> None:
+        run(self.cfg, backend=self.backend)
+        prepared = self.backend.prepared
+        self.assertIsNotNone(prepared)
+        assert prepared is not None
+        # The orchestrator hands the backend the caller's configuration,
+        # *enriched* with the resolved device (the request alone says nothing
+        # about the machine); everything else is the caller's own values.
+        self.assertEqual(prepared.models, self.cfg.models)
+        self.assertEqual(prepared.data_yaml, self.cfg.data_yaml)
+        self.assertEqual(prepared.epochs, self.cfg.epochs)
+        # The fake machine has no CUDA device, so the request "auto" is
+        # resolved to "cpu" before the backend sees the configuration.
+        self.assertEqual(self.cfg.device_class, "auto")
+        self.assertEqual(prepared.device_resolved, "cpu")
+        self.assertEqual(
+            self.backend.calls,
+            ["prepare", "plan:det", "train:det", "export:det", "plan:seg", "train:seg", "export:seg"],
+        )
+
+    def test_every_epoch_keeps_the_advisory_lock_alive(self) -> None:
+        # The stale-lock rule ("abandoned after LOCK_STALE_SECONDS") is only
+        # safe if a run that is still working refreshes its lock. Without this
+        # heartbeat a single model training past the window would be mistaken
+        # for a crash and a second writer would be let into Models/.
+        with mock.patch("cvtrain.trainer.touch_lock") as touch:
+            self.assertEqual(run(self.cfg, backend=self.backend), ExitCode.OK)
+        self.assertEqual(touch.call_count, self.cfg.epochs * len(self.cfg.models))
+
+    def test_manifest_records_verifiable_provenance(self) -> None:
+        run(self.cfg, backend=self.backend)
+        manifest = manifest_mod.load_manifest(self.cfg.models_dir)
+
+        self.assertEqual(manifest["ultralytics"], "9.9.9-fake")
+        self.assertEqual(manifest["last_run"]["models"], ["det", "seg"])
+        self.assertEqual(manifest["last_run"]["epochs"], 3)
+        self.assertEqual(manifest["last_run"]["batch"], 16)
+        self.assertEqual(manifest["last_run"]["workers"], 0)
+        self.assertEqual(manifest["last_run"]["device"], "auto")
+        self.assertEqual(
+            manifest["last_run"]["python"],
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        )
+        self.assertEqual(manifest["last_run"]["min_metrics"], [])
+        # The header tracks the last provenance write, never older than entries.
+        self.assertIn("updated_at", manifest)
+        for key in self.cfg.models:
+            entry = manifest["entries"][MODEL_REGISTRY[key].output]
+            self.assertLessEqual(entry["trained_at"] or "", manifest["updated_at"] or "")
+
+        for key in self.cfg.models:
+            spec = MODEL_REGISTRY[key]
+            entry = manifest["entries"][spec.output]
+            self.assertEqual(entry["role"], spec.role)
+            self.assertEqual(entry["source_weights"], spec.ckpt)
+            self.assertEqual(entry["metrics"], {"metrics/mAP50(B)": 0.42})
+            self.assertEqual(entry["sha256"], sha256_file(self.cfg.output_path(spec)))
+            # Everything `_already_current` compares has to be on disk, or a
+            # re-run could not prove the published file is still what it would
+            # build.
+            self.assertEqual(entry["batch"], 16)
+            self.assertEqual(entry["workers"], 0)
+            self.assertEqual(entry["backend_version"], "9.9.9-fake")
+            self.assertEqual(entry["source_weights_sha256"], sha256_file(self.cfg.weights_path(spec)))
+            self.assertEqual(entry["dataset_sha256"], sha256_file(self.cfg.data_yaml))
+            self.assertEqual(entry["device"], "auto")
+
+        self.assertEqual(manifest_mod.verify_manifest(self.cfg.models_dir, manifest), [])
+
+    def test_verify_manifest_detects_a_swapped_artifact(self) -> None:
+        run(self.cfg, backend=self.backend)
+        spec = MODEL_REGISTRY["det"]
+        self.cfg.output_path(spec).write_bytes(b"tampered")
+        manifest = manifest_mod.load_manifest(self.cfg.models_dir)
+        problems = manifest_mod.verify_manifest(self.cfg.models_dir, manifest)
+        self.assertTrue(any(spec.output in problem and "mismatch" in problem for problem in problems))
+
+    def test_progress_protocol_reaches_100_and_closes(self) -> None:
+        with self.assertLogs("cvtrain.progress", level="INFO") as captured:
+            run(self.cfg, backend=self.backend)
+        lines = [line for line in captured.output if PROGRESS_PREFIX in line]
+        self.assertTrue(lines, "no progress markers were emitted")
+        self.assertIn("stage=preflight", lines[0])
+        joined = "\n".join(lines)
+        self.assertIn("stage=train", joined)
+        self.assertIn("stage=export", joined)
+        self.assertIn("stage=manifest", joined)
+        self.assertEqual(lines[-1], f"INFO:cvtrain.progress:{PROGRESS_PREFIX} pct=100 stage=done")
+
+
+class StageShortcutTests(_SandboxedTestCase):
+    def test_check_only_never_touches_the_backend(self) -> None:
+        cfg = _config(self.root, check_only=True)
+        backend = FakeBackend()
+        self.assertEqual(run(cfg, backend=backend), ExitCode.OK)
+        self.assertEqual(backend.calls, [])
+
+    def test_dry_run_prints_the_plan_and_never_trains(self) -> None:
+        cfg = _config(self.root, dry_run=True)
+        backend = FakeBackend()
+        with self.assertLogs("cvtrain.trainer", level="INFO") as captured:
+            self.assertEqual(run(cfg, backend=backend), ExitCode.OK)
+        text = "\n".join(captured.output)
+        self.assertIn("Training plan:", text)
+        self.assertIn("Dry run complete", text)
+        self.assertEqual(backend.calls, [])
+        self.assertFalse(cfg.models_dir.exists())
+
+    def test_declining_the_retrain_prompt_aborts_cleanly(self) -> None:
+        cfg = _config(self.root, auto_confirm=False)
+        existing = cfg.output_path(MODEL_REGISTRY["det"])
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_bytes(b"previous")
+
+        interactive = mock.Mock()
+        interactive.isatty.return_value = True
+        backend = FakeBackend()
+        with mock.patch.object(sys, "stdin", interactive), mock.patch("builtins.input", return_value="N"):
+            self.assertEqual(run(cfg, backend=backend), ExitCode.OK)
+
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(existing.read_bytes(), b"previous")
+
+
+class FailurePathTests(_SandboxedTestCase):
+    def test_preflight_failure_returns_2_and_closes_the_protocol(self) -> None:
+        cfg = _config(self.root, data_yaml=self.root / "missing.yaml")
+        backend = FakeBackend()
+        with self.assertLogs("cvtrain.progress", level="INFO") as progress:
+            with self.assertLogs("cvtrain.trainer", level="ERROR") as trainer_log:
+                code = run(cfg, backend=backend)
+        self.assertEqual(code, ExitCode.PREFLIGHT)
+        self.assertEqual(backend.calls, [])
+        self.assertIn("stage=error", progress.output[-1])
+        # The operator gets the actionable reason, not just a code.
+        self.assertIn("Preflight failure", trainer_log.output[0])
+        self.assertIn("missing.yaml", trainer_log.output[0])
+
+    def test_backend_crash_propagates_and_closes_the_protocol(self) -> None:
+        cfg = _config(self.root)
+        with self.assertLogs("cvtrain.progress", level="INFO") as captured:
+            with self.assertRaisesRegex(RuntimeError, "exploded on seg"):
+                run(cfg, backend=FakeBackend(fail_on="seg"))
+        self.assertIn("stage=error", captured.output[-1])
+
+    def test_manifest_of_earlier_models_survives_a_later_crash(self) -> None:
+        # Provenance is flushed per model, so a crash on model 2 still leaves a
+        # verified manifest for model 1 instead of losing both.
+        cfg = _config(self.root)
+        with self.assertRaises(RuntimeError):
+            run(cfg, backend=FakeBackend(fail_on="seg"))
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        self.assertIn(MODEL_REGISTRY["det"].output, manifest["entries"])
+        self.assertNotIn(MODEL_REGISTRY["seg"].output, manifest["entries"])
+        self.assertEqual(manifest_mod.verify_manifest(cfg.models_dir, manifest), [])
+
+    def test_tensorboard_without_its_package_fails_in_preflight(self) -> None:
+        # The claim in README/ADR 0006 is "exit 2, before any training": here
+        # it is proved through the *real* adapter, so the wiring
+        # cfg -> required_modules(cfg) -> preflight is what is under test. Only
+        # the tensorboard probe is forced to report missing, so the assertion
+        # on the dependency line cannot be satisfied by some other check.
+        cfg = _config(self.root, tensorboard=True)
+        real = module_available
+        # The real adapter is used on purpose — it owns the conditional
+        # dependency list — but the *framework* is stubbed: preflight proves
+        # the stack is importable, and importing the real one would make this
+        # test depend on the machine having it installed (and cost seconds).
+        stub = types.ModuleType("ultralytics")
+        setattr(stub, "__path__", [])
+        setattr(stub, "__version__", "8.4.41-stub")
+        utils = types.ModuleType("ultralytics.utils")
+        setattr(utils, "SETTINGS", {})
+        with (
+            mock.patch.dict(sys.modules, {"ultralytics": stub, "ultralytics.utils": utils}),
+            mock.patch(
+                "cvtrain.preflight.module_available",
+                side_effect=lambda name: False if name == "tensorboard" else real(name),
+            ),
+            self.assertLogs("cvtrain.trainer", level="INFO") as captured,
+        ):
+            code = run(cfg, backend=UltralyticsBackend())
+
+        self.assertEqual(code, ExitCode.PREFLIGHT)
+        # The *failure* line, not any line: every check is also logged at INFO,
+        # so a bare "dependency.tensorboard" match would be satisfied by
+        # "[OK] dependency.tensorboard: installed" — i.e. by the wiring having
+        # been removed entirely on an image that already ships the package.
+        failures = [line for line in captured.output if "Preflight failure" in line and "dependency.tensorboard" in line]
+        self.assertEqual(len(failures), 1)
+
+    def test_runtime_device_failure_fails_in_preflight(self) -> None:
+        cfg = _config(self.root, device="invalid_hardware")
+        with self.assertLogs("cvtrain.trainer", level="INFO") as captured:
+            code = run(cfg, backend=FakeBackend())
+        self.assertEqual(code, ExitCode.PREFLIGHT)
+        failures = [line for line in captured.output if "runtime.device" in line]
+        self.assertEqual(len(failures), 2)  # report summary + explicit failure
+
+    def test_a_stack_that_cannot_be_imported_fails_in_preflight(self) -> None:
+        # "Installed" is not "usable": a distribution whose own dependency is
+        # missing is installed and broken. The preflight report must say so
+        # before the run starts — the report is where an operator reads what
+        # is wrong with their environment.
+        cfg = _config(self.root)
+        with self.assertLogs("cvtrain.trainer", level="INFO") as captured:
+            code = run(cfg, backend=FakeBackend(fail_on="import"))
+        self.assertEqual(code, ExitCode.PREFLIGHT)
+        failures = [line for line in captured.output if "runtime.import" in line]
+        self.assertEqual(len(failures), 2)  # report summary + explicit failure
+
+
+class ManifestVerificationTests(_SandboxedTestCase):
+    def test_verification_problems_fail_the_run(self) -> None:
+        cfg = _config(self.root)
+        with mock.patch(
+            "cvtrain.trainer.manifest_mod.verify_manifest",
+            return_value=["ghost.onnx: missing on disk"],
+        ):
+            # Raised, not returned: the orchestrator closes the protocol with
+            # the terminal error marker, and the composition root turns this
+            # into the same exit code (2) ``--verify-manifest`` reports for the
+            # identical condition. An artifact we cannot vouch for must never
+            # be presented to the Qt dock as a clean run.
+            with self.assertRaises(ManifestIntegrityError) as ctx:
+                run(cfg, backend=FakeBackend())
+
+        self.assertIn("ghost.onnx: missing on disk", str(ctx.exception))
+        self.assertEqual(ctx.exception.exit_code, ExitCode.PREFLIGHT)
+
+    def test_a_stray_onnx_does_not_fail_a_clean_run(self) -> None:
+        # End-of-run verification is scoped to the models just published, so a
+        # file already sitting in Models/ is not this run's problem. The global
+        # ``--verify-manifest`` command still reports it.
+        cfg = _config(self.root)
+        cfg.models_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.models_dir / "stray.onnx").write_bytes(b"not-ours")
+
+        self.assertEqual(run(cfg, backend=FakeBackend()), ExitCode.OK)
+
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        problems = manifest_mod.verify_manifest(cfg.models_dir, manifest)
+        self.assertIn("stray.onnx: on disk but not recorded in the manifest", problems)
+
+
+class ProvenanceRecordingTests(_SandboxedTestCase):
+    """What a run writes down about the inputs it used."""
+
+    def test_a_run_without_a_checkpoint_records_no_digest(self) -> None:
+        # Provenance is never guessed: when the checkpoint is not on disk the
+        # field is left out, which is what makes the next run retrain.
+        cfg = _config(self.root, models=("det",))
+        cfg.weights_path(MODEL_REGISTRY["det"]).unlink()
+
+        run(cfg, backend=FakeBackend())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertNotIn("source_weights_sha256", entry)
+        self.assertEqual(entry["source_weights"], MODEL_REGISTRY["det"].ckpt)
+
+    def test_auto_downloaded_weights_are_recorded_so_identical_rerun_skips(self) -> None:
+        # Real backends auto-download missing base weights into ``plan.source_weights``
+        # during ``backend.train``. Capture their digest once present so an
+        # immediate ``--skip-unchanged`` rerun skips instead of retraining.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        weights = cfg.weights_path(MODEL_REGISTRY["det"])
+        weights.unlink()
+
+        class _DownloadsBaseWeights(FakeBackend):
+            def train(
+                self, spec: Any, config: TrainConfig, on_epoch: Any, plan: TrainPlan
+            ) -> TrainedModel[Any]:
+                plan.source_weights.write_bytes(b"auto-downloaded-yolo11n")
+                return super().train(spec, config, on_epoch, plan)
+
+        run(cfg, backend=_DownloadsBaseWeights())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["source_weights_sha256"], sha256_file(weights))
+
+        rerun_backend = FakeBackend()
+        run(cfg, backend=rerun_backend)
+        self.assertNotIn("train:det", rerun_backend.calls)
+
+    def test_pre_train_weights_digest_is_not_overwritten_by_mid_run_edit(self) -> None:
+        # If the checkpoint already existed before ``backend.train``, keep the
+        # pre-train snapshot instead of re-hashing a file touched mid-run.
+        cfg = _config(self.root, models=("det",))
+        weights = cfg.weights_path(MODEL_REGISTRY["det"])
+        expected = sha256_file(weights)
+
+        class _EditsExistingWeights(FakeBackend):
+            def train(
+                self, spec: Any, config: TrainConfig, on_epoch: Any, plan: TrainPlan
+            ) -> TrainedModel[Any]:
+                plan.source_weights.write_bytes(b"edited-mid-run")
+                return super().train(spec, config, on_epoch, plan)
+
+        run(cfg, backend=_EditsExistingWeights())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["source_weights_sha256"], expected)
+
+    def test_the_recorded_digest_matches_the_checkpoint_actually_used(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        cfg.weights_path(MODEL_REGISTRY["det"]).write_bytes(b"a-different-checkpoint")
+
+        run(cfg, backend=FakeBackend())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["source_weights_sha256"], sha256_file(cfg.weights_path(MODEL_REGISTRY["det"])))
+
+    def test_a_dataset_yanked_mid_run_still_records_the_pre_train_snapshot(self) -> None:
+        # The snapshot is taken before ``backend.train``: deleting the YAML
+        # halfway through must not erase what the model actually started from.
+        cfg = _config(self.root, models=("det",))
+        expected_definition = sha256_file(cfg.data_yaml)
+        expected_content = gate.dataset_content_digest(cfg)
+
+        class _YanksTheDataset(FakeBackend):
+            def train(
+                self, spec: Any, config: TrainConfig, on_epoch: Any, plan: TrainPlan
+            ) -> TrainedModel[Any]:
+                config.data_yaml.unlink()
+                return super().train(spec, config, on_epoch, plan)
+
+        run(cfg, backend=_YanksTheDataset())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["dataset_sha256"], expected_definition)
+        self.assertEqual(entry["dataset_content_sha256"], expected_content)
+
+    def test_a_snapshot_that_cannot_observe_the_dataset_records_no_digest(self) -> None:
+        # Unreadable/absent data can still reach here when the caller bypassed
+        # preflight; recording nothing is the honest outcome, and the next
+        # ``--skip-unchanged`` treats the absent fields as unproven.
+        cfg = _config(self.root, models=("det",))
+        with mock.patch(
+            "cvtrain.trainer.gate.snapshot_dataset",
+            return_value=gate.DatasetSnapshot(definition_sha256=None, content_sha256=None),
+        ):
+            run(cfg, backend=FakeBackend())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertNotIn("dataset_sha256", entry)
+        self.assertNotIn("dataset_content_sha256", entry)
+
+    def test_provenance_is_snapshotted_before_training_not_after(self) -> None:
+        # A file added while the backend is training belongs to the *next*
+        # invocation. Recording it here would claim the artifact was trained on
+        # data it never saw.
+        cfg = _config(self.root, models=("det",))
+        before = gate.dataset_content_digest(cfg)
+
+        class _MutatesTheDataset(FakeBackend):
+            def train(
+                self, spec: Any, config: TrainConfig, on_epoch: Any, plan: TrainPlan
+            ) -> TrainedModel[Any]:
+                (config.data_yaml.parent / "images" / "train" / "mid-run.jpg").write_bytes(b"late")
+                return super().train(spec, config, on_epoch, plan)
+
+        run(cfg, backend=_MutatesTheDataset())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["dataset_content_sha256"], before)
+        self.assertNotEqual(gate.dataset_content_digest(cfg), before)
+
+    def test_records_git_commit_and_dataset_content_sha256(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        expected_content = gate.dataset_content_digest(cfg)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        self.assertIn("git_commit", manifest["last_run"])
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry.get("dataset_content_sha256"), expected_content)
+        self.assertEqual(len(entry.get("dataset_content_sha256") or ""), 64)
+
+
+class _ResolvingBackend(FakeBackend):
+    """A backend that resolves the device request to a concrete device."""
+
+    def __init__(self, resolved: str) -> None:
+        super().__init__()
+        self.resolved = resolved
+
+    def resolve_device(self, cfg: TrainConfig) -> str:
+        return self.resolved
+
+
+class DeviceResolutionTests(_SandboxedTestCase):
+    """``auto`` is a request; the resolution is the fact (ADR 0009)."""
+
+    def test_the_manifest_records_the_resolved_device_next_to_the_request(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        run(cfg, backend=_ResolvingBackend("cuda:0"))
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["device"], "auto")
+        self.assertEqual(entry["device_resolved"], "cuda:0")
+
+    def test_the_same_resolution_is_not_retrained(self) -> None:
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=_ResolvingBackend("cuda:0"))
+        backend = _ResolvingBackend("cuda:0")
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_an_explicit_gpu_index_rerun_is_skipped(self) -> None:
+        # Regression: the framework reports ``cuda:0`` for ``--device 0``, so a
+        # request-spelled fact made an identical rerun retrain forever. The
+        # request keeps the operator's spelling; the fact is canonical.
+        cfg = _config(self.root, models=("det",), device="0", skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["device"], "0")
+        self.assertEqual(entry["device_resolved"], "cuda:0")
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_an_explicit_multi_gpu_rerun_is_skipped(self) -> None:
+        cfg = _config(self.root, models=("det",), device="0,1", skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["device"], "0,1")
+        self.assertEqual(entry["device_resolved"], "cuda:0,cuda:1")
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_an_older_entry_with_the_operator_spelling_is_still_current(self) -> None:
+        # An entry written before ADR 0016 recorded ``0`` where the framework
+        # reports ``cuda:0``. Both describe one device, so the comparison is
+        # canonical — syntax is not a different experiment.
+        cfg = _config(self.root, models=("det",), device="0", skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_REGISTRY["det"].output]["device_resolved"] = "0"
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_a_run_that_would_resolve_to_another_device_is_trained(self) -> None:
+        # The request was the same both times ("auto"); the *resolution*
+        # differs, so the published artifact is not what this run would build.
+        # Without the comparison, a CPU run would pass for a GPU run.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=_ResolvingBackend("cuda:0"))
+        backend = _ResolvingBackend("cpu")
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_without_a_resolved_device_is_trained(self) -> None:
+        # A document written before the resolution existed says nothing about
+        # the machine the artifact came from: unprovable, so retrained.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=_ResolvingBackend("cuda:0"))
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        del entry["device_resolved"]
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        backend = _ResolvingBackend("cuda:0")
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_unresolved_configuration_never_claims_a_model_is_current(self) -> None:
+        # Both sides of the device comparison have to be known. A configuration
+        # that never resolved the device cannot know what this run would train
+        # on, so it cannot claim the published artifact is the same one — and
+        # "cannot prove" is retrained, like every other unknown in the rule.
+        # The orchestrator always resolves first (``trainer._execute``), so this
+        # is the guard for the *next* caller.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=_ResolvingBackend("cuda:0"))
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        del entry["device_resolved"]
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        unresolved = _config(self.root, models=("det",), skip_unchanged=True)
+        self.assertIsNone(unresolved.device_resolved)
+        self.assertFalse(
+            gate.already_current(
+                MODEL_REGISTRY["det"],
+                unresolved,
+                manifest,
+                FakeBackend.version,
+                export_args=FakeBackend().export_args(unresolved),
+            )
+        )
+
+
+class EffectiveEpochProvenanceTests(_SandboxedTestCase):
+    """The manifest records the experiment the framework ran, not the request."""
+
+    def test_the_reported_budget_wins_over_the_request(self) -> None:
+        # A resumed run restores its hyper-parameters from the checkpoint and
+        # ignores ``--epochs``: the framework owns the epoch count of a run it
+        # continues. Recording the request would describe a run that never
+        # happened — and would let a later ``--skip-unchanged`` verdict trust
+        # a provenance field that is not true.
+        cfg = _config(self.root, models=("det",), epochs=5)
+        backend = FakeBackend()
+        backend.epochs_reported = 10
+        run(cfg, backend=backend)
+
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["epochs"], 10)
+
+    def test_the_completed_count_is_recorded_separately_from_the_budget(self) -> None:
+        # Early stopping can finish a 100-epoch budget after 40 epochs. One
+        # field cannot describe both facts, so the entry carries both.
+        cfg = _config(self.root, models=("det",), epochs=5)
+        backend = FakeBackend()
+        backend.epochs_reported = 100
+        backend.epochs_completed_reported = 40
+        run(cfg, backend=backend)
+
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["epochs"], 100)
+        self.assertEqual(entry["epochs_completed"], 40)
+
+    def test_the_request_is_used_when_the_framework_cannot_report_one(self) -> None:
+        cfg = _config(self.root, models=("det",), epochs=7)
+        run(cfg, backend=FakeBackend())
+
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["epochs"], 7)
+        self.assertNotIn("epochs_completed", entry)
+
+    def test_the_recorded_image_size_is_the_request_not_the_rounding_fact(self) -> None:
+        # Ultralytics rounds ``--imgsz`` to its stride. The manifest compares
+        # the request, because replaying it reproduces the same rounding; the
+        # rounded value is kept next to it so an auditor can see what trained.
+        cfg = _config(self.root, models=("det",), imgsz=640)
+        backend = FakeBackend()
+        backend.imgsz_reported = 672
+        run(cfg, backend=backend)
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["imgsz"], 640)
+        self.assertEqual(entry["imgsz_resolved"], 672)
+
+    def test_a_resumed_artifact_is_never_skipped(self) -> None:
+        # Even when every recorded value agrees, an artifact produced by a
+        # resumed run did not start from the base checkpoint and did not follow
+        # this invocation's argument set. A fresh run would not reproduce it.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        checkpoint = str(self.root / "runs" / "detect" / "train-old" / "weights" / "last.pt")
+        resumed = FakeBackend()
+        resumed.resumed_from_reported = checkpoint
+        run(cfg, backend=resumed)
+
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["resume_from"], checkpoint)
+        self.assertFalse(
+            gate.already_current(
+                MODEL_REGISTRY["det"],
+                cfg,
+                manifest,
+                FakeBackend.version,
+                export_args=FakeBackend().export_args(cfg),
+            )
+        )
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_fresh_artifact_does_not_record_a_resume_source(self) -> None:
+        # The field means "this came from another run's checkpoint"; a fresh
+        # run must not claim one, or every artifact would stop being skippable.
+        cfg = _config(self.root, models=("det",))
+        run(cfg, backend=FakeBackend())
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertNotIn("resume_from", entry)
+
+    def test_the_recorded_digest_is_the_file_training_started_from(self) -> None:
+        # A resumed run starts from the interrupted run's last.pt, not from the
+        # base checkpoint the spec names. Hashing the spec would record a file
+        # that never entered the model — and the audit trail would be false.
+        cfg = _config(self.root, models=("det",))
+        base = cfg.weights_path(MODEL_REGISTRY["det"])
+        base.write_bytes(b"base-weights")
+        resumed = self.root / "runs" / "detect" / "train-old" / "weights" / "last.pt"
+        resumed.parent.mkdir(parents=True)
+        resumed.write_bytes(b"interrupted-run-weights")
+
+        backend = FakeBackend()
+        backend.plan_source_weights = resumed
+        run(cfg, backend=backend)
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["source_weights_sha256"], sha256_file(resumed))
+        self.assertNotEqual(entry["source_weights_sha256"], sha256_file(base))
+
+
+class ConfirmRetrainTests(_SandboxedTestCase):
+    def test_auto_confirm_short_circuits(self) -> None:
+        cfg = _config(self.root, auto_confirm=True)
+        with mock.patch("builtins.input", side_effect=AssertionError("prompted")):
+            self.assertTrue(confirm_retrain(cfg))
+
+    def test_no_existing_models_skips_the_prompt(self) -> None:
+        cfg = _config(self.root, auto_confirm=False)
+        with mock.patch("builtins.input", side_effect=AssertionError("prompted")):
+            self.assertTrue(confirm_retrain(cfg))
+
+    def test_non_tty_proceeds_without_blocking(self) -> None:
+        cfg = _config(self.root, auto_confirm=False)
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"old")
+
+        piped = mock.Mock()
+        piped.isatty.return_value = False
+        with mock.patch.object(sys, "stdin", piped), mock.patch(
+            "builtins.input", side_effect=AssertionError("prompted")
+        ):
+            self.assertTrue(confirm_retrain(cfg))
+
+    def test_closed_stdin_cancels_instead_of_crashing(self) -> None:
+        # A TTY whose input is closed raises EOFError: cancel cleanly (exit 0)
+        # instead of a traceback with exit 1.
+        cfg = _config(self.root, auto_confirm=False)
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"old")
+
+        interactive = mock.Mock()
+        interactive.isatty.return_value = True
+        with mock.patch.object(sys, "stdin", interactive), mock.patch(
+            "builtins.input", side_effect=EOFError
+        ):
+            self.assertFalse(confirm_retrain(cfg))
+
+
+class SkipUnchangedTests(_SandboxedTestCase):
+    """``--skip-unchanged`` turns an identical re-run into a no-op."""
+
+    def _run(self, **overrides: Any) -> tuple[int, FakeBackend]:
+        """One pipeline run; returns its exit code and the backend that drove it."""
+
+        cfg = _config(self.root, **overrides)
+        backend = FakeBackend()
+        return run(cfg, backend=backend), backend
+
+    def test_retraining_stays_the_default(self) -> None:
+        # Opt-in: without the flag a re-run must keep overwriting, which is what
+        # the Qt dialog and every existing caller rely on.
+        self._run(models=("det",))
+        _, backend = self._run(models=("det",))
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_identical_invocation_trains_nothing(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        # ``prepare`` still applies run-wide settings; no model is trained or
+        # exported, so the published artifact is never touched again.
+        self.assertEqual(backend.calls, ["prepare"])
+
+    def test_the_default_device_is_skipped_on_an_identical_rerun(self) -> None:
+        # Regression for the P1 seam: Ultralytics rewrites ``args.device``
+        # during training (to "cpu", or to "0" on a GPU), so recording the
+        # framework's argument as the request made every default-device re-run
+        # look like a different experiment and retrain forever. The request is
+        # "auto"; the answer is "cpu" on this fake machine.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["device"], "auto")
+        self.assertEqual(entry["device_resolved"], "cpu")
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_a_skipped_model_still_advances_the_progress_bar(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        with self.assertLogs("cvtrain.progress", level="INFO") as captured:
+            self._run(models=("det",), skip_unchanged=True)
+        lines = [line for line in captured.output if PROGRESS_PREFIX in line]
+        self.assertTrue(any("stage=skip" in line for line in lines), lines)
+        self.assertTrue(lines[-1].endswith("pct=100 stage=done"), lines[-1])
+
+    def test_a_missing_artifact_is_trained(self) -> None:
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_tampered_artifact_is_trained(self) -> None:
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        cfg.output_path(MODEL_REGISTRY["det"]).write_bytes(b"tampered")
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_artifact_without_a_manifest_entry_is_trained(self) -> None:
+        # A file dropped into Models/ by hand carries provenance nobody
+        # recorded; "it exists" is not evidence that it is the requested model.
+        cfg = _config(self.root, models=("det",))
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"hand-made")
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_different_hyper_parameters_are_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True, epochs=4)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_without_provenance_is_trained(self) -> None:
+        # ``--write-manifest`` records identity + digest but no hyper-parameters,
+        # so nothing proves the file is what this invocation is asking for.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        stored = manifest["entries"][MODEL_REGISTRY["det"].output]
+        manifest["entries"][MODEL_REGISTRY["det"].output] = manifest_mod.ManifestEntry(
+            role=stored["role"],
+            sha256=stored["sha256"],
+            size_bytes=stored["size_bytes"],
+        )
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_changed_batch_is_trained(self) -> None:
+        # "The same invocation" includes the batch size: two runs that sliced
+        # the data differently are not the same artifact, even though the file
+        # name they would publish is.
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True, batch=8)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_automatic_batch_is_never_skipped(self) -> None:
+        # ``--batch -1`` is a request the framework answers from the machine's
+        # memory during training. The next run's answer is not knowable before
+        # it trains, and two runs that both recorded -1 are not proof they used
+        # the same batch — so "cannot prove" is retrained (ADR 0015).
+        self._run(models=("det",), skip_unchanged=True, batch=-1)
+        _, backend = self._run(models=("det",), skip_unchanged=True, batch=-1)
+        self.assertIn("train:det", backend.calls)
+
+    def test_the_recorded_batch_is_the_request_not_the_resolution(self) -> None:
+        # The framework may size or clamp the batch; the manifest compares
+        # what the next invocation asks for. Recording the resolution under
+        # ``batch`` would make an explicit ``--batch 16`` look different from
+        # the run that used 8 because the machine could not hold 16.
+        cfg = _config(self.root, models=("det",), batch=16)
+        backend = FakeBackend()
+        backend.batch_reported = 8
+        run(cfg, backend=backend)
+
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertEqual(entry["batch"], 16)
+        self.assertEqual(entry["batch_resolved"], 8)
+
+    def test_a_changed_worker_count_is_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True, workers=4)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_with_the_legacy_exporter_version_is_trained(self) -> None:
+        # The models shipped in ``Models/`` predate the composite exporter
+        # identity: their manifest entry carries the bare ``ultralytics``
+        # version, which no run of this build can reproduce. The skip rule is
+        # fail-closed, so such an entry is *unprovable* and the model is
+        # retrained — never trusted because a legacy string happens to look
+        # close enough (ADR 0007, and the debt table in Docs/SCORECARD.md).
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        stored = manifest["entries"][MODEL_REGISTRY["det"].output]
+        legacy = manifest_mod.ManifestEntry(**{**stored, "backend_version": "8.4.41"})
+        manifest["entries"][MODEL_REGISTRY["det"].output] = legacy
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_changed_export_request_is_trained(self) -> None:
+        # The same weights exported with another opset are another artifact.
+        # The training parameters are identical, so only the export request
+        # can tell the two apart.
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        entry = manifest["entries"][MODEL_REGISTRY["det"].output]
+        entry["export_args"] = {**entry["export_args"], "opset": cfg.opset + 1}
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_without_an_export_request_is_trained(self) -> None:
+        # Written before the export options were recorded: nothing proves the
+        # published graph was produced by the request this run would make, so
+        # the skip is retracted.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_REGISTRY["det"].output].pop("export_args", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_changed_device_is_trained(self) -> None:
+        # Same file name, same hyper-parameters — but a CPU run and a GPU run
+        # are different artifacts, so "what this run would build" is no longer
+        # what is published. ``None`` and ``auto`` are the same device.
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True, device="cpu")
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_unspecified_device_matches_an_explicit_auto(self) -> None:
+        # "" / None / "auto" are the same experiment: "let the framework choose".
+        self._run(models=("det",), skip_unchanged=True)
+        _, backend = self._run(models=("det",), skip_unchanged=True, device="")
+        self.assertNotIn("train:det", backend.calls)
+        _, backend = self._run(models=("det",), skip_unchanged=True, device="auto")
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_equivalent_device_spellings_are_not_retrained(self) -> None:
+        # Provenance stores the canonical device, so "0, 1" and "0,1" describe
+        # the same experiment and the second run is skipped.
+        self._run(models=("det",), skip_unchanged=True, device="0,1")
+        _, backend = self._run(models=("det",), skip_unchanged=True, device="0, 1")
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_the_same_dataset_behind_another_path_is_not_retrained(self) -> None:
+        # A path is not a fact about the data — it is a fact about one machine.
+        # The same dataset, copied to another directory, is the same
+        # experiment: the digests prove it. A verdict that depended on where
+        # the data happens to live would not survive a checkout on another
+        # machine, and would retrain hours of work for a difference that
+        # cannot change the artifact.
+        self._run(models=("det",), skip_unchanged=True)
+        moved = self.root / "moved"
+        moved.mkdir(parents=True, exist_ok=True)
+        (moved / "data.yaml").write_text(VALID_DATASET, encoding="utf-8")
+        for name in ("images/train", "images/val"):
+            (moved / name).mkdir(parents=True, exist_ok=True)
+
+        cfg = _config(self.root, models=("det",), skip_unchanged=True, data_yaml=moved / "data.yaml")
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertNotIn("train:det", backend.calls)
+
+    def test_a_changed_dataset_definition_is_trained(self) -> None:
+        # The path is unchanged but the content is not: an edited data.yaml is
+        # a different experiment (renamed classes, moved splits) hiding behind
+        # the same file name. Only the definition is digested — see
+        # gate.dataset_digest for why the images themselves are not.
+        # The config is built before the edit, because building it is what
+        # (re)writes the sandbox YAML.
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        cfg.data_yaml.write_text(VALID_DATASET.replace("part", "widget"), encoding="utf-8")
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_without_a_recorded_dataset_digest_is_trained(self) -> None:
+        # Written before the digest was recorded: nothing proves the dataset
+        # is the one that produced the artifact, so the skip is retracted.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_REGISTRY["det"].output].pop("dataset_sha256", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_changed_dataset_content_is_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        new_img = cfg.data_yaml.parent / "images" / "train" / "new.jpg"
+        new_img.write_bytes(b"new-image-data")
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_missing_dataset_when_content_digest_expected_is_trained(self) -> None:
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        cfg.data_yaml = cfg.data_yaml.parent / "ghost.yaml"
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        self.assertFalse(
+            gate.already_current(
+                MODEL_REGISTRY["det"],
+                cfg,
+                manifest,
+                FakeBackend.version,
+                export_args=FakeBackend().export_args(cfg),
+            )
+        )
+
+    def test_an_entry_without_a_content_digest_is_trained(self) -> None:
+        # An entry written before ``dataset_content_sha256`` existed, or by an
+        # older inventory algorithm, cannot prove the images are the ones that
+        # produced the artifact. The definition digest alone is not enough:
+        # "we did not record it" must fail closed.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_REGISTRY["det"].output].pop("dataset_content_sha256", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_a_backend_upgrade_is_trained(self) -> None:
+        # A newer ultralytics exports differently, so the recorded artifact no
+        # longer answers to "what this run would build".
+        self._run(models=("det",), skip_unchanged=True)
+        upgraded = FakeBackend()
+        upgraded.version = "9.9.10-fake"
+        run(_config(self.root, models=("det",), skip_unchanged=True), backend=upgraded)
+        self.assertIn("train:det", upgraded.calls)
+
+    def test_changed_base_weights_are_trained(self) -> None:
+        # ``yolo11n.pt`` is a file name, not provenance: the checkpoint on disk
+        # can be replaced by a fine-tuned one and produce a different model.
+        # The config is built *before* the swap, because building it is what
+        # materialises the sandbox checkpoints.
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        cfg.weights_path(MODEL_REGISTRY["det"]).write_bytes(b"someone-fine-tuned-this")
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_missing_base_weights_are_trained(self) -> None:
+        # No checkpoint on disk means nothing proves what the artifact started
+        # from; "cannot verify" must never be read as "matches".
+        self._run(models=("det",), skip_unchanged=True)
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        cfg.weights_path(MODEL_REGISTRY["det"]).unlink()
+
+        backend = FakeBackend()
+        run(cfg, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+    def test_an_entry_without_a_recorded_checkpoint_digest_is_trained(self) -> None:
+        # `_already_current` has nothing to compare the checkpoint against, so
+        # the absent digest is read as "unproven" and the model is retrained.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][MODEL_REGISTRY["det"].output].pop("source_weights_sha256", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        _, backend = self._run(models=("det",), skip_unchanged=True)
+        self.assertIn("train:det", backend.calls)
+
+    def test_no_digest_and_no_checkpoint_is_trained_as_well(self) -> None:
+        # Both halves of "cannot prove" at once — nothing recorded to compare
+        # against *and* nothing on disk to compare with. ``None == None`` would
+        # read as agreement without the guard that refuses to compare two
+        # absences, and the README's rule for this case is "a missing one
+        # cannot be verified at all": retrain.
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        spec = MODEL_REGISTRY["det"]
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        manifest["entries"][spec.output].pop("source_weights_sha256", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        # Built before the deletion: building the config is what materialises
+        # the sandbox checkpoints, so removing it afterwards is the only order
+        # that leaves the run looking at a genuinely absent base checkpoint.
+        rerun = _config(self.root, models=("det",), skip_unchanged=True)
+        rerun.weights_path(spec).unlink()
+
+        backend = FakeBackend()
+        run(rerun, backend=backend)
+        self.assertIn("train:det", backend.calls)
+
+
+class TrackerProvenanceTests(_SandboxedTestCase):
+    """A ``tracking`` entry records the app-side tracker it depends on."""
+
+    def test_a_tracking_entry_records_the_runtime_tracker(self) -> None:
+        cfg = _config(self.root, models=("track",))
+        run(cfg, backend=FakeBackend())
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["track"].output]
+        self.assertEqual(entry["role"], "tracking")
+        self.assertEqual(
+            entry["tracker"],
+            {
+                "algorithm": "iou",
+                "iou_threshold": 0.3,
+                "scope": "qt-runtime",
+                "implementation": "src/services/ai/AIProcessor.cpp",
+            },
+        )
+
+    def test_a_detection_entry_has_no_tracker_block(self) -> None:
+        # The field describes association, not the model: attaching it to a
+        # plain detector would imply code that does not run for that artifact.
+        cfg = _config(self.root, models=("det",))
+        run(cfg, backend=FakeBackend())
+        entry = manifest_mod.load_manifest(cfg.models_dir)["entries"][MODEL_REGISTRY["det"].output]
+        self.assertNotIn("tracker", entry)
+
+
+class QualityGateTests(_SandboxedTestCase):
+    """``--min-metric`` keeps an unusable model out of ``Models/``."""
+
+    def test_a_passing_gate_publishes_the_model(self) -> None:
+        cfg = _config(self.root, models=("det",), min_metrics=(("metrics/mAP50(B)", 0.4),))
+        with self.assertLogs("cvtrain.gate", level="INFO") as captured:
+            code = run(cfg, backend=FakeBackend())
+
+        self.assertEqual(code, ExitCode.OK)
+        self.assertTrue(cfg.output_path(MODEL_REGISTRY["det"]).exists())
+        self.assertTrue(any("Quality gate ok" in line for line in captured.output))
+        last_run = manifest_mod.load_manifest(cfg.models_dir)["last_run"]
+        self.assertEqual(last_run["min_metrics"], [["metrics/mAP50(B)", 0.4]])
+
+    def test_a_model_below_the_threshold_is_never_published(self) -> None:
+        # Checked *before* the export is published, so a model nobody wants
+        # never lands where the Qt app loads it from. The run ends in the
+        # terminal error marker, and the CLI renders the reason as one
+        # actionable line (see test_cli's ExitCodeTests).
+        cfg = _config(self.root, models=("det",), min_metrics=(("metrics/mAP50(B)", 0.5),))
+        with self.assertLogs("cvtrain.progress", level="INFO") as progress:
+            with self.assertRaises(QualityGateError) as ctx:
+                run(cfg, backend=FakeBackend())
+
+        self.assertIn("0.4200", str(ctx.exception))
+        self.assertIn("0.5000", str(ctx.exception))
+        self.assertFalse(cfg.output_path(MODEL_REGISTRY["det"]).exists())
+        self.assertIn("stage=error", progress.output[-1])
+
+    def test_the_gate_uses_its_own_exit_code(self) -> None:
+        # 2 means "environment or artifact is untrustworthy"; 3 means "we
+        # trained it and it is not good enough". The operator's next action
+        # differs, so the codes must not be conflated.
+        cfg = _config(self.root, models=("det",), min_metrics=(("metrics/mAP50(B)", 0.5),))
+        with self.assertRaises(QualityGateError) as ctx:
+            run(cfg, backend=FakeBackend())
+        self.assertEqual(ctx.exception.exit_code, ExitCode.QUALITY)
+
+    def test_a_metric_the_backend_never_reported_fails_the_run(self) -> None:
+        # Silently not checking a metric the operator asked to gate on would
+        # turn the gate into decoration; the message lists what was reported so
+        # an easy typo is visible immediately.
+        cfg = _config(self.root, models=("det",), min_metrics=(("metrics/mAP50-95(B)", 0.1),))
+        with self.assertRaises(QualityGateError) as ctx:
+            run(cfg, backend=FakeBackend())
+
+        self.assertIn("was not reported", str(ctx.exception))
+        self.assertIn("metrics/mAP50(B)", str(ctx.exception))
+
+    def test_the_gate_also_applies_to_a_model_skip_unchanged_keeps(self) -> None:
+        first = _config(self.root, models=("det",), skip_unchanged=True, min_metrics=(("metrics/mAP50(B)", 0.4),))
+        self.assertEqual(run(first, backend=FakeBackend()), ExitCode.OK)
+
+        stricter = _config(self.root, models=("det",), skip_unchanged=True, min_metrics=(("metrics/mAP50(B)", 0.9),))
+        with self.assertRaises(QualityGateError) as ctx:
+            run(stricter, backend=FakeBackend())
+        self.assertIn("0.4200", str(ctx.exception))
+
+    def test_a_skipped_model_without_recorded_metrics_cannot_pass_the_gate(self) -> None:
+        cfg = _config(self.root, models=("det",), skip_unchanged=True)
+        run(cfg, backend=FakeBackend())
+        manifest = manifest_mod.load_manifest(cfg.models_dir)
+        stored = manifest["entries"][MODEL_REGISTRY["det"].output]
+        stored.pop("metrics", None)
+        manifest_mod.save_manifest(cfg.models_dir, manifest)
+
+        gated = _config(self.root, models=("det",), skip_unchanged=True, min_metrics=(("metrics/mAP50(B)", 0.1),))
+        with self.assertRaises(QualityGateError) as ctx:
+            run(gated, backend=FakeBackend())
+        self.assertIn("reported: none", str(ctx.exception))
+
+    def test_a_recorded_metric_that_is_not_a_usable_number_cannot_pass_the_gate(self) -> None:
+        # Three shapes a hand-edited (or older) manifest can carry, each of
+        # which must fail closed: a scalar where a map belongs used to raise
+        # AttributeError (exit 1 + traceback), a string used to raise TypeError,
+        # and NaN satisfies ``actual < minimum`` in no arithmetic at all — so
+        # an unconverged model would have sailed straight through the bar.
+        for bogus in (
+            "oops",
+            {"metrics/mAP50(B)": "0.9"},
+            {"metrics/mAP50(B)": float("nan")},
+            {"metrics/mAP50(B)": True},
+        ):
+            with self.subTest(metrics=bogus):
+                cfg = _config(self.root, models=("det",), skip_unchanged=True)
+                run(cfg, backend=FakeBackend())
+                path = cfg.models_dir / MANIFEST_NAME
+                document = json.loads(path.read_text(encoding="utf-8"))
+                document["entries"][MODEL_REGISTRY["det"].output]["metrics"] = bogus
+                path.write_text(json.dumps(document), encoding="utf-8")
+
+                gated = _config(
+                    self.root, models=("det",), skip_unchanged=True, min_metrics=(("metrics/mAP50(B)", 0.1),)
+                )
+                with self.assertRaises(QualityGateError) as ctx:
+                    run(gated, backend=FakeBackend())
+                self.assertIn("was not reported", str(ctx.exception))
+
+
+class ExportContractIntegrationTests(_SandboxedTestCase):
+    """The ONNX contract is enforced before an artifact replaces a working one."""
+
+    def test_an_export_violating_the_contract_is_never_published(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"previous-good-model")
+
+        class _BrokenExport(FakeBackend):
+            def export(self, model: TrainedModel[Any], config: TrainConfig) -> Path:
+                generated = config.runs_dir / f"{model.handle}.onnx"
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_bytes(b"not actually ONNX")
+                return generated
+
+        with self.assertRaises(ExportContractError) as ctx:
+            run(cfg, backend=_BrokenExport())
+
+        self.assertEqual(ctx.exception.exit_code, ExitCode.EXPORT_CONTRACT)
+        # The failing export must not have replaced the artifact the app loads.
+        self.assertEqual(target.read_bytes(), b"previous-good-model")
+
+    def test_a_contract_failure_closes_the_progress_protocol(self) -> None:
+        cfg = _config(self.root, models=("det",))
+
+        class _BrokenExport(FakeBackend):
+            def export(self, model: TrainedModel[Any], config: TrainConfig) -> Path:
+                generated = config.runs_dir / f"{model.handle}.onnx"
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_bytes(b"not actually ONNX")
+                return generated
+
+        with self.assertLogs("cvtrain.progress", level="INFO") as captured:
+            with self.assertRaises(ExportContractError):
+                run(cfg, backend=_BrokenExport())
+        self.assertIn("stage=error", captured.output[-1])
+
+
+class PublishBackupTests(_SandboxedTestCase):
+    """Replacing an artifact keeps one generation of the previous one."""
+
+    def test_the_first_publish_leaves_no_backup(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        run(cfg, backend=FakeBackend())
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        self.assertTrue(target.exists())
+        self.assertFalse(target.with_name(target.name + BACKUP_SUFFIX).exists())
+
+    def test_republishing_keeps_exactly_one_previous_generation(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        target = cfg.output_path(MODEL_REGISTRY["det"])
+        backup = target.with_name(target.name + BACKUP_SUFFIX)
+
+        run(cfg, backend=FakeBackend())
+        target.write_bytes(b"generation-1")
+        run(cfg, backend=FakeBackend())
+        self.assertEqual(onnx.load(str(target)).graph.name, "fake-export")
+        self.assertEqual(backup.read_bytes(), b"generation-1")
+
+        target.write_bytes(b"generation-2")
+        run(cfg, backend=FakeBackend())
+        # One generation only: the older backup is replaced, not accumulated.
+        self.assertEqual(onnx.load(str(target)).graph.name, "fake-export")
+        self.assertEqual(backup.read_bytes(), b"generation-2")
+
+
+class SchemaForwardCompatibilityTests(_SandboxedTestCase):
+    def test_a_training_run_does_not_down_stamp_a_newer_manifest(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        cfg.models_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.models_dir / MANIFEST_NAME).write_text('{"schema_version": 99, "entries": {}}', encoding="utf-8")
+
+        with self.assertLogs("cvtrain.manifest", level="WARNING"):
+            code = run(cfg, backend=FakeBackend())
+
+        self.assertEqual(code, ExitCode.OK)
+        on_disk = json.loads((cfg.models_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["schema_version"], 99)
+
+
+class ConcurrentRunTests(_SandboxedTestCase):
+    """A second run aimed at a busy ``Models/`` directory is refused, not raced."""
+
+    def test_a_held_lock_refuses_the_run(self) -> None:
+        cfg = _config(self.root, models=("det",))
+        cfg.models_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.models_dir / LOCK_NAME).write_text("held", encoding="utf-8")
+
+        with self.assertRaises(ConcurrentRunError) as ctx:
+            run(cfg, backend=FakeBackend())
+
+        self.assertEqual(ctx.exception.exit_code, ExitCode.PREFLIGHT)
+
+
+if __name__ == "__main__":
+    unittest.main()

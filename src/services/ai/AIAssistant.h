@@ -1,0 +1,149 @@
+#ifndef AIASSISTANT_H
+#define AIASSISTANT_H
+
+#include <QObject>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QList>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QHash>
+#include <QStringList>
+#include <QDateTime>
+#include "Global.h"
+#include "IAIAssistantService.h"
+#include "ChatSessionManager.h"
+#include "AIRequestQueue.h"
+#include "AIServerProcessController.h"
+#include "AgentActionDispatcher.h"
+#include "AIAdminClient.h"
+
+class ILanguageService;
+class IAuthService;
+class IUserPreferences;
+class IAppPaths;
+
+class APP_EXPORT AIAssistant : public IAIAssistantService {
+    Q_OBJECT
+public:
+    explicit AIAssistant(ILanguageService* lang, IAuthService* auth,
+                         IUserPreferences* prefs, IAppPaths* paths,
+                         QString pythonInterpreter, int serverPort,
+                         QObject *parent = nullptr,
+                         QNetworkAccessManager* networkManager = nullptr);
+    ~AIAssistant();
+
+    void startServer(int modelIndex) override;
+    void stopServer() override;
+    void cancelSessionRequest(const QString &sessionId) override;
+    void sendMessage(const QString &text, const QStringList &attachments = QStringList()) override;
+    void sendMessageToSession(const QString &sessionId, const QString &text, const QStringList &attachments = QStringList()) override;
+    void retryMessage(const QString &sessionId, int msgIndex) override;
+    void retryAgentTask(const QString &sessionId, int msgIndex) override;
+    void editMessage(const QString &sessionId, int msgIndex, const QString &newText) override;
+    void switchModel(int index) override;
+    void restartModel() override;
+    void restartRAG() override;
+    void restartAgent() override;
+    void restartServer() override;
+
+    // Agent mode
+    void executeAgentTask(const QString &sessionId, const QString &task,
+                          const QStringList &attachments = QStringList()) override;
+    void approveAgentAction(const QString &sessionId, const QString &actionId) override;
+    void rejectAgentAction(const QString &sessionId, const QString &actionId) override;
+    void reportUiActionResult(const QString &requestId, bool success,
+                              const QVariantMap &result = QVariantMap()) override;
+
+    // Session management
+    void newChat() override;                              // Create new session (keep old)
+    void loadSession(const QString &sessionId) override; // Switch to existing session
+    void deleteSession(const QString &sessionId) override;
+    void renameSession(const QString &sessionId, const QString &title) override;
+    void clearHistory() override;
+    void reloadSessions() override;
+
+    QList<ChatSession> getSessions() const override { return m_sessions.sessions(); }
+    QString currentSessionId() const override { return m_sessions.currentId(); }
+    QList<ChatMessage> getHistory() const override;
+    bool isThinking() const override { return m_isThinking; }
+    bool isSessionThinking(const QString &sessionId) const override;
+    int sessionThinkingInsertIndex(const QString &sessionId) const override;
+    bool isServerRunning() const override { return m_serverReadyEmitted; }
+
+// Signals are declared in IAIAssistantService
+
+protected:
+    /// Transition to "backend ready" and drain queued work. Called by the
+    /// QProcess stdout/stderr handlers; protected so the request state machine
+    /// can be driven deterministically in tests without a real server process.
+    void markServerReady();
+
+private slots:
+    void onServerFinished(int exitCode, bool crashed);
+    void onReplyFinished(QNetworkReply* reply);
+    void onReplyReadyRead(QNetworkReply* reply);
+
+private:
+    ILanguageService* m_lang = nullptr;  ///< injected, never null in practice
+    IAuthService* m_auth = nullptr;      ///< injected, never null in practice
+    IUserPreferences* m_prefs = nullptr; ///< per-user settings (temperature)
+    IAppPaths* m_paths = nullptr;        ///< injected by AppShell (composition root)
+    QString m_pythonInterpreter;         ///< injected by AppShell (config, default "python")
+    int m_serverPort = 8080;             ///< injected by AppShell (config, default 8080)
+    using QueuedCompletionRequest = AICompletionRequest;
+
+    AIServerProcessController m_server;
+    /// Injected transport (test seam) or owned by this object when null.
+    QNetworkAccessManager *networkManager;
+    AIAdminClient m_adminClient;
+    ChatSessionManager m_sessions; ///< session collection + current pointer
+    AIRequestQueue m_requests;     ///< queued work + in-flight replies
+    AgentActionDispatcher m_agentActions; ///< UI-action filtering + ACK bookkeeping
+    bool m_isThinking = false;
+    bool m_serverReadyEmitted = false;
+    int m_currentModelIndex = 0;
+    int m_serverRecoveryAttempts = 0;
+    QHash<QNetworkReply *, QByteArray> m_streamBuffers;
+    QHash<QNetworkReply *, int> m_streamDraftIndices;
+    QHash<QNetworkReply *, QString> m_streamErrors;
+    QHash<QNetworkReply *, QJsonArray> m_agentStreamSteps;
+    QHash<QNetworkReply *, QJsonObject> m_agentStreamResults;
+
+    ChatSession* currentSession();
+    ChatSession* getSession(const QString &sessionId);
+    bool hasPendingWork() const;
+    bool hasPendingRequestForSession(const QString &sessionId) const;
+    /// Per-user ``ai_temperature`` with the given fallback (completion and
+    /// agent requests historically use different defaults).
+    double userTemperature(double fallback) const;
+    bool isRecoverableConnectionError(QNetworkReply::NetworkError error) const;
+    /// Replaces the placeholder title of a still-default session with the
+    /// first prompt. Returns true when the title changed, so the caller emits
+    /// sessionsChanged(); a user-renamed session is never overwritten.
+    bool applyAutoTitle(ChatSession &session, const QString &text,
+                        const QStringList &attachments);
+    void appendAssistantMessage(const QString &sessionId, const QString &content, int insertAfterIndex = -1);
+    bool isEventStream(QNetworkReply *reply) const;
+    void consumeCompletionStream(QNetworkReply *reply,
+                                 const QueuedCompletionRequest &request);
+    void updateStreamDraft(QNetworkReply *reply,
+                           const QueuedCompletionRequest &request,
+                           const QString &content);
+    void updateAgentStreamDraft(QNetworkReply *reply,
+                                const QueuedCompletionRequest &request,
+                                const QJsonObject &envelope);
+    void clearStreamState(QNetworkReply *reply);
+    /// Clears all in-flight request state (queued requests, pending replies,
+    /// pending UI-action sessions) and resets thinking/recovery flags.
+    /// Called whenever the backend generation is torn down (stop/restart).
+    void resetTransientRequestState();
+    void enqueueCompletionRequest(const QString &sessionId, const QJsonObject &payload, int insertAfterIndex = -1);
+    void processNextQueuedRequest();
+    /// Apply the child server's per-process bearer to a privileged request.
+    void authorizeRequest(QNetworkRequest &request) const;
+    void saveAllSessions();
+    void loadAllSessions();
+};
+
+#endif // AIASSISTANT_H

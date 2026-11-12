@@ -1,0 +1,75 @@
+#ifndef AI_YOLO_POST_PROCESSOR_H
+#define AI_YOLO_POST_PROCESSOR_H
+
+#include <cstdint>
+#include <opencv2/core.hpp>
+#include <vector>
+
+struct YoloDetections {
+    std::vector<int> classIds;
+    std::vector<float> confidences;
+    std::vector<cv::Rect> boxes;
+    std::vector<std::vector<float>> maskCoefficients;
+};
+
+namespace AIYoloPostProcessor {
+
+/// Square input size assumed when a model exposes a dynamic input shape.
+///
+/// This is the value every shipped export is trained at; it only acts as a
+/// fallback — a session that reports a concrete shape is driven with that
+/// shape instead, so `--imgsz` at export time is honoured at inference time.
+constexpr int kDefaultModelInputSize = 640;
+
+/// Tensor schema the Qt loader relies on. Mirrored by
+/// ``AIComputerVision/cvtrain/onnx_contract.py``; ``tests/test_contract.py``
+/// cross-checks every value, so a Python export and this parser cannot drift
+/// apart without turning the suite red.
+constexpr int kExpectedInputRank = 4;
+constexpr int kExpectedInputChannels = 3;
+constexpr int kExpectedDetectionOutputRank = 3;
+constexpr int kExpectedSegmentationOutputCount = 2;
+constexpr int kExpectedSegmentationProtoRank = 4;
+constexpr int kExpectedBoxCoordinates = 4;
+constexpr int kExpectedMaskCoefficients = 32;
+
+/// Derive the ``(width, height)`` a session expects from its NCHW input shape.
+///
+/// ``shape`` is the ONNX input shape as ONNX Runtime reports it — ``[N, C, H,
+/// W]`` for every model this project exports. A dynamic axis (negative), a
+/// non-positive extent or an unexpected rank falls back to
+/// :data:`kDefaultModelInputSize` rather than producing a zero-sized tensor.
+cv::Size modelInputSize(const std::vector<int64_t> &shape);
+
+YoloDetections parsePredictions(const cv::Mat &predictions,
+                                cv::Size imageSize,
+                                cv::Size modelSize,
+                                float scoreThreshold,
+                                int maskCoefficientCount = 0);
+
+std::vector<int> applyNms(const std::vector<cv::Rect> &boxes,
+                          const std::vector<float> &confidences,
+                          float nmsThreshold);
+
+/// Keep a detector box inside the frame and reject scene-sized predictions.
+///
+/// A tracking detector trained for the wrong visual domain can report most of
+/// the frame as one object.  Feeding that rectangle to the IoU associator
+/// creates a stable but meaningless track which hides the real moving objects.
+/// An empty rectangle means that the prediction is not a usable track seed.
+cv::Rect sanitizeTrackingBox(const cv::Rect &box, cv::Size frameSize);
+
+/// Find moving-object proposals between two consecutive frames.
+///
+/// This is a conservative fallback for fixed-camera video.  It lets tracking
+/// continue when the semantic detector has no plausible box (for example when
+/// a custom model was trained for another domain).
+std::vector<cv::Rect> detectMotionBoxes(const cv::Mat &previousGray,
+                                        const cv::Mat &currentGray);
+
+/// A deterministic, visible BGR colour for a track id (including id zero).
+cv::Scalar trackingColor(int trackId);
+
+}
+
+#endif // AI_YOLO_POST_PROCESSOR_H

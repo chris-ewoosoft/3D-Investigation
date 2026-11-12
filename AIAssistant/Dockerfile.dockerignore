@@ -1,0 +1,21 @@
+# Dockerfile-specific build context filter. The build context is the repository
+# root, but this image only consumes AIAssistant runtime sources.
+*
+!AIAssistant/
+!AIAssistant/**
+
+# Never send local state, credentials, weights or developer output to BuildKit.
+AIAssistant/.env
+AIAssistant/.coverage
+AIAssistant/.grimp_cache/
+AIAssistant/.import_linter_cache/
+AIAssistant/.mypy_cache/
+AIAssistant/.pytest_cache/
+AIAssistant/.ruff_cache/
+AIAssistant/Cache/
+AIAssistant/logs/
+AIAssistant/Models/
+AIAssistant/tests/
+AIAssistant/evals/
+AIAssistant/**/__pycache__/
+AIAssistant/**/*.py[cod]
