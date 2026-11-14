@@ -297,6 +297,79 @@ class TracingTests(unittest.TestCase):
         self.assertIn(("labels", ("op", "error")), metrics["requests"].observations)
         self.assertIsInstance(finished[0][2], ValueError)
 
+    def test_unified_span_exports_node_input_and_output_to_both_backends(self):
+        tracer = _FakeTracer()
+        finished: list = []
+        inputs = {"node": "plan", "user_request": "build a model", "iteration": 2}
+        metadata = {"node": "plan", "specialist": "supervisor"}
+        with mock.patch.object(tracing_module, "_get_tracer", return_value=tracer):
+            with mock.patch.object(tracing_module, "get_metrics", return_value={}):
+                with mock.patch.object(
+                    tracing_module, "start_langsmith_run", return_value="node-run",
+                ) as start_run:
+                    with mock.patch.object(
+                        tracing_module, "finish_langsmith_run",
+                        side_effect=lambda *args: finished.append(args),
+                    ):
+                        with tracing_module.span(
+                            "agent.plan",
+                            trace_inputs=inputs,
+                            trace_metadata=metadata,
+                            node="plan",
+                        ) as context:
+                            self.assertIsNotNone(context)
+                            context["outputs"] = {
+                                "node": "plan",
+                                "decision": "plan_created",
+                                "plan": ["inspect", "build"],
+                            }
+
+        start_run.assert_called_once_with("agent.plan", "chain", inputs, metadata)
+        attributes = dict(tracer.spans[0].attributes)
+        self.assertEqual(attributes["agent.node.input.node"], "plan")
+        self.assertIn('"user_request":"build a model"', attributes["agent.node.input.json"])
+        self.assertEqual(attributes["agent.node.output.decision"], "plan_created")
+        self.assertIn('"plan":["inspect","build"]', attributes["agent.node.output.json"])
+        self.assertFalse(attributes["agent.node.input.truncated"])
+        self.assertEqual(finished[0][1]["plan"], ["inspect", "build"])
+        self.assertEqual(finished[0][1]["outcome"], "success")
+
+    def test_unified_span_normalises_a_non_mapping_output(self):
+        finished: list = []
+        with mock.patch.object(tracing_module, "_get_tracer", return_value=None):
+            with mock.patch.object(tracing_module, "get_metrics", return_value={}):
+                with mock.patch.object(tracing_module, "start_langsmith_run", return_value="node-run"):
+                    with mock.patch.object(
+                        tracing_module, "finish_langsmith_run",
+                        side_effect=lambda *args: finished.append(args),
+                    ):
+                        with tracing_module.span("agent.reason", trace_inputs={"node": "reason"}) as context:
+                            self.assertIsNotNone(context)
+                            context["outputs"] = "complete"
+        self.assertEqual(finished[0][1]["value"], "complete")
+
+    def test_otel_payload_preview_is_bounded_and_serialisation_safe(self):
+        original_limit = tracing_module._TRACE_ATTRIBUTE_LIMIT
+        self.addCleanup(setattr, tracing_module, "_TRACE_ATTRIBUTE_LIMIT", original_limit)
+        tracing_module._TRACE_ATTRIBUTE_LIMIT = 10
+        preview, truncated = tracing_module._trace_payload_text({"long": "x" * 30})
+        self.assertTrue(truncated)
+        self.assertTrue(preview.endswith("... [truncated]"))
+
+        recursive: dict = {}
+        recursive["self"] = recursive
+        fallback, fallback_truncated = tracing_module._trace_payload_text(recursive)
+        self.assertTrue(fallback_truncated)
+        self.assertIn("{'self':", fallback)
+
+    def test_otel_payload_attribute_helper_ignores_non_spans(self):
+        self.assertIsNone(
+            tracing_module._set_trace_payload_attributes(None, "agent.node.input", {"node": "plan"})
+        )
+        self.assertIsNone(
+            tracing_module._set_trace_payload_attributes(object(), "agent.node.input", {"node": "plan"})
+        )
+
     def test_langsmith_trace_disabled_yields_empty_context(self):
         with mock.patch.object(tracing_module, "start_langsmith_run", return_value=None):
             with tracing_module.langsmith_trace("run") as context:

@@ -9,10 +9,11 @@ silence rather than failing the run they observe.
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import ai_assistant.observability.langsmith_integration as langsmith_mod
@@ -121,6 +122,20 @@ class VacuumDatabaseTests(unittest.TestCase):
 
 
 class LangsmithCompatibilityTests(unittest.TestCase):
+    def setUp(self):
+        langsmith_mod._active_run_trees.clear()
+        langsmith_mod._active_run_tokens.clear()
+        self.addCleanup(langsmith_mod._active_run_trees.clear)
+        self.addCleanup(langsmith_mod._active_run_tokens.clear)
+
+    @staticmethod
+    def _sdk_modules(context, run_tree):
+        internal = ModuleType("langsmith._internal")
+        internal._context = context
+        trees = ModuleType("langsmith.run_trees")
+        trees.RunTree = run_tree
+        return {"langsmith._internal": internal, "langsmith.run_trees": trees}
+
     def test_start_returns_none_when_both_signatures_fail(self):
         client = MagicMock()
         client.create_run.side_effect = [TypeError("unexpected id"), RuntimeError("down")]
@@ -151,6 +166,72 @@ class LangsmithCompatibilityTests(unittest.TestCase):
             self.assertIsNone(langsmith_mod.finish_langsmith_run("run-1", {}))
         # The guard is the client lookup itself: no client, no SDK call.
         get_client.assert_called_once()
+
+    def test_run_tree_context_is_installed_and_reset_for_nested_sdk_traces(self):
+        client = MagicMock()
+        token = object()
+        parent = object()
+        reference = MagicMock()
+        reference.set.return_value = token
+        context = SimpleNamespace(
+            get_current_run_tree=lambda: parent,
+            _PARENT_RUN_TREE_REF=reference,
+        )
+        created: list[object] = []
+
+        class Tree:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        def run_tree(**kwargs):
+            tree = Tree(**kwargs)
+            created.append(tree)
+            return tree
+
+        modules = self._sdk_modules(context, run_tree)
+        with patch.dict(sys.modules, modules):
+            with patch.object(langsmith_mod, "_get_client", return_value=client):
+                run_id = langsmith_mod.start_langsmith_run(
+                    "agent.plan", "chain", {"node": "plan"}, {"iteration": 1},
+                )
+                self.assertIsNotNone(run_id)
+                self.assertIs(created[0].ls_client, client)
+                self.assertIs(created[0].parent_run, parent)
+                self.assertIs(langsmith_mod._active_run_trees[run_id], created[0])
+                self.assertIs(langsmith_mod._active_run_tokens[run_id], token)
+                langsmith_mod.finish_langsmith_run(run_id, {"plan": ["inspect"]})
+
+        reference.reset.assert_called_once_with(token)
+        self.assertEqual(langsmith_mod._active_run_trees, {})
+        self.assertEqual(langsmith_mod._active_run_tokens, {})
+
+    def test_run_tree_context_failure_does_not_drop_the_manual_run(self):
+        client = MagicMock()
+        context = SimpleNamespace(
+            get_current_run_tree=MagicMock(side_effect=RuntimeError("context unavailable")),
+            _PARENT_RUN_TREE_REF=MagicMock(),
+        )
+        modules = self._sdk_modules(context, MagicMock())
+        with patch.dict(sys.modules, modules):
+            with patch.object(langsmith_mod, "_get_client", return_value=client):
+                run_id = langsmith_mod.start_langsmith_run("agent.reason", "chain", {})
+        self.assertIsNotNone(run_id)
+        self.assertNotIn(run_id, langsmith_mod._active_run_trees)
+        self.assertNotIn(run_id, langsmith_mod._active_run_tokens)
+
+    def test_run_tree_reset_failure_is_contained_and_state_is_released(self):
+        run_id = "run-with-broken-token"
+        langsmith_mod._active_run_trees[run_id] = object()
+        langsmith_mod._active_run_tokens[run_id] = object()
+        reference = MagicMock()
+        reference.reset.side_effect = RuntimeError("wrong context")
+        context = SimpleNamespace(_PARENT_RUN_TREE_REF=reference)
+        modules = self._sdk_modules(context, MagicMock())
+        with patch.dict(sys.modules, modules):
+            with patch.object(langsmith_mod, "_get_client", return_value=None):
+                langsmith_mod.finish_langsmith_run(run_id, {})
+        self.assertEqual(langsmith_mod._active_run_trees, {})
+        self.assertEqual(langsmith_mod._active_run_tokens, {})
 
 
 if __name__ == "__main__":

@@ -198,7 +198,7 @@ class AgentRuntimeSettings:
             max_write_bytes=int(values.get("AGENT_MAX_WRITE_BYTES", "1048576")),
             checkpoint_backend=values.get("AGENT_CHECKPOINT_BACKEND", "memory").casefold(),
             checkpoint_url=values.get("AGENT_CHECKPOINT_URL", ""),
-            checkpoint_path=values.get("AGENT_CHECKPOINT_PATH", "AIAssistant/Cache/checkpoints.sqlite"),
+            checkpoint_path=values.get("AGENT_CHECKPOINT_PATH", "AIAssistant/Cache/checkpoint.sql"),
             native_tool_calls=values.get("AGENT_NATIVE_TOOL_CALLS", "0") == "1",
             memory_enabled=values.get("AGENT_MEMORY_ENABLED", "1") == "1",
             memory_stm_max_messages=max(1, int(values.get("AGENT_MEMORY_STM_MAX_MESSAGES", "40"))),

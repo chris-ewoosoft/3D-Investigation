@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import ExitStack, suppress
+from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -104,6 +105,40 @@ def _serializer(cipher: FieldCipher | None) -> Any:
     return EncryptedSerializer(_FieldCipherAdapter(cipher))
 
 
+def _resolve_checkpoint_path(raw_path: str) -> str:
+    """Normalize checkpoint path so relative paths resolve to the right Cache directory.
+
+    Avoids duplicate nesting when the process working directory is already AIAssistant
+    and raw_path starts with 'AIAssistant/'.
+    """
+    if not raw_path:
+        return "Cache/checkpoint.sql"
+
+    p = Path(raw_path)
+    if p.is_absolute() or os.path.isabs(raw_path):
+        # Preserve the caller's spelling.  ``Path`` normalizes separators on
+        # Windows, which is unnecessary for SQLite and makes diagnostics (and
+        # mocks around the filesystem boundary) report a different path from
+        # the one the deployment configured.
+        return raw_path
+
+    cwd = Path.cwd()
+    parts = p.parts
+
+    if cwd.name == "AIAssistant" and len(parts) > 1 and parts[0] == "AIAssistant":
+        resolved = Path(*parts[1:])
+    else:
+        resolved = p
+
+    if not resolved.exists():
+        if resolved.suffix == ".sqlite" and resolved.with_suffix(".sql").exists():
+            resolved = resolved.with_suffix(".sql")
+        elif resolved.suffix == ".sql" and resolved.with_suffix(".sqlite").exists():
+            resolved = resolved.with_suffix(".sqlite")
+
+    return str(resolved)
+
+
 def _ensure_parent_directory(path: str) -> None:
     """Create the checkpoint file's parent directory when the path has one.
 
@@ -164,15 +199,16 @@ def _build_configured_saver(backend: str, url: str, path: str,
     if backend in ("sqlite", "default"):
         from langgraph.checkpoint.sqlite import SqliteSaver
 
-        _ensure_parent_directory(path)
-        conn = sqlite3.connect(path, check_same_thread=False)
+        norm_path = _resolve_checkpoint_path(path)
+        _ensure_parent_directory(norm_path)
+        conn = sqlite3.connect(norm_path, check_same_thread=False)
         try:
             saver = SqliteSaver(conn, serde=_serializer(cipher))
             saver.setup()
         except BaseException:
             conn.close()
             raise
-        logger.info("Using SQLite LangGraph checkpointer at %s", path)
+        logger.info("Using SQLite LangGraph checkpointer at %s", norm_path)
         return CheckpointerHandle(saver, conn.close)
     return None
 
@@ -231,7 +267,7 @@ def cleanup_old_checkpoints(max_days: int = 30, max_size_mb: int = 50) -> None:
     if backend not in ("sqlite", "default"):
         return
 
-    db_path = runtime_settings.checkpoint_path
+    db_path = _resolve_checkpoint_path(runtime_settings.checkpoint_path)
     if not os.path.exists(db_path):
         return
 

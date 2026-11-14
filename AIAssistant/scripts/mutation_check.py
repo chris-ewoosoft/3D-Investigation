@@ -194,7 +194,7 @@ class Mutant:
 #: refusing task submit/resume before committing while closing, preserving
 #: single-use grants on close and capping lingering tool workers, containing
 #: BaseException in SSE stream workers, and bounding uvicorn graceful shutdown.
-MIN_MUTANTS = 308
+MIN_MUTANTS = 313
 
 MUTANTS: tuple[Mutant, ...] = (
     # ── Sandbox allow-list (ADR 0011) ────────────────────────────────────────
@@ -2292,6 +2292,13 @@ MUTANTS: tuple[Mutant, ...] = (
         "graph.run never puts the remembered plan into the state (the seed "
         "has nothing to read)",
     ),
+    Mutant(
+        "src/ai_assistant/orchestration/graph.py",
+        "    return cast(dict[str, Any], _bound_trace_value(redact_value(payload)))",
+        "    return cast(dict[str, Any], _bound_trace_value(payload))",
+        ("tests.unit.test_graph_run_guards",),
+        "node trace payloads export credentials and PII without governance redaction",
+    ),
     # ── Parallel tool batches: eligibility, fan-out, merge (ADR 0044) ────────
     Mutant(
         "src/ai_assistant/orchestration/nodes/tool.py",
@@ -2894,6 +2901,36 @@ MUTANTS: tuple[Mutant, ...] = (
         "        if False:",
         ("tests.unit.test_tracing_sandbox_guards",),
         "OTLP exporter delegates even after shutdown or while collector circuit is open",
+    ),
+    Mutant(
+        "src/ai_assistant/observability/tracing.py",
+        "        if trace_inputs is not None:\n"
+        "            _set_trace_payload_attributes(trace_span, \"agent.node.input\", trace_inputs)",
+        "        if False:\n"
+        "            _set_trace_payload_attributes(trace_span, \"agent.node.input\", trace_inputs)",
+        ("tests.unit.test_observability",),
+        "OpenTelemetry node spans omit the readable input payload",
+    ),
+    Mutant(
+        "src/ai_assistant/observability/tracing.py",
+        "    langsmith_inputs = trace_inputs if trace_inputs is not None else {\"attributes\": attributes}",
+        "    langsmith_inputs = {\"attributes\": attributes}",
+        ("tests.unit.test_observability",),
+        "LangSmith node runs receive generic attributes instead of the node input",
+    ),
+    Mutant(
+        "src/ai_assistant/observability/tracing.py",
+        "            _set_trace_payload_attributes(trace_span, \"agent.node.output\", outputs)",
+        "            _set_trace_payload_attributes(trace_span, \"agent.node.input\", outputs)",
+        ("tests.unit.test_observability",),
+        "OpenTelemetry node spans label output as input, hiding the node boundary",
+    ),
+    Mutant(
+        "src/ai_assistant/observability/tracing.py",
+        "            run_outputs = dict(outputs)",
+        "            run_outputs = {}",
+        ("tests.unit.test_observability",),
+        "LangSmith node runs discard the output payload at completion",
     ),
     Mutant(
         "src/ai_assistant/config/logging.py",

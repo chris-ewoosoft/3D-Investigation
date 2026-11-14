@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ..observability.tracing import current_traceparent
 from ..orchestration.state import Step, has_step_type
 from .deps import RunDeps
 from .ids import generate_action_id
@@ -99,6 +100,7 @@ def _store_pending_action(
             "owner": owner,
             "approval_scope": pending.get("approval_scope", ""),
             "approval_preview": pending.get("approval_preview"),
+            "traceparent": current_traceparent(),
         }
         _persist_pending(deps, save_pending_fn)
 

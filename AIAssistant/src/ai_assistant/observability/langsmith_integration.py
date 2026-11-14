@@ -15,6 +15,8 @@ from ai_assistant.settings import langsmith_settings
 _active_langsmith_run: ContextVar[str | None] = ContextVar(
     "active_langsmith_run", default=None,
 )
+_active_run_trees: dict[str, Any] = {}
+_active_run_tokens: dict[str, Any] = {}
 _initialized = False
 _client_settings: dict[str, str] | None = None
 _langsmith_client: Any | None = None
@@ -77,17 +79,49 @@ def start_langsmith_run(name: str, run_type: str, inputs: dict[str, Any],
             client.create_run(**payload)
         except Exception:
             return None
-        else:
-            return run_id
     except Exception:
         return None
-    else:
-        return run_id
+
+    try:
+        import weakref
+        from uuid import UUID
+
+        from langsmith._internal import _context
+        from langsmith.run_trees import RunTree
+
+        parent_rt = _context.get_current_run_tree()
+        rt = RunTree(
+            id=UUID(run_id),
+            name=name,
+            run_type=run_type,
+            project_name=(_client_settings or {}).get("project", "3d-reconstruction"),
+            ls_client=client,
+            parent_run=parent_rt,
+            inputs=inputs or {},
+            extra={"metadata": metadata} if metadata else {},
+        )
+        _active_run_trees[run_id] = rt
+        token = _context._PARENT_RUN_TREE_REF.set(weakref.ref(rt))
+        _active_run_tokens[run_id] = token
+    except Exception:
+        pass
+
+    return run_id
 
 
 def finish_langsmith_run(run_id: str, outputs: dict[str, Any],
                          error: Exception | None = None) -> None:
     """End a run using the current or a compatible older SDK signature."""
+    token = _active_run_tokens.pop(run_id, None)
+    _active_run_trees.pop(run_id, None)
+    if token is not None:
+        try:
+            from langsmith._internal import _context
+
+            _context._PARENT_RUN_TREE_REF.reset(token)
+        except Exception:
+            pass
+
     client = _get_client()
     if client is None:
         return

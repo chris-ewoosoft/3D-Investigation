@@ -18,6 +18,7 @@ from ..domain.approvals import approval_fingerprint, issue_grant_pair
 from ..domain.errors import AuthorizationError, NotFoundError
 from ..domain.memory import DEFAULT_MEMORY_OWNER
 from ..observability import record_approval, record_tool
+from ..observability.tracing import attach_inbound_traceparent
 from ..orchestration.state import Step
 from ..orchestration.supervisor import audit as audit_agent
 from ..orchestration.supervisor import verify_result
@@ -154,25 +155,26 @@ class ApprovalService(ContextService):
             steps.append({"type": "approval_granted", "scope_id": action.get("approval_scope", ""),
                           "tool": tool_name, "action_id": action.get("action_id", "")})
 
-            return self._ctx.run(
-                system_prompt=system_prompt,
-                task=action["task"],
-                session_id=action["session_id"],
-                temperature=action["temperature"],
-                language=action.get("language", "vi"),
-                request_started=time.monotonic(),
-                owner=owner,
-                initial_messages=messages,
-                initial_steps=steps,
-                initial_iteration=action["iteration"],
-                resume_with_reflection=True,
-                prior_step_count=prior_step_count,
-                approval_granted=True,
-                approval_scope=action.get("approval_scope", ""),
-                approval_token=run_token,
-                granted_fingerprint=fingerprint,
-                generate_action_id_fn=RESUME_ACTION_ID,
-            )
+            with attach_inbound_traceparent(action.get("traceparent")):
+                return self._ctx.run(
+                    system_prompt=system_prompt,
+                    task=action["task"],
+                    session_id=action["session_id"],
+                    temperature=action["temperature"],
+                    language=action.get("language", "vi"),
+                    request_started=time.monotonic(),
+                    owner=owner,
+                    initial_messages=messages,
+                    initial_steps=steps,
+                    initial_iteration=action["iteration"],
+                    resume_with_reflection=True,
+                    prior_step_count=prior_step_count,
+                    approval_granted=True,
+                    approval_scope=action.get("approval_scope", ""),
+                    approval_token=run_token,
+                    granted_fingerprint=fingerprint,
+                    generate_action_id_fn=RESUME_ACTION_ID,
+                )
 
         # No graph to resume (a bare deployment or a missing framework): the
         # direct execution is the whole run, so it still has to be remembered.

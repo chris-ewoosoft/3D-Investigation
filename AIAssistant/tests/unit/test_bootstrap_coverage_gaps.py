@@ -1,9 +1,11 @@
 """Targeted coverage for remaining bootstrap/server.py and config/logging.py gaps."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -37,6 +39,70 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
         self.assertEqual(s._resolve_model_idx(["server.py"], models), 0)
         self.assertEqual(s._resolve_model_idx(["server.py", "0"], models), 0)
         self.assertIn(s._resolve_model_idx(["server.py", "1"], models), (0, 1))
+
+    def test_memory_store_path_honors_explicit_and_legacy_paths(self) -> None:
+        from ai_assistant.bootstrap import server as s
+
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            root = Path(directory)
+            relative_root = Path(root.name)
+
+            absolute = root.resolve() / "absolute.sqlite"
+            with patch.dict(
+                os.environ,
+                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(absolute)},
+            ):
+                self.assertEqual(Path(s._memory_store_path()), absolute)
+            self.assertTrue(absolute.parent.is_dir())
+
+            existing = relative_root / "existing.sql"
+            existing.write_text("", encoding="utf-8")
+            explicit = (
+                Path("AIAssistant") / existing
+                if Path.cwd().name == "AIAssistant"
+                else existing
+            )
+            with patch.dict(
+                os.environ,
+                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(explicit)},
+            ):
+                self.assertEqual(Path(s._memory_store_path()), existing)
+
+            sql_path = relative_root / "from-sql.sql"
+            sql_path.write_text("", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "APP_DATA_DIR": "",
+                    "AGENT_MEMORY_PATH": str(sql_path.with_suffix(".sqlite")),
+                },
+            ):
+                self.assertEqual(Path(s._memory_store_path()), sql_path)
+
+            sqlite_path = relative_root / "from-sqlite.sqlite"
+            sqlite_path.write_text("", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "APP_DATA_DIR": "",
+                    "AGENT_MEMORY_PATH": str(sqlite_path.with_suffix(".sql")),
+                },
+            ):
+                self.assertEqual(Path(s._memory_store_path()), sqlite_path)
+
+            missing = relative_root / "missing.db"
+            with patch.dict(
+                os.environ,
+                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(missing)},
+            ):
+                self.assertEqual(Path(s._memory_store_path()), missing)
+
+        with (
+            patch.dict(os.environ, {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": ""}),
+            patch.object(Path, "mkdir") as mkdir,
+        ):
+            self.assertEqual(Path(s._memory_store_path()), Path("Cache/memory.sql"))
+        mkdir.assert_any_call(parents=True, exist_ok=True)
 
     def test_adopt_backend_refuses_a_missing_backend(self) -> None:
         """A failed load must be visible, not leave the old model advertised."""

@@ -1,7 +1,7 @@
 # AIAssistant Scorecard
 
 > Measured signals, each produced by a command in this repository — nothing
-> here is an estimate. **Last measured: 2026-11-12**, Windows, Python 3.11,
+> here is an estimate. **Last measured: 2026-11-15**, Windows, Python 3.11,
 > dependencies per `requirements-test.lock` (hash-pinned: `faiss-cpu`, `rank-bm25`, `mcp`).
 > A stripped environment measures less: the optional-dependency branches flip
 > with it (ADR 0014).
@@ -12,18 +12,36 @@
 
 ## Quality gates
 
-| Gate | Command | Measured 2026-11-12 |
+| Gate | Command | Measured 2026-11-15 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 153 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"` | **2 589 tests**, 0 failures, 6 skipped; `ResourceWarning` promoted to error (ADR 0056/0057) |
-| Coverage | `PYTHONPATH=src python -m coverage run … && python -m coverage report` | **100.00%** — 11 101 statements, 3 042 branches, 0 missed, 0 partial (ADR 0056/0057 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **308/308** killed, 0 survived, 0 stale in 584.9 s; isolated workers with green owning-suite preflight (ADR 0056/0057; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 308` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"` | **2 606 tests**, 0 failures, 6 skipped; `ResourceWarning` promoted to error (ADR 0056/0057) |
+| Coverage | `PYTHONPATH=src python -m coverage run … && python -m coverage report` | **100.00%** — 11 388 statements, 3 176 branches, 0 missed, 0 partial (ADR 0056/0057 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **313/313** killed, 0 survived, 0 stale in 407.7 s; isolated workers with green owning-suite preflight (ADR 0056/0057; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 313` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
+
+## Structured agent-node tracing (2026-11-15)
+
+`agent.plan`, `agent.plan_reflect`, `agent.reason`, `agent.tool` and
+`agent.reflect` now emit one unified OpenTelemetry span + LangSmith run per
+node. LangSmith receives native, node-specific input/output objects; OTel
+receives the same payload under `agent.node.input.*` and
+`agent.node.output.*`, including searchable scalar fields and bounded JSON
+previews. Tool traces preserve every result in a parallel batch, while reason
+and reflect traces expose the decision, current plan step, observation and
+verification that produced the next state. The shared governance redactor runs
+before either exporter, and oversized strings/collections are bounded.
+
+`test_graph_run_guards`, `test_observability` and
+`test_checkpoint_langsmith_guards` pin all five payload shapes, unified
+backend export, nested LangSmith context and failure containment. Five new
+decision mutants pin redaction plus LangSmith/OTel input/output delivery,
+raising the full measured mutation gate from 308 to **313/313 killed**.
 
 ## Checkpoint retention runtime contract (2026-11-12, ADR 0057)
 

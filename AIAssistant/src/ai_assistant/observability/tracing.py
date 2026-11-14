@@ -12,6 +12,7 @@ nothing and never raises into the call path.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import socket
@@ -34,6 +35,7 @@ logger = logging.getLogger("ai_assistant.observability.tracing")
 
 _OTLP_PROBE_TIMEOUT_SECONDS = 0.3
 _OTLP_RETRY_COOLDOWN_SECONDS = 60.0
+_TRACE_ATTRIBUTE_LIMIT = 16_000
 
 _tracer_lock = threading.Lock()
 # ``False`` is the "disabled" sentinel; otherwise holds the OTel Tracer (or None).
@@ -211,9 +213,51 @@ def _get_tracer() -> Any:
     return _tracer
 
 
+def _trace_payload_text(payload: dict[str, Any]) -> tuple[str, bool]:
+    """Return a bounded JSON preview suitable for one OTel attribute."""
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        encoded = repr(payload)
+    truncated = len(encoded) > _TRACE_ATTRIBUTE_LIMIT
+    if truncated:
+        encoded = encoded[:_TRACE_ATTRIBUTE_LIMIT] + "... [truncated]"
+    return encoded, truncated
+
+
+def _set_trace_payload_attributes(
+    trace_span: Any,
+    namespace: str,
+    payload: dict[str, Any],
+) -> None:
+    """Attach a readable payload plus searchable scalar fields to an OTel span."""
+    if trace_span is None or not hasattr(trace_span, "set_attribute"):
+        return
+    encoded, truncated = _trace_payload_text(payload)
+    trace_span.set_attribute(f"{namespace}.json", encoded)
+    trace_span.set_attribute(f"{namespace}.truncated", truncated)
+    for key, value in payload.items():
+        if isinstance(value, (str, bool, int, float)):
+            trace_span.set_attribute(f"{namespace}.{key}", value)
+
+
 @contextmanager
-def span(name: str, **attributes: Any) -> Iterator[None]:
-    """Emit an OpenTelemetry span and a nested LangSmith run when enabled."""
+def span(
+    name: str,
+    *,
+    trace_inputs: dict[str, Any] | None = None,
+    trace_metadata: dict[str, Any] | None = None,
+    run_type: str = "chain",
+    **attributes: Any,
+) -> Iterator[dict[str, Any] | None]:
+    """Emit one unified OpenTelemetry span and LangSmith run.
+
+    Existing callers that only pass attributes retain the original no-value
+    context-manager API. A caller that supplies ``trace_inputs`` receives a
+    context whose ``outputs`` mapping is exported to both backends, allowing a
+    logical operation to produce one run instead of an OTel/LangSmith pair of
+    duplicate nested runs.
+    """
     started = time.monotonic()
     tracer = _get_tracer()
     trace_cm = tracer.start_as_current_span(name) if tracer else None
@@ -223,16 +267,21 @@ def span(name: str, **attributes: Any) -> Iterator[None]:
         for key, value in attributes.items():
             if value is not None and hasattr(trace_span, "set_attribute"):
                 trace_span.set_attribute(key, value)
+        if trace_inputs is not None:
+            _set_trace_payload_attributes(trace_span, "agent.node.input", trace_inputs)
 
-    run_id = start_langsmith_run(name, "chain", {"attributes": attributes}, attributes)
+    langsmith_inputs = trace_inputs if trace_inputs is not None else {"attributes": attributes}
+    langsmith_metadata = trace_metadata if trace_metadata is not None else attributes
+    run_id = start_langsmith_run(name, run_type, langsmith_inputs, langsmith_metadata)
     token = _active_langsmith_run.set(run_id) if run_id else None
+    context: dict[str, Any] = {"run_id": run_id, "outputs": {}}
     error: Exception | None = None
+    outcome = "error"
     try:
-        yield
+        yield context if trace_inputs is not None else None
         outcome = "success"
     except Exception as exc:
         error = exc
-        outcome = "error"
         raise
     finally:
         elapsed = time.monotonic() - started
@@ -241,13 +290,19 @@ def span(name: str, **attributes: Any) -> Iterator[None]:
         if metrics:
             metrics["requests"].labels(name, outcome).inc()
             metrics["latency"].labels(name).observe(elapsed)
+        outputs = context.get("outputs", {})
+        if not isinstance(outputs, dict):
+            outputs = {"value": outputs}
+        if trace_span is not None and trace_inputs is not None:
+            _set_trace_payload_attributes(trace_span, "agent.node.output", outputs)
         if trace_cm:
             trace_cm.__exit__(type(error) if error else None, error,
                               error.__traceback__ if error else None)
         if run_id:
-            finish_langsmith_run(run_id, {
-                "outcome": outcome, "duration_ms": round(elapsed * 1000),
-            }, error)
+            run_outputs = dict(outputs)
+            run_outputs["outcome"] = outcome
+            run_outputs["duration_ms"] = round(elapsed * 1000)
+            finish_langsmith_run(run_id, run_outputs, error)
         if token is not None:
             _active_langsmith_run.reset(token)
 

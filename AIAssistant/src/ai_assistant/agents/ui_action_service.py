@@ -16,6 +16,7 @@ from typing import Any
 
 from ..domain.errors import AuthorizationError, NotFoundError, UnprocessableRequestError
 from ..domain.memory import DEFAULT_MEMORY_OWNER
+from ..observability.tracing import attach_inbound_traceparent
 from ..orchestration.state import Step
 from ..orchestration.supervisor import audit as audit_agent
 from ..orchestration.supervisor import verify_result
@@ -130,6 +131,7 @@ class UIActionService(ContextService):
                 # The queued step resumes in the same tenant as the run that
                 # planned it (ADR 0043).
                 "owner": owner,
+                "traceparent": action.get("traceparent"),
             }
             self._save_pending()
         return {
@@ -197,21 +199,22 @@ class UIActionService(ContextService):
 
         system_prompt = (messages[0]["content"] if messages and messages[0].get("role") == "system"
                          else build_agent_system_prompt(self._ctx.tool_registry, language=action.get("language", "vi")))
-        return self._ctx.run(
-            system_prompt=system_prompt,
-            task=action["task"],
-            session_id=action["session_id"],
-            temperature=action["temperature"],
-            language=action.get("language", "vi"),
-            request_started=time.monotonic(),
-            owner=owner,
-            initial_messages=messages,
-            initial_steps=action.get("steps", []) + steps,
-            initial_iteration=action.get("iteration", 0),
-            resume_with_reflection=True,
-            prior_step_count=len(action.get("steps", [])),
-            generate_action_id_fn=RESUME_ACTION_ID,
-        )
+        with attach_inbound_traceparent(action.get("traceparent")):
+            return self._ctx.run(
+                system_prompt=system_prompt,
+                task=action["task"],
+                session_id=action["session_id"],
+                temperature=action["temperature"],
+                language=action.get("language", "vi"),
+                request_started=time.monotonic(),
+                owner=owner,
+                initial_messages=messages,
+                initial_steps=action.get("steps", []) + steps,
+                initial_iteration=action.get("iteration", 0),
+                resume_with_reflection=True,
+                prior_step_count=len(action.get("steps", [])),
+                generate_action_id_fn=RESUME_ACTION_ID,
+            )
 
 
 __all__ = ["UIActionService"]

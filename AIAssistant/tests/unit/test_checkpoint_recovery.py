@@ -6,10 +6,13 @@ fallback mechanism when a backend is unavailable.
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ai_assistant.adapters.persistence.checkpointing import (
+    _resolve_checkpoint_path,
     build_checkpointer,
     cleanup_old_checkpoints,
 )
@@ -92,6 +95,35 @@ class CheckpointCleanupTests(unittest.TestCase):
             cleanup_old_checkpoints()
         # It asked about exactly this path, got "no", and stopped there.
         exists.assert_called_once_with(missing)
+
+    def test_checkpoint_path_resolution_covers_defaults_and_legacy_extensions(self) -> None:
+        self.assertEqual(_resolve_checkpoint_path(""), "Cache/checkpoint.sql")
+
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            root = Path(directory)
+            relative_root = Path(root.name)
+
+            sql_path = relative_root / "from-sql.sql"
+            sql_path.write_text("", encoding="utf-8")
+            self.assertEqual(
+                Path(_resolve_checkpoint_path(str(sql_path.with_suffix(".sqlite")))),
+                sql_path,
+            )
+
+            sqlite_path = relative_root / "from-sqlite.sqlite"
+            sqlite_path.write_text("", encoding="utf-8")
+            self.assertEqual(
+                Path(_resolve_checkpoint_path(str(sqlite_path.with_suffix(".sql")))),
+                sqlite_path,
+            )
+
+            existing = relative_root / "existing.sql"
+            existing.write_text("", encoding="utf-8")
+            self.assertEqual(Path(_resolve_checkpoint_path(str(existing))), existing)
+
+            if Path.cwd().name == "AIAssistant":
+                duplicated = Path("AIAssistant") / relative_root / "existing.sql"
+                self.assertEqual(Path(_resolve_checkpoint_path(str(duplicated))), existing)
 
 
 if __name__ == "__main__":

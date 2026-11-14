@@ -349,6 +349,12 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   cửa sổ có giới hạn (512/node) và `p95_latency_by_node()`
   (`observability/metrics.py`) trả về `{node: p95}` — tín hiệu SCORECARD #2 mà
   không cần vòng đi PromQL.
+* **Trace từng node có input/output rõ ràng.** Năm node `agent.plan`,
+  `agent.plan_reflect`, `agent.reason`, `agent.tool` và `agent.reflect` dùng
+  chung một OpenTelemetry span + LangSmith run cho mỗi lần chạy. LangSmith giữ
+  object theo ngữ nghĩa node; OTel ghi cùng payload dưới
+  `agent.node.input.*`/`agent.node.output.*`. Dữ liệu được redact trước khi
+  export và preview lớn được giới hạn.
 * **Context trace vượt biên giới tiến trình.** Ra: `TrustedA2AClient.submit`
   gắn header W3C `traceparent`. Vào: `TraceContextMiddleware` đọc header trên
   mọi request và `attach_inbound_traceparent()` join trace của caller làm remote
@@ -677,10 +683,10 @@ python evals/run_rag_framework_eval.py
 Các cổng là **cấu hình**, không phải cờ dòng lệnh: `pyproject.toml` sở hữu breadth
 lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy strict và
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
-một thứ. Theo lần đo ngày 2026-11-12 (các con số đo được được ghi lại trong
+một thứ. Theo lần đo ngày 2026-11-15 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 101 statement / 3 042 branch ở baseline ADR 0056/0057, 2 589 test);
-inventory mutation hiện có **308/308** killed, 0 survived, 0 stale trong sandbox
+branch toàn package (11 388 statement / 3 176 branch ở baseline ADR 0056/0057, 2 606 test);
+inventory mutation hiện có **313/313** killed, 0 survived, 0 stale trong sandbox
 biệt lập của ADR 0056.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
