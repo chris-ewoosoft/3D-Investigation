@@ -1,0 +1,31 @@
+# Gitleaks Configuration for 3D-Reconstruction
+# Reference: https://github.com/gitleaks/gitleaks
+
+title = "3D-Reconstruction Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for test fixtures, architectural documentation, generated caches, and simulated mock keys"
+paths = [
+    # Unit/integration test suites that intentionally assert redaction, encryption, or PII scrubbing
+    '''(^|/)tests/''',
+    '''(^|/)AIAssistant/tests/''',
+    # Architectural decisions (ADRs) and scorecards documenting secret formats
+    '''(^|/)AIAssistant/Docs/''',
+    # Generated / cache directories
+    '''(^|/)AIAssistant/logs/''',
+    '''(^|/)AIAssistant/Cache/''',
+    '''(^|/)Cache/''',
+    '''(^|/)build.*/''',
+    # Configuration itself
+    '''\.gitleaks\.toml$''',
+]
+
+regexes = [
+    # Simulated API keys and mock tokens used across tests and regex patterns
+    '''(?i)api_key=sk-[A-Za-z0-9_\-]+''',
+    '''(?i)token=mock-[A-Za-z0-9_\-]+''',
+    '''(?i)sk-abcdef[A-Za-z0-9_\-]+''',
+]

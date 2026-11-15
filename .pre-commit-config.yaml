@@ -1,0 +1,119 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Git pre-commit & pre-push hooks configuration
+#
+# Stage: pre-commit (ultra-fast, < 2s total, runs on staged files)
+#   - Git Hygiene: Case conflicts, large files, merge markers, main branch protection
+#   - Config checks: JSON / YAML / TOML syntax validation
+#   - Security: Gitleaks credential & secret scanning
+#   - C++: Architectural boundaries check (CheckArchitectureBoundaries.cmake)
+#   - Python: Ruff check (AIAssistant & AIComputerVision)
+#   - Python: Import-Linter clean architecture contracts (AIAssistant)
+#
+# Stage: pre-push (runs before push, ~5-15s)
+#   - Mypy: Full static type analysis for AIAssistant & AIComputerVision
+#   - Smoke tests: Python architecture boundaries contract test
+# ──────────────────────────────────────────────────────────────────────────────
+repos:
+  # ─── PRE-COMMIT: Git Hygiene & Branch Protection ──────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-case-conflict
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+        stages: [pre-commit]
+      - id: no-commit-to-branch
+        args: ['--branch', 'main']
+        stages: [pre-commit]
+      - id: check-json
+        stages: [pre-commit]
+      - id: check-yaml
+        args: ['--unsafe']
+        stages: [pre-commit]
+      - id: check-toml
+        stages: [pre-commit]
+
+  # ─── PRE-COMMIT: Security (Gitleaks) ──────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: Detect hardcoded secrets (Gitleaks)
+        entry: gitleaks git --pre-commit --staged --verbose --redact --config=.gitleaks.toml
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ─── PRE-COMMIT: C++ Architecture Boundaries ─────────────────────────────
+  - repo: local
+    hooks:
+      - id: check-cpp-architecture
+        name: C++ architecture boundaries (CMake)
+        entry: powershell -NoProfile -Command "cmake -DSOURCE_DIR=$((Get-Location).Path) -P tests/CheckArchitectureBoundaries.cmake"
+        language: system
+        files: ^(src/|tests/|CMakeLists\.txt)
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ─── PRE-COMMIT: Python Linting (Ruff) ────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.6
+    hooks:
+      - id: ruff
+        name: ruff check (AIAssistant)
+        args: ["--config=AIAssistant/pyproject.toml"]
+        files: ^AIAssistant/
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: ruff-ai-computervision
+        name: ruff check (AIComputerVision)
+        entry: powershell -NoProfile -Command "Set-Location AIComputerVision; ruff check ."
+        language: system
+        files: ^AIComputerVision/
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ─── PRE-COMMIT: Architecture Boundaries (Import-Linter) ──────────────────
+  - repo: local
+    hooks:
+      - id: import-linter
+        name: Architecture contracts (Import-Linter)
+        entry: powershell -NoProfile -Command "$env:PYTHONPATH='src'; Set-Location AIAssistant; lint-imports --no-logo"
+        language: system
+        files: ^AIAssistant/src/
+        pass_filenames: false
+        stages: [pre-commit]
+
+  # ─── PRE-PUSH: Static Type Analysis (Mypy) ────────────────────────────────
+  - repo: local
+    hooks:
+      - id: mypy-ai-assistant
+        name: Static type analysis (Mypy AIAssistant)
+        entry: powershell -NoProfile -Command "Set-Location AIAssistant; mypy src/ai_assistant"
+        language: system
+        files: ^AIAssistant/src/
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: mypy-ai-computervision
+        name: Static type analysis (Mypy AIComputerVision)
+        entry: powershell -NoProfile -Command "Set-Location AIComputerVision; mypy"
+        language: system
+        files: ^AIComputerVision/
+        pass_filenames: false
+        stages: [pre-push]
+
+  # ─── PRE-PUSH: Python Architecture Smoke Tests ────────────────────────────
+  - repo: local
+    hooks:
+      - id: python-architecture-smoke-test
+        name: Python architecture contract smoke tests
+        entry: python -m unittest AIAssistant/tests/integration/test_architecture_boundaries.py
+        language: system
+        files: ^AIAssistant/
+        pass_filenames: false
+        stages: [pre-push]
