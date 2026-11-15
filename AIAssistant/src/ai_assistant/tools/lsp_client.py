@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from ai_assistant.config.paths import get_paths
 from ai_assistant.exec_policy import resolve_tool_binary
@@ -21,6 +23,7 @@ from ai_assistant.settings import lsp_binaries
 
 _CPP_EXTS = {".cpp", ".c", ".h", ".hpp", ".cc", ".cxx"}
 _PY_EXTS = {".py"}
+_READER_CLOSED = object()
 
 
 def _get_project_dir() -> str:
@@ -48,49 +51,127 @@ def _make_notification(method: str, params: dict[str, Any]) -> bytes:
     return header + body
 
 
-def _read_response(proc: subprocess.Popen[bytes], timeout: float = 10.0) -> dict[str, Any] | None:
-    deadline = time.monotonic() + timeout
-    content_length: int | None = None
+def _read_lsp_message(stream: IO[bytes]) -> dict[str, Any] | None:
+    """Read one complete LSP frame from ``stream`` or report EOF.
 
+    Pipe reads are deliberately owned by :class:`_LspResponseReader`; a
+    synchronous ``readline`` cannot enforce a wall-clock timeout because it
+    may never return for a live but silent language server.
+    """
     while True:
-        if time.monotonic() > deadline:
-            return None
-        line = proc.stdout.readline()  # type: ignore[union-attr]
-        if not line:
-            if proc.poll() is not None:
+        content_length: int | None = None
+        while True:
+            line = stream.readline()
+            if not line:
                 return None
-            time.sleep(0.02)
+            line_str = line.decode("latin1", errors="replace").strip()
+            if not line_str:
+                if content_length is not None:
+                    break
+                continue
+            if line_str.lower().startswith("content-length:"):
+                try:
+                    content_length = int(line_str.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+
+        if content_length is None or content_length <= 0:
             continue
-        line_str = line.decode("latin1", errors="replace").strip()
-        if not line_str:
-            if content_length is not None:
-                break
+        raw_body = bytearray()
+        while len(raw_body) < content_length:
+            chunk = stream.read(content_length - len(raw_body))
+            if not chunk:
+                return None
+            raw_body.extend(chunk)
+        try:
+            response = json.loads(raw_body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
             continue
-        if line_str.lower().startswith("content-length:"):
+        if isinstance(response, dict):
+            return response
+
+
+class _LspResponseReader:
+    """Own blocking pipe reads while callers wait on a bounded queue."""
+
+    def __init__(self, stream: IO[bytes]) -> None:
+        self._stream = stream
+        self._messages: queue.Queue[object] = queue.Queue()
+        self._thread = threading.Thread(target=self._pump, daemon=True, name="lsp-reader")
+        self._thread.start()
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                message = _read_lsp_message(self._stream)
+                if message is None:
+                    return
+                self._messages.put(message)
+        except BaseException as error:  # Pipe-reader boundary must always unblock the caller.
+            self._messages.put(error)
+        finally:
+            self._messages.put(_READER_CLOSED)
+
+    def wait_for(self, expected_id: int | None, timeout: float) -> dict[str, Any] | None:
+        """Return the matching response; ignore notifications and other ids."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
             try:
-                content_length = int(line_str.split(":", 1)[1].strip())
-            except ValueError:
-                pass
+                item = self._messages.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if item is _READER_CLOSED or isinstance(item, BaseException):
+                return None
+            if isinstance(item, dict) and (expected_id is None or item.get("id") == expected_id):
+                return item
 
-    if content_length is None or content_length <= 0:
+    def join(self, timeout: float = 2.0) -> None:
+        self._thread.join(timeout)
+
+
+def _read_response(proc: subprocess.Popen[bytes], timeout: float = 10.0, *,
+                   expected_id: int | None = None,
+                   reader: _LspResponseReader | None = None) -> dict[str, Any] | None:
+    """Wait for a framed response without ever blocking the calling thread."""
+    stream = proc.stdout
+    if stream is None:
         return None
+    response_reader = reader if reader is not None else _LspResponseReader(stream)
+    return response_reader.wait_for(expected_id, timeout)
 
-    raw_body = bytearray()
-    while len(raw_body) < content_length:
-        remaining_time = deadline - time.monotonic()
-        if remaining_time <= 0:
-            return None
-        chunk = proc.stdout.read(content_length - len(raw_body))  # type: ignore[union-attr]
-        if not chunk:
-            time.sleep(0.02)
-            continue
-        raw_body.extend(chunk)
 
+def _stop_lsp_process(proc: subprocess.Popen[bytes], reader: _LspResponseReader | None) -> None:
+    """Boundedly stop and reap the child, then release both pipe handles."""
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
     try:
-        response: dict[str, Any] = json.loads(raw_body.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return response
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=2.0)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=2.0)
+        except Exception:
+            pass
+    if proc.stdout is not None:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+    if reader is not None:
+        reader.join()
 
 
 def _file_uri(abs_path: str) -> str:
@@ -175,6 +256,7 @@ def _lsp_call(
 
     project_dir = _get_project_dir()
     proc: subprocess.Popen[bytes] | None = None
+    reader: _LspResponseReader | None = None
     try:
         extra_kwargs: dict[str, Any] = {}
         if sys.platform == 'win32':
@@ -186,6 +268,9 @@ def _lsp_call(
             stderr=subprocess.DEVNULL,
             **extra_kwargs,
         )
+        if proc.stdout is None:
+            return {"error": f"LSP server '{server_bin}' has no response pipe."}
+        reader = _LspResponseReader(proc.stdout)
 
         init_params = {
             "processId": os.getpid(),
@@ -195,7 +280,7 @@ def _lsp_call(
         proc.stdin.write(_make_request("initialize", init_params, req_id=1))  # type: ignore[union-attr]
         proc.stdin.flush()  # type: ignore[union-attr]
 
-        init_resp = _read_response(proc, timeout=5.0)
+        init_resp = _read_response(proc, timeout=5.0, expected_id=1, reader=reader)
         if init_resp is None:
             return {"error": f"LSP server '{server_bin}' did not respond to initialize."}
 
@@ -234,7 +319,7 @@ def _lsp_call(
         proc.stdin.write(_make_request(method, req_params, req_id=2))  # type: ignore[union-attr]
         proc.stdin.flush()  # type: ignore[union-attr]
 
-        resp = _read_response(proc, timeout=float(timeout))
+        resp = _read_response(proc, timeout=float(timeout), expected_id=2, reader=reader)
         if resp is None:
             return {"error": f"LSP request '{method}' timed out after {timeout}s."}
 
@@ -254,16 +339,7 @@ def _lsp_call(
         # normal path. Any failure here (broken pipe, already-reaped child)
         # still falls back to kill — cleanup must never mask the response.
         if proc is not None:
-            try:
-                proc.stdin.close()  # type: ignore[union-attr]
-                proc.stdout.close()  # type: ignore[union-attr]
-                proc.terminate()
-                proc.wait(timeout=2.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+            _stop_lsp_process(proc, reader)
 
 
 def _confine_to_project(path: str, project_dir: str) -> str | None:

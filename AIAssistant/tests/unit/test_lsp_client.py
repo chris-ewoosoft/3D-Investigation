@@ -4,7 +4,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -555,15 +558,31 @@ class ReadResponseEdgeCaseTests(unittest.TestCase):
         with self._clock([0.0, 0.0, 0.0, 100.0]):
             self.assertIsNone(lsp_client._read_response(proc, timeout=5.0))
 
-    def test_an_empty_chunk_is_retried_instead_of_endless_framing(self):
+    def test_an_empty_chunk_is_end_of_stream(self):
         proc = self._reader([b"Content-Length: 2\r\n", b"\r\n"], [b"", b"{}"])
-        with self._clock([0.0, 0.0, 0.0, 0.0, 0.0]):
-            self.assertEqual(lsp_client._read_response(proc, timeout=5.0), {})
+        with self._clock([0.0, 0.0, 0.0, 0.0]):
+            self.assertIsNone(lsp_client._read_response(proc, timeout=5.0))
 
     def test_a_body_that_is_not_json_is_rejected(self):
         proc = self._reader([b"Content-Length: 5\r\n", b"\r\n"], [b"notjs"])
         with self._clock([0.0, 0.0, 0.0, 0.0]):
             self.assertIsNone(lsp_client._read_response(proc, timeout=5.0))
+
+    def test_reader_fail_closed_edges(self):
+        """Non-object JSON, an expired wait and a missing pipe are contained."""
+        proc = self._reader(
+            [
+                b"Content-Length: 2\r\n", b"\r\n",
+                b"Content-Length: 2\r\n", b"\r\n",
+            ],
+            [b"[]", b"{}"],
+        )
+        self.assertEqual(lsp_client._read_response(proc, timeout=1.0), {})
+
+        reader = object.__new__(lsp_client._LspResponseReader)
+        reader._messages = lsp_client.queue.Queue()
+        self.assertIsNone(reader.wait_for(None, 0.0))
+        self.assertIsNone(lsp_client._read_response(SimpleNamespace(stdout=None), timeout=1.0))
 
 
 class ProjectDirFallbackTests(unittest.TestCase):
@@ -662,28 +681,97 @@ class LspCallHardeningTests(unittest.TestCase):
         self.assertEqual(payload["params"]["context"], {"includeDeclaration": True})
         self.assertEqual(payload["params"]["position"], {"line": 2, "character": 2})
 
-    def test_a_failure_while_closing_the_channel_falls_back_to_kill(self):
+    def test_a_pipe_close_failure_does_not_skip_terminate_and_reap(self):
         init = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode()
-        proc = self._proc(init, b"{}")
+        final = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {}}).encode()
+        proc = self._proc(init, final)
         proc.stdin.close.side_effect = RuntimeError("pipe already gone")
         with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen", return_value=proc):
             lsp_client._lsp_call("pylsp", [], str(self.root / "src/main.py"), 1, 0,
                                  "textDocument/definition")
-        proc.kill.assert_called_once()
-        proc.terminate.assert_not_called()
+        proc.terminate.assert_called_once()
+        proc.wait.assert_called_once_with(timeout=2.0)
+        proc.stdout.close.assert_called_once()
+        proc.kill.assert_not_called()
 
-    def test_a_kill_that_also_fails_is_swallowed(self):
-        """Cleanup must never mask the response the caller is about to read."""
+    def test_a_terminate_timeout_is_killed_reaped_and_contained(self):
+        """Cleanup must reap the fallback kill without masking the response."""
         init = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode()
-        proc = self._proc(init, b"{}")
-        proc.stdin.close.side_effect = RuntimeError("pipe already gone")
-        proc.kill.side_effect = RuntimeError("already reaped")
+        final = json.dumps({"jsonrpc": "2.0", "id": 2, "result": {}}).encode()
+        proc = self._proc(init, final)
+        proc.wait.side_effect = [subprocess.TimeoutExpired("pylsp", 2.0), 0]
         with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen", return_value=proc):
             result = lsp_client._lsp_call(
                 "pylsp", [], str(self.root / "src/main.py"), 1, 0,
                 "textDocument/definition",
             )
         self.assertIn("result", result)
+        proc.kill.assert_called_once()
+        self.assertEqual(proc.wait.call_count, 2)
+
+    def test_teardown_contains_missing_handles_and_cleanup_failures(self):
+        proc = SimpleNamespace(
+            stdin=None,
+            stdout=None,
+            terminate=mock.MagicMock(side_effect=RuntimeError("already gone")),
+            wait=mock.MagicMock(side_effect=[
+                subprocess.TimeoutExpired("pylsp", 2.0),
+                subprocess.TimeoutExpired("pylsp", 2.0),
+            ]),
+            kill=mock.MagicMock(side_effect=RuntimeError("cannot kill")),
+        )
+        lsp_client._stop_lsp_process(proc, None)
+        self.assertEqual(proc.wait.call_count, 2)
+
+        reader = mock.MagicMock()
+        proc_with_pipe = SimpleNamespace(
+            stdin=mock.MagicMock(),
+            stdout=mock.MagicMock(),
+            terminate=mock.MagicMock(),
+            wait=mock.MagicMock(return_value=0),
+            kill=mock.MagicMock(),
+        )
+        proc_with_pipe.stdout.close.side_effect = OSError("close failed")
+        lsp_client._stop_lsp_process(proc_with_pipe, reader)
+        reader.join.assert_called_once()
+
+    def test_lsp_call_refuses_a_missing_response_pipe(self):
+        proc = mock.MagicMock()
+        proc.stdout = None
+        with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen", return_value=proc):
+            result = lsp_client._lsp_call(
+                "pylsp", [], str(self.root / "src/main.py"), 1, 0,
+                "textDocument/definition",
+            )
+        self.assertIn("no response pipe", result["error"])
+
+    def test_a_silent_live_process_obeys_the_declared_deadline(self):
+        """A real blocking pipe must never hold the caller past its deadline."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+        self.assertIsNotNone(proc.stdout)
+        reader = lsp_client._LspResponseReader(proc.stdout)
+        try:
+            started = time.monotonic()
+            self.assertIsNone(reader.wait_for(1, 0.05))
+            self.assertLess(time.monotonic() - started, 0.5)
+        finally:
+            lsp_client._stop_lsp_process(proc, reader)
+        self.assertIsNotNone(proc.returncode)
+
+    def test_notifications_do_not_replace_the_requested_response(self):
+        notification = json.dumps({
+            "jsonrpc": "2.0", "method": "window/logMessage", "params": {"message": "hi"},
+        }).encode()
+        response = json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"ok": True}}).encode()
+        proc = self._proc(notification, response)
+        reader = lsp_client._LspResponseReader(proc.stdout)
+        self.assertEqual(reader.wait_for(7, 1.0), {
+            "jsonrpc": "2.0", "id": 7, "result": {"ok": True},
+        })
 
 
 if __name__ == "__main__":

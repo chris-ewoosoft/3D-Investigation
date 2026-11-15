@@ -464,7 +464,7 @@ reach them needs a barrier.
   branches), then `PYTHONPATH=src python scripts/mutation_check.py`.
   `StartChatbotServer.py` was removed with the V6 refactor; the syntax check
   referenced a file that no longer exists. The mutation gate pins the package's
-  load-bearing decisions (327 mutants, ADR 0032–0059) and declares a **floor**
+  load-bearing decisions (334 mutants, ADR 0032–0060) and declares a **floor**
   (`MIN_MUTANTS`): deleting a mutant is a decision, and the gate turns it into
   a failing one instead of a silent one. A new guard means a new mutant in the
   same commit. Measured gates, the debt table and the claim-to-test map live in

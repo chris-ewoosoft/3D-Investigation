@@ -238,7 +238,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 59 Architecture Decision Record (0001–0059)
+├─ Docs/adr/                          # 60 Architecture Decision Record (0001–0060)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -686,11 +686,11 @@ python evals/run_rag_framework_eval.py
 Các cổng là **cấu hình**, không phải cờ dòng lệnh: `pyproject.toml` sở hữu breadth
 lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy strict và
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
-một thứ. Theo lần đo ngày 2026-11-15 (các con số đo được được ghi lại trong
+một thứ. Theo lần đo ngày 2026-11-16 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 433 statement / 3 184 branch, 2 631 test);
-inventory mutation hiện có **327/327** killed, 0 survived, 0 stale trong sandbox
-biệt lập của ADR 0056/0058/0059.
+branch toàn package (11 515 statement / 3 202 branch, 2 640 test);
+inventory mutation hiện có **334/334** killed, 0 survived, 0 stale trong sandbox
+biệt lập của ADR 0056/0058/0059/0060.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
 quyết định *nhìn thấy được*. Từ 2026-10-28, cổng còn có sàn **theo từng file**
@@ -865,7 +865,7 @@ accuracy tổng 0.9, accuracy từng slice 0.75 và freshness 0.9. Lần đo
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 59 Architecture Decision Record (0001–0059) |
+| [`Docs/adr/`](Docs/adr/) | 60 Architecture Decision Record (0001–0060) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -932,7 +932,8 @@ Các quyết định trọng yếu, theo thứ tự:
 [0056](Docs/adr/0056-isolated-mutation-workers-and-teardown-ownership.md) cô lập mutation worker và làm rõ quyền sở hữu tài nguyên teardown,
 [0057](Docs/adr/0057-checkpoint-retention-is-a-runtime-contract.md) biến cửa sổ retention checkpoint thành contract runtime fail-closed,
 [0058](Docs/adr/0058-verified-file-handles-and-executable-resource-leak-gate.md) xác minh file handle sau khi mở, chặn hard-link alias và biến resource leak thành gate thực thi được,
-[0059](Docs/adr/0059-close-container-memory-and-concurrency-trust-gaps.md) đóng các lỗ trust của Docker peer, metadata continuation, memory prompt, reload đồng thời, state path, A2A và STM owner.
+[0059](Docs/adr/0059-close-container-memory-and-concurrency-trust-gaps.md) đóng các lỗ trust của Docker peer, metadata continuation, memory prompt, reload đồng thời, state path, A2A và STM owner,
+[0060](Docs/adr/0060-bounded-lsp-and-durable-worker-handoff.md) deadline LSP thật, correlation JSON-RPC, teardown process đầy đủ và handoff durable từ task sang worker.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

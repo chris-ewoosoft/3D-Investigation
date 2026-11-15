@@ -9,13 +9,16 @@ move, nothing returns to ``submitted``) are pinned alongside.
 """
 from __future__ import annotations
 
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from ai_assistant.adapters.persistence.sqlite_store import SqliteTaskStore
 from ai_assistant.application.tasks import TaskService
 from ai_assistant.domain.errors import TaskCapacityError
 from ai_assistant.domain.tasks import AgentTask, TaskStatus
@@ -543,6 +546,10 @@ class TaskAdmissionTests(unittest.TestCase):
                 service.submit("supervisor", "work")
         self.assertEqual(service._workers, set())
         self.assertEqual(service._slots._value, 1)  # type: ignore[attr-defined]
+        failed = next(iter(store._tasks.values()))
+        self.assertEqual(failed.status, TaskStatus.FAILED)
+        self.assertIn("thread cap", failed.error)
+        self.assertTrue(store.events(failed.id)[-1]["data"]["worker_start_failed"])
 
         # Cover the in-_start closing check under a close race after _ensure_open.
         with patch.object(service, "_ensure_open", return_value=None):
@@ -551,6 +558,32 @@ class TaskAdmissionTests(unittest.TestCase):
                 service._start("race-task")
         service._closing = False
         self.assertTrue(service.close())
+
+    def test_close_racing_after_preflight_cannot_commit_a_task(self) -> None:
+        """The commit/start handoff re-checks admission under the lifecycle lock."""
+        from unittest.mock import patch
+
+        store = _MemStore()
+        service = TaskService(
+            store, lambda _task: {}, frozenset({"supervisor"}),
+            max_concurrent_tasks=1,
+        )
+        original_ensure_open = service._ensure_open
+        calls = 0
+
+        def close_after_preflight() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.assertTrue(service.close())
+                return
+            original_ensure_open()
+
+        with patch.object(service, "_ensure_open", side_effect=close_after_preflight):
+            with self.assertRaisesRegex(RuntimeError, "shutting down"):
+                service.submit("supervisor", "raced")
+        self.assertEqual(store._tasks, {})
+        self.assertEqual(service._slots._value, 1)  # type: ignore[attr-defined]
 
     def test_resume_start_failure_discards_worker_and_releases_slot(self) -> None:
         from unittest.mock import patch
@@ -567,7 +600,84 @@ class TaskAdmissionTests(unittest.TestCase):
                 service.resume(park_task.id, {"approved": True})
         self.assertEqual(service._workers, set())
         self.assertEqual(service._slots._value, 1)  # type: ignore[attr-defined]
+        repaired = service.get(park_task.id)
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired.status, TaskStatus.INPUT_REQUIRED)
+        self.assertNotIn("agent_run.resume", repaired.metadata)
+        self.assertIn("resume start fail", repaired.error)
         self.assertTrue(service.close())
+
+    def test_close_racing_after_resume_preflight_preserves_input_required(self) -> None:
+        from unittest.mock import patch
+
+        store = _MemStore()
+        parked = _working_task(
+            metadata={"agent_run.continuation": {"step": 2}},
+        ).transition(TaskStatus.INPUT_REQUIRED)
+        store.commit(parked)
+        service = TaskService(
+            store, lambda _task: {}, frozenset({"supervisor"}),
+            max_concurrent_tasks=1,
+        )
+        original_ensure_open = service._ensure_open
+        calls = 0
+
+        def close_after_preflight() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.assertTrue(service.close())
+                return
+            original_ensure_open()
+
+        with patch.object(service, "_ensure_open", side_effect=close_after_preflight):
+            with self.assertRaisesRegex(RuntimeError, "shutting down"):
+                service.resume(parked.id, {"approved": True})
+        unchanged = store.get(parked.id)
+        self.assertIsNotNone(unchanged)
+        self.assertEqual(unchanged.status, TaskStatus.INPUT_REQUIRED)
+        self.assertIsNone(unchanged.error)
+        self.assertEqual(store.events(parked.id), [])
+        self.assertEqual(service._slots._value, 1)  # type: ignore[attr-defined]
+
+    def test_sqlite_row_is_failed_when_the_worker_cannot_start(self) -> None:
+        """The compensation is durable, not an in-memory-store convention."""
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SqliteTaskStore(Path(directory) / "tasks.sqlite")
+            service = TaskService(
+                store, lambda _task: {}, frozenset({"supervisor"}),
+                max_concurrent_tasks=1,
+            )
+            try:
+                with patch.object(threading.Thread, "start", side_effect=RuntimeError("thread cap")):
+                    with self.assertRaisesRegex(RuntimeError, "thread cap"):
+                        service.submit("supervisor", "work")
+                rows = tuple(store.list(owner="default"))
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].status, TaskStatus.FAILED)
+                self.assertIn("thread cap", rows[0].error)
+            finally:
+                self.assertTrue(service.close())
+
+    def test_start_failure_compensation_never_overwrites_or_masks(self) -> None:
+        """A lost CAS/store failure preserves the newer/original failure."""
+        missing_store = _store()
+        missing_store.get.return_value = None
+        service = TaskService(missing_store, lambda _task: {}, frozenset({"supervisor"}))
+        service._compensate_start_failure(
+            "missing", TaskStatus.SUBMITTED, RuntimeError("start"), retryable=False,
+        )
+        missing_store.commit.assert_not_called()
+
+        failing_store = _store()
+        failing_store.get.side_effect = OSError("store unavailable")
+        service = TaskService(failing_store, lambda _task: {}, frozenset({"supervisor"}))
+        service._compensate_start_failure(
+            "task", TaskStatus.SUBMITTED, RuntimeError("start"), retryable=False,
+        )
+        failing_store.commit.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

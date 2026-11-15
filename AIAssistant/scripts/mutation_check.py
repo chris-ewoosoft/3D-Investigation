@@ -194,7 +194,7 @@ class Mutant:
 #: refusing task submit/resume before committing while closing, preserving
 #: single-use grants on close and capping lingering tool workers, containing
 #: BaseException in SSE stream workers, and bounding uvicorn graceful shutdown.
-MIN_MUTANTS = 327
+MIN_MUTANTS = 334
 
 MUTANTS: tuple[Mutant, ...] = (
     # ── Sandbox allow-list (ADR 0011) ────────────────────────────────────────
@@ -343,6 +343,30 @@ MUTANTS: tuple[Mutant, ...] = (
         ("tests.unit.test_lsp_client",),
         "the LSP server is resolved with the platform lookup again (the "
         "current directory wins over PATH on Windows)",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/lsp_client.py",
+        "                item = self._messages.get(timeout=remaining)",
+        "                item = self._messages.get()",
+        ("tests.unit.test_lsp_client",),
+        "a silent live LSP process blocks the caller beyond its declared deadline",
+        timeout_seconds=20,
+        kill_on_timeout=True,
+    ),
+    Mutant(
+        "src/ai_assistant/tools/lsp_client.py",
+        '            if isinstance(item, dict) and (expected_id is None or item.get("id") == expected_id):',
+        "            if isinstance(item, dict):",
+        ("tests.unit.test_lsp_client",),
+        "an LSP notification or unrelated response is mistaken for the requested result",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/lsp_client.py",
+        "        try:\n            proc.wait(timeout=2.0)\n        except Exception:\n            pass\n"
+        "    if proc.stdout is not None:",
+        "        pass\n    if proc.stdout is not None:",
+        ("tests.unit.test_lsp_client",),
+        "the kill fallback does not reap the LSP child process",
     ),
     Mutant(
         "src/ai_assistant/tools/builtin/vcs_tools.py",
@@ -2872,6 +2896,46 @@ MUTANTS: tuple[Mutant, ...] = (
         "        pass",
         ("tests.unit.test_task_lifecycle_guards",),
         "resume overwrites INPUT_REQUIRED to WORKING during shutdown before failing to start a worker",
+    ),
+    Mutant(
+        "src/ai_assistant/application/tasks.py",
+        "            with self._worker_lock:\n"
+        "                self._ensure_open()\n"
+        "                self._store.commit(task, events=(",
+        "            with self._worker_lock:\n"
+        "                pass\n"
+        "                self._store.commit(task, events=(",
+        ("tests.unit.test_task_lifecycle_guards",),
+        "submit does not re-check shutdown while owning the commit/start handoff lock",
+    ),
+    Mutant(
+        "src/ai_assistant/application/tasks.py",
+        "            with self._worker_lock:\n"
+        "                self._ensure_open()\n"
+        "                if not self._store.commit(resumed, expected=TaskStatus.INPUT_REQUIRED, events=(",
+        "            with self._worker_lock:\n"
+        "                pass\n"
+        "                if not self._store.commit(resumed, expected=TaskStatus.INPUT_REQUIRED, events=(",
+        ("tests.unit.test_task_lifecycle_guards",),
+        "resume does not re-check shutdown while owning the commit/start handoff lock",
+    ),
+    Mutant(
+        "src/ai_assistant/application/tasks.py",
+        "                    self._compensate_start_failure(\n"
+        "                        task.id, TaskStatus.SUBMITTED, error, retryable=False,\n"
+        "                    )",
+        "                    pass",
+        ("tests.unit.test_task_lifecycle_guards",),
+        "a task whose worker cannot start remains durably SUBMITTED",
+    ),
+    Mutant(
+        "src/ai_assistant/application/tasks.py",
+        "                    self._compensate_start_failure(\n"
+        "                        task_id, TaskStatus.WORKING, error, retryable=True,\n"
+        "                    )",
+        "                    pass",
+        ("tests.unit.test_task_lifecycle_guards",),
+        "a resumed task whose worker cannot start remains durably WORKING",
     ),
     Mutant(
         "src/ai_assistant/application/tools.py",

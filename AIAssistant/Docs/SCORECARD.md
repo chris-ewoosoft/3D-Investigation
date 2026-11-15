@@ -1,7 +1,7 @@
 # AIAssistant Scorecard
 
 > Measured signals, each produced by a command in this repository — nothing
-> here is an estimate. **Last measured: 2026-11-15**, Windows, Python 3.11,
+> here is an estimate. **Last measured: 2026-11-16**, Windows, Python 3.11,
 > dependencies per `requirements-test.lock` (hash-pinned: `faiss-cpu`, `rank-bm25`, `mcp`).
 > A stripped environment measures less: the optional-dependency branches flip
 > with it (ADR 0014).
@@ -12,16 +12,16 @@
 
 ## Quality gates
 
-| Gate | Command | Measured 2026-11-15 |
+| Gate | Command | Measured 2026-11-16 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 153 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 631 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058) |
-| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 433 statements, 3 184 branches, 0 missed, 0 partial (ADR 0058/0059 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **327/327** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 327` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 640 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 515 statements, 3 202 branches, 0 missed, 0 partial (ADR 0058/0059/0060 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **334/334** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 334` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
 | Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
@@ -31,6 +31,20 @@
 | Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
 | Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
 | Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
+
+## Bounded LSP and durable worker handoff (2026-11-16, ADR 0060)
+
+The LSP client now owns blocking pipe reads in one response-reader thread.
+Callers wait on a bounded queue for the exact JSON-RPC id, so a silent live
+server cannot defeat the deadline and a notification cannot replace the
+requested response. Teardown independently closes both pipes and always
+attempts terminate, bounded wait, kill and a final bounded reap.
+
+The durable task lifecycle now holds its lifecycle lock across commit and
+worker start. A failed initial start is compensated to `FAILED`; a failed
+resume returns to `INPUT_REQUIRED` without the consumed resume payload. Real
+subprocess and SQLite regressions pin both defects. Seven new decision mutants
+raise the measured floor from 327 to **334/334 killed**.
 
 ## Verified read handles and executable resource ownership (2026-11-15, ADR 0058)
 

@@ -78,6 +78,38 @@ class TaskService:
                 msg = "Task service is shutting down"
                 raise RuntimeError(msg)
 
+    def _compensate_start_failure(self, task_id: str, expected: TaskStatus,
+                                  error: BaseException, *, retryable: bool) -> None:
+        """Repair the durable state when a committed worker cannot start.
+
+        The lifecycle lock is held by the caller, so shutdown cannot close the
+        store between the work commit and this compensation. A concurrent
+        cancel or external writer may still win the store CAS; in that case its
+        newer state is authoritative and must not be overwritten.
+        """
+        try:
+            current = self._store.get(task_id)
+            if current is None or current.status != expected:
+                return
+            detail = f"Worker failed to start: {type(error).__name__}: {error}"
+            if retryable:
+                metadata = dict(current.metadata)
+                metadata.pop("agent_run.resume", None)
+                repaired = current.with_metadata(metadata).transition(
+                    TaskStatus.INPUT_REQUIRED, error=detail,
+                )
+            else:
+                repaired = current.transition(TaskStatus.FAILED, error=detail)
+            self._store.commit(repaired, expected=expected, events=((
+                "status",
+                {"status": repaired.status, "error": detail, "worker_start_failed": True},
+            ),))
+        except BaseException:
+            # Preserve the original Thread.start/lifecycle failure. A store
+            # failure cannot be repaired in-process and startup reconciliation
+            # remains the final durable fallback.
+            return
+
     def submit(self, capability: str, message: str, metadata: Mapping[str, Any] | None = None,
                context_id: str | None = None, classification: DataClassification = DataClassification.INTERNAL,
                *, owner: str = "default") -> AgentTask:
@@ -99,10 +131,22 @@ class TaskService:
         if not self._try_acquire_slot():
             return self._reject_at_capacity(task)
         try:
-            self._store.commit(task, events=(
-                ("status", {"status": task.status}),
-            ))
-            self._start(task.id)
+            # Commit and worker registration are one lifecycle critical
+            # section: shutdown cannot close the store after the row lands but
+            # before the worker is registered. If Thread.start still fails,
+            # compensate the durable row before releasing this lock.
+            with self._worker_lock:
+                self._ensure_open()
+                self._store.commit(task, events=(
+                    ("status", {"status": task.status}),
+                ))
+                try:
+                    self._start(task.id)
+                except BaseException as error:
+                    self._compensate_start_failure(
+                        task.id, TaskStatus.SUBMITTED, error, retryable=False,
+                    )
+                    raise
         except BaseException:
             # No worker will run, so nothing else can return the slot.
             self._release_slot()
@@ -215,14 +259,22 @@ class TaskService:
         resumed = task.with_metadata(metadata).transition(TaskStatus.WORKING)
         if not self._try_acquire_slot():
             raise TaskCapacityError(self._max_concurrent_tasks)
-        if not self._store.commit(resumed, expected=TaskStatus.INPUT_REQUIRED, events=(
-            ("status", {"status": resumed.status, "resumed": True}),
-        )):
-            # The task left input_required while we prepared the resume.
-            self._release_slot()
-            return None
         try:
-            self._start(task_id, already_working=True)
+            with self._worker_lock:
+                self._ensure_open()
+                if not self._store.commit(resumed, expected=TaskStatus.INPUT_REQUIRED, events=(
+                    ("status", {"status": resumed.status, "resumed": True}),
+                )):
+                    # The task left input_required while we prepared the resume.
+                    self._release_slot()
+                    return None
+                try:
+                    self._start(task_id, already_working=True)
+                except BaseException as error:
+                    self._compensate_start_failure(
+                        task_id, TaskStatus.WORKING, error, retryable=True,
+                    )
+                    raise
         except BaseException:
             self._release_slot()
             raise

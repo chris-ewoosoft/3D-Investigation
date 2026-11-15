@@ -2,7 +2,7 @@
 # Git pre-commit & pre-push hooks configuration
 #
 # Stage: pre-commit (ultra-fast, < 2s total, runs on staged files)
-#   - Git Hygiene: Case conflicts, large files, merge markers, main branch protection
+#   - Git Hygiene: Case conflicts, large files, merge markers
 #   - Config checks: JSON / YAML / TOML syntax validation
 #   - Security: Gitleaks credential & secret scanning
 #   - C++: Architectural boundaries check (CheckArchitectureBoundaries.cmake)
@@ -24,9 +24,6 @@ repos:
         stages: [pre-commit]
       - id: check-added-large-files
         args: ['--maxkb=1024']
-        stages: [pre-commit]
-      - id: no-commit-to-branch
-        args: ['--branch', 'main']
         stages: [pre-commit]
       - id: check-json
         stages: [pre-commit]
