@@ -11,6 +11,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -585,6 +586,34 @@ class ChatRoutesTest(unittest.TestCase):
         with mock.patch("builtins.open", side_effect=AssertionError("opened")) as opener:
             self.assertFalse(_attachment_may_be_opened(directory))
         opener.assert_not_called()
+
+    def test_a_hard_link_is_not_opened_as_an_attachment(self) -> None:
+        """An allowed-looking alias may not smuggle another file identity."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.bin"
+            alias = Path(directory) / "innocent.png"
+            source.write_bytes(SEALED_BINARY_PREFIX + b"demonstration-only")
+            os.link(source, alias)
+            self.assertTrue(os.path.samefile(source, alias))
+            self.assertFalse(_attachment_may_be_opened(str(alias)))
+
+    def test_attachment_disappearing_after_preflight_is_refused(self) -> None:
+        """A check/open race is contained as an ordinary refusal."""
+        with (
+            mock.patch(
+                "ai_assistant.adapters.http.chat_routes.attachment_roots",
+                return_value=(),
+            ),
+            mock.patch(
+                "ai_assistant.adapters.http.chat_routes.is_single_link_regular_file",
+                return_value=True,
+            ),
+            mock.patch(
+                "ai_assistant.adapters.http.chat_routes.open_verified_regular_file",
+                side_effect=OSError("removed"),
+            ),
+        ):
+            self.assertFalse(_attachment_may_be_opened("vanished.png"))
 
     def test_an_attachment_that_does_not_exist_is_refused(self) -> None:
         """A name that resolves to nothing is refused, not raised."""

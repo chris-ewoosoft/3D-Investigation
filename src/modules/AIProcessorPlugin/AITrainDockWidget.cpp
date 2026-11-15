@@ -16,6 +16,15 @@
 #include <QDebug>
 #include <QDialogButtonBox>
 #include <QTimer>
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     : QDockWidget(ctx->translate("aiproc.train_title"), parent), m_ctx(ctx) 
@@ -82,6 +91,11 @@ AITrainDockWidget::AITrainDockWidget(IAppContext* ctx, QWidget* parent)
     hide();
 
     trainProcess = new QProcess(this);
+#if defined(Q_OS_WIN)
+    trainProcess->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+        args->flags |= CREATE_NO_WINDOW;
+    });
+#endif
     
     connect(btnCloseTrain, &QPushButton::clicked, this, &AITrainDockWidget::closeTrainDock);
     connect(btnStopTrain, &QPushButton::clicked, this, &AITrainDockWidget::onStopTrain);

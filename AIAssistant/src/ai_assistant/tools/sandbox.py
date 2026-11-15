@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -58,6 +59,20 @@ _DENIED_WRITE_PATHS = {
 #: the real file. The substring list cannot cover this on its own —
 #: ``pyproject.toml`` is the one entry that is not a path fragment.
 _DENIED_WRITE_NAMES = frozenset(name.lower() for name in _DENIED_WRITE_PATHS)
+
+
+def _is_durable_state_file(name: str) -> bool:
+    """Protect memory/checkpoint SQLite databases and their sidecars."""
+    folded = name.casefold()
+    for sidecar in ("-wal", "-shm", "-journal"):
+        if folded.endswith(sidecar):
+            folded = folded[:-len(sidecar)]
+            break
+    path = Path(folded)
+    return (
+        path.stem in {"memory", "checkpoint", "checkpoints"}
+        and path.suffix in {".db", ".sql", ".sqlite", ".sqlite3"}
+    )
 
 # ADR 0032: directories that hold the platform's *own policy*. The basename
 # set above named two policy files and left the rest writable, so an approved
@@ -594,9 +609,13 @@ def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:
             return {"error": f"Executable '{argv[0]}' was not found on PATH."}
         argv = [resolved, *argv[1:]]
     try:
+        extra_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            extra_kwargs["creationflags"] = 0x08000000
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
                               timeout=min(timeout, 120), env=env, shell=False,
-                              encoding="utf-8", errors="replace", check=False)
+                              encoding="utf-8", errors="replace", check=False,
+                              **extra_kwargs)
         return {"command": argv, "return_code": proc.returncode,
                 "stdout": proc.stdout[:5000], "stderr": proc.stderr[:2000],
                 "sandbox": sandbox_label}
@@ -614,8 +633,12 @@ def _force_remove_container(container_name: str) -> None:
     the container running with the workspace mounted read-write.
     """
     try:
+        extra_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            extra_kwargs["creationflags"] = 0x08000000
         subprocess.run(["docker", "rm", "-f", container_name],
-                       capture_output=True, timeout=15, shell=False, check=False)
+                       capture_output=True, timeout=15, shell=False, check=False,
+                       **extra_kwargs)
     except (OSError, subprocess.SubprocessError):
         # The container may already be gone, or the daemon unreachable — the
         # command result is still the timeout error either way.
@@ -671,7 +694,7 @@ def write_file(path: str, content: str, project_root: str) -> dict[str, Any]:
     # own: ``pyproject.toml`` is the one entry that is not a path fragment.
     target_name = resolved.name
     resolved_lower = str(resolved).lower()
-    if target_name.lower() in _DENIED_WRITE_NAMES or any(
+    if _is_durable_state_file(target_name) or target_name.lower() in _DENIED_WRITE_NAMES or any(
         p in resolved_lower
         for p in ["sandbox.py", ".env", "security.py", ".git", "tasks.sqlite",
                   "pending_agent_actions.json", "agent_audit.jsonl"]

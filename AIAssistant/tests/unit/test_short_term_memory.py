@@ -102,9 +102,18 @@ class BufferBoundTests(unittest.TestCase):
             buffer.record("a-1", [{"role": "user", "content": "a1"}], owner="a")
             buffer.record("a-2", [{"role": "user", "content": "a2"}], owner="a")
             buffer.record("a-3", [{"role": "user", "content": "a3"}], owner="a")
-        self.assertEqual(buffer.recent("a-1"), [])
-        self.assertEqual(buffer.recent("a-3"), [{"role": "user", "content": "a3"}])
-        self.assertEqual(buffer.recent("b-1"), [{"role": "user", "content": "b1"}])
+        self.assertEqual(buffer.recent("a-1", owner="a"), [])
+        self.assertEqual(buffer.recent("a-3", owner="a"), [{"role": "user", "content": "a3"}])
+        self.assertEqual(buffer.recent("b-1", owner="b"), [{"role": "user", "content": "b1"}])
+
+    def test_owner_mismatch_cannot_read_a_known_session_id(self) -> None:
+        buffer = BoundedShortTermMemory()
+        buffer.record("shared-id", [{"role": "user", "content": "private"}], owner="alice")
+        self.assertEqual(buffer.recent("shared-id", owner="bob"), [])
+        self.assertEqual(
+            buffer.recent("shared-id", owner="alice"),
+            [{"role": "user", "content": "private"}],
+        )
 
     def test_cleanup_drops_only_sessions_older_than_the_cutoff(self) -> None:
         buffer = BoundedShortTermMemory()
@@ -175,11 +184,27 @@ class FacadeWiringTests(unittest.TestCase):
 
     def test_an_empty_history_still_gets_the_remembered_context(self) -> None:
         buffer = _RecordingBuffer()
-        buffer.record("s1", [{"role": "user", "content": "remember me"}])
+        buffer.record(
+            "s1", [{"role": "user", "content": "remember me"}],
+            owner=DEFAULT_MEMORY_OWNER,
+        )
         service, captured = self._service(buffer=buffer)
         self._execute(service, [])
         self.assertEqual(captured[0]["initial_messages"][1],
                          {"role": "user", "content": "remember me"})
+
+    def test_the_facade_does_not_merge_another_owner_session(self) -> None:
+        buffer = _RecordingBuffer()
+        buffer.record(
+            "s1", [{"role": "user", "content": "alice private context"}],
+            owner="alice",
+        )
+        service, captured = self._service(buffer=buffer)
+        self._execute(service, [], owner="bob")
+        self.assertNotIn(
+            {"role": "user", "content": "alice private context"},
+            captured[0]["initial_messages"],
+        )
 
     def test_the_recorded_window_carries_the_run_owner(self) -> None:
         """The per-owner bound is only real if the facade forwards the owner.

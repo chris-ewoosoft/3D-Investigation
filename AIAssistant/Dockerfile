@@ -59,8 +59,9 @@ ENV PYTHONUNBUFFERED=1
 ENV APP_DATA_DIR=/app/data
 # The container is reachable from the network by design, so the bind address
 # is 0.0.0.0. That does NOT open the mutating APIs: ADR 0008 gates the
-# agent/admin/chat surfaces to loopback callers, and the OpenAPI surface is
-# not published at all unless the deployment opts in (ADR 0032).
+# agent/admin/chat surfaces to loopback or explicitly pinned local transport
+# peers, and the OpenAPI surface is not published unless the deployment opts
+# in (ADR 0032/0059).
 ENV AGENT_HOST=0.0.0.0
 ENV AGENT_PORT=8080
 ENV PATH="/usr/local/bin:${PATH}"

@@ -16,7 +16,12 @@ from ai_assistant.config.paths import AppPaths
 from ai_assistant.config.rag_config import RAGSettings
 from ai_assistant.image_utils import load_image_for_embedding
 from ai_assistant.llm.hardware import release_ml_memory
-from ai_assistant.path_policy import canonical_path, is_blocked_dir, is_secret_name
+from ai_assistant.path_policy import (
+    canonical_path,
+    is_blocked_dir,
+    is_secret_name,
+    is_single_link_regular_file,
+)
 from ai_assistant.ports import FieldCipher, StorageCryptoError
 
 from .cache_seal import (
@@ -133,6 +138,8 @@ def _indexable_files(
                 continue
             path = Path(dirpath) / filename
             if not _stays_inside(root, path):
+                continue
+            if not is_single_link_regular_file(path):
                 continue
             yield str(path)
 

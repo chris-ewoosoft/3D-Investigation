@@ -22,20 +22,12 @@ class _Specialist(Enum):
     CODE = "code"
 
 
-class _LSContext:
+class _Span:
     def __init__(self) -> None:
-        self._ctx: dict = {}
+        self._ctx: dict = {"outputs": {}}
 
     def __enter__(self):
         return self._ctx
-
-    def __exit__(self, *args):
-        return False
-
-
-class _Span:
-    def __enter__(self):
-        return self
 
     def __exit__(self, *args):
         return False
@@ -90,7 +82,6 @@ def _deps(**overrides) -> RunDeps:
         "reflect_result_fn": lambda d, result, verification: {"passed": True, "reason": "ok"},
         "record_tool_fn": lambda t, ok, duration: None,
         "record_schema_error_fn": lambda t: None,
-        "langsmith_trace_fn": lambda *a, **k: _LSContext(),
         "span_fn": lambda *a, **k: _Span(),
         "is_coding_task_fn": lambda t: False,
         "save_pending_fn": lambda: None,

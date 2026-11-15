@@ -7,6 +7,10 @@ import re
 from typing import Any
 
 from ai_assistant.config.paths import get_paths
+from ai_assistant.path_policy import (
+    is_single_link_regular_file,
+    open_verified_regular_file,
+)
 
 from .path_utils import agent_safe_path, is_blocked_dir, is_secret_name
 
@@ -158,13 +162,16 @@ def tool_search_text(params: dict[str, Any]) -> dict[str, Any]:
             dirs[:] = sorted(d for d in dirs if not is_blocked_dir(d))
             for filename in sorted(files):
                 ext = os.path.splitext(filename)[1].lower()
-                if ext not in text_exts:
-                    continue
                 # A secret file is skipped by *name*, not by extension: the
                 # walk reaches ``secrets.json`` (a ``.json`` file) long
                 # before any dotfile, and the extension filter would let it
                 # through. The name rule is the one that covers both.
-                if is_secret_name(filename):
+                fp = os.path.join(root, filename)
+                if (
+                    ext not in text_exts
+                    or is_secret_name(filename)
+                    or not is_single_link_regular_file(fp)
+                ):
                     continue
                 relative_to_search = os.path.relpath(os.path.join(root, filename), search_root)
                 relative_to_project = os.path.relpath(os.path.join(root, filename), project_root)
@@ -176,10 +183,11 @@ def tool_search_text(params: dict[str, Any]) -> dict[str, Any]:
                 ):
                     continue
 
-                fp = os.path.join(root, filename)
                 rel = os.path.relpath(fp, project_root)
                 try:
-                    with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    with open_verified_regular_file(
+                        fp, "r", encoding="utf-8", errors="replace",
+                    ) as f:
                         for line_no, line in enumerate(f, 1):
                             check_line = line if case_sensitive else line.lower()
                             if search_query in check_line:

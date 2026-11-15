@@ -428,9 +428,12 @@ class DocxLoaderTests(unittest.TestCase):
             SimpleNamespace(text="Second paragraph content with words. " * 10),
         ])
         fake_docx = SimpleNamespace(Document=lambda fp: fake_doc)
-        with mock.patch.dict(sys.modules, {"docx": fake_docx}):
-            loader = DocxLoader(chunk_chars=100, min_chunk_chars=20)
-            chunks = loader.load("document.docx", ".")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "document.docx"
+            path.write_bytes(b"docx-test-double")
+            with mock.patch.dict(sys.modules, {"docx": fake_docx}):
+                loader = DocxLoader(chunk_chars=100, min_chunk_chars=20)
+                chunks = loader.load(str(path), directory)
         self.assertTrue(chunks)
         self.assertTrue(chunks[0].text.startswith("[Tai lieu: "))
         self.assertEqual(chunks[0].loader_type, "tai_lieu")

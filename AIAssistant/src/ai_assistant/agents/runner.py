@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from ai_assistant.domain.errors import ServiceUnavailableError
+from ai_assistant.domain.governance import redact_value
 from ai_assistant.orchestration.state import Step, has_step_type
 
 from .deps import RunDeps
@@ -50,9 +51,8 @@ def _run_graph(
     approval_granted: bool,
     approval_scope: str,
     granted_fingerprint: str,
-    ls_ctx: dict[str, Any],
-    ls_ctx_mgr: Any,
-    otel_cm: Any = None,
+    trace_context: dict[str, Any],
+    trace_context_manager: Any,
 ) -> dict[str, Any]:
     """Execute the graph, closing the trace and the task record on failure.
 
@@ -75,9 +75,8 @@ def _run_graph(
             granted_fingerprint=granted_fingerprint,
         ))
     except BaseException as error:
-        otel_cm.__exit__(type(error), error, error.__traceback__)
-        ls_ctx["outputs"] = {"status": "error", "error": str(error)}
-        ls_ctx_mgr.__exit__(type(error), error, error.__traceback__)
+        trace_context["outputs"] = {"status": "error", "error": str(error)}
+        trace_context_manager.__exit__(type(error), error, error.__traceback__)
         # Nothing below runs on this path, so without this call a crash left
         # the coordinator's record parked in ``running`` forever (review
         # finding 6).  ``finish`` still resolves cancellation first, so a run
@@ -134,16 +133,21 @@ def run_langgraph_agent(
     logger.info("Starting LangGraph session %s", session_id)
 
     # ── Tracing (LangSmith + OpenTelemetry) ──────────────────────────────────
-    _otel_cm = deps.span_fn("agent.session", session_id=session_id, task=task[:200])
-    _otel_cm.__enter__()
-
-    _ls_ctx_mgr = deps.langsmith_trace_fn(
-        "agent.session", run_type="chain",
-        inputs={"task": task[:200], "session_id": session_id,
-                "supervisor_route": "supervisor"},
-        metadata={"session_id": session_id, "temperature": temperature, "language": language},
+    trace_context_manager = deps.span_fn(
+        "agent.session",
+        run_type="chain",
+        trace_inputs={
+            "task": redact_value(task[:200]),
+            "session_id": session_id,
+            "supervisor_route": "supervisor",
+        },
+        trace_metadata={
+            "session_id": session_id,
+            "temperature": temperature,
+            "language": language,
+        },
     )
-    _ls_ctx = _ls_ctx_mgr.__enter__()
+    trace_context = trace_context_manager.__enter__()
 
     messages = initial_messages or [
         {"role": "system", "content": system_prompt},
@@ -154,15 +158,15 @@ def run_langgraph_agent(
         initial_steps=initial_steps, prior_plan=prior_plan, initial_iteration=initial_iteration,
         resume_with_reflection=resume_with_reflection, approval_granted=approval_granted,
         approval_scope=approval_scope, granted_fingerprint=granted_fingerprint,
-        ls_ctx=_ls_ctx, ls_ctx_mgr=_ls_ctx_mgr,
-        otel_cm=_otel_cm,
+        trace_context=trace_context,
+        trace_context_manager=trace_context_manager,
     )
 
     # ── State → response ─────────────────────────────────────────────────────
     pending_status = _pending_status(state)
     _finish_task(deps, session_id, state)
     total_ms = round((time.monotonic() - request_started) * 1000)
-    _close_trace(_ls_ctx, _ls_ctx_mgr, pending_status, state, total_ms, otel_cm=_otel_cm)
+    _close_trace(trace_context, trace_context_manager, pending_status, state, total_ms)
 
     parked = _pending_response(
         deps=deps, session_id=session_id, task=task, state=state,

@@ -20,7 +20,23 @@ gate and the HTTP attachment gate without any of them growing a variant.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
+from typing import IO, Any, BinaryIO, Literal, TextIO, overload
+
+
+class VerifiedFileError(OSError):
+    """An opened path is not one safe regular file identity."""
+
+    def __init__(self) -> None:
+        super().__init__("refusing a non-regular, multiply-linked, or replaced file")
+
+
+class VerifiedFileModeError(ValueError):
+    """Verified file access is deliberately read-only."""
+
+    def __init__(self) -> None:
+        super().__init__("verified file access only supports 'r' and 'rb'")
 
 #: Directories the tools never descend into: version-control metadata (which
 #: carries the remote URL and often a credential), build output, and the
@@ -133,11 +149,104 @@ def resolve_within(root: str, candidate: str) -> str | None:
     return lexical
 
 
+def is_single_link_regular_file(path: str | Path) -> bool:
+    """Whether ``path`` names one ordinary file with one directory entry.
+
+    A hard link keeps the harmless alias spelling while referring to the same
+    inode/file-id as a blocked name such as ``.env``.  Path canonicalisation
+    cannot expose that relationship: unlike a symbolic link, a hard link has
+    no target path to resolve.  Readers therefore fail closed on multiply
+    linked files.  The opened-handle gate below repeats the decision after
+    ``open`` so this inexpensive predicate is only an enumeration/preflight
+    filter, never the final authority.
+    """
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError, TypeError):
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare the stable identity fields exposed by Python on POSIX/Windows."""
+    return (
+        left.st_ino != 0
+        and right.st_ino != 0
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+    )
+
+
+def _verify_opened_file(path: str | Path, handle: IO[Any]) -> None:
+    """Raise unless ``handle`` and the current path are one safe file."""
+    opened = os.fstat(handle.fileno())
+    current = os.stat(path)
+    if not (
+        stat.S_ISREG(opened.st_mode)
+        and opened.st_nlink == 1
+        and _same_file_identity(opened, current)
+    ):
+        raise VerifiedFileError
+
+
+@overload
+def open_verified_regular_file(
+    path: str | Path,
+    mode: Literal["rb"] = "rb",
+    *,
+    encoding: None = None,
+    errors: None = None,
+) -> BinaryIO: ...
+
+
+@overload
+def open_verified_regular_file(
+    path: str | Path,
+    mode: Literal["r"],
+    *,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> TextIO: ...
+
+
+def open_verified_regular_file(
+    path: str | Path,
+    mode: str = "rb",
+    *,
+    encoding: str | None = None,
+    errors: str | None = None,
+) -> IO[Any]:
+    """Open a single-link regular file and verify the handle before reading.
+
+    The security decision is made on the already-open handle, not only on a
+    path that is opened again later.  ``fstat`` rejects devices/FIFOs and hard
+    links; a second ``stat`` must name the same file identity, so replacing a
+    checked path before ``open`` cannot redirect the reader silently.  The
+    caller owns the returned handle and normally uses it in a ``with`` block.
+
+    Only read modes are accepted.  Write/create policy remains owned by the
+    sandbox, whose atomicity boundary is documented separately.
+    """
+    if mode not in {"r", "rb"}:
+        raise VerifiedFileModeError
+    handle = open(path, mode, encoding=encoding, errors=errors)
+    try:
+        _verify_opened_file(path, handle)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
 __all__ = [
     "BLOCKED_DIR_NAMES",
     "SECRET_FILE_NAMES",
+    "VerifiedFileError",
+    "VerifiedFileModeError",
     "canonical_path",
     "is_blocked_dir",
     "is_secret_name",
+    "is_single_link_regular_file",
+    "open_verified_regular_file",
     "resolve_within",
 ]

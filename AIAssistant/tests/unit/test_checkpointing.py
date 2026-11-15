@@ -102,6 +102,7 @@ def _settings(**overrides) -> AgentRuntimeSettings:
         checkpoint_backend="memory",
         checkpoint_url="",
         checkpoint_path="",
+        memory_path="Cache/memory.sqlite",
         native_tool_calls=False,
     )
     base.update(overrides)

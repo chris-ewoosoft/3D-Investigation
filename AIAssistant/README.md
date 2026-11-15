@@ -238,7 +238,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 57 Architecture Decision Record (0001–0057)
+├─ Docs/adr/                          # 59 Architecture Decision Record (0001–0059)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -349,12 +349,15 @@ không import `rag`, và `agents/` không import adapter nào — persistence ch
   cửa sổ có giới hạn (512/node) và `p95_latency_by_node()`
   (`observability/metrics.py`) trả về `{node: p95}` — tín hiệu SCORECARD #2 mà
   không cần vòng đi PromQL.
-* **Trace từng node có input/output rõ ràng.** Năm node `agent.plan`,
+* **Trace agent có input/output rõ ràng.** Năm node `agent.plan`,
   `agent.plan_reflect`, `agent.reason`, `agent.tool` và `agent.reflect` dùng
   chung một OpenTelemetry span + LangSmith run cho mỗi lần chạy. LangSmith giữ
   object theo ngữ nghĩa node; OTel ghi cùng payload dưới
   `agent.node.input.*`/`agent.node.output.*`. Dữ liệu được redact trước khi
-  export và preview lớn được giới hạn.
+  export và preview lớn được giới hạn. Cùng contract này áp dụng cho
+  `agent.session`, `agent.llm.completion`, local/A2A tool và `agent.tool_batch`;
+  OTel nhận cùng metadata và output đã enrich (`outcome`, `duration_ms`) như
+  LangSmith, không còn hai context lồng nhau với payload khác nhau.
 * **Context trace vượt biên giới tiến trình.** Ra: `TrustedA2AClient.submit`
   gắn header W3C `traceparent`. Vào: `TraceContextMiddleware` đọc header trên
   mọi request và `attach_inbound_traceparent()` join trace của caller làm remote
@@ -674,7 +677,7 @@ python -m mypy src/ai_assistant
 python -m compileall -q evals src
 $env:PYTHONPATH = "src"
 lint-imports --no-logo
-python -m coverage run -m unittest discover -s tests -p "test_*.py"
+python -m coverage run -m tests.run_suite
 python -m coverage report
 python scripts/mutation_check.py
 python evals/run_rag_framework_eval.py
@@ -685,9 +688,9 @@ lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy stri
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
 một thứ. Theo lần đo ngày 2026-11-15 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 388 statement / 3 176 branch ở baseline ADR 0056/0057, 2 606 test);
-inventory mutation hiện có **313/313** killed, 0 survived, 0 stale trong sandbox
-biệt lập của ADR 0056.
+branch toàn package (11 433 statement / 3 184 branch, 2 631 test);
+inventory mutation hiện có **327/327** killed, 0 survived, 0 stale trong sandbox
+biệt lập của ADR 0056/0058/0059.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
 quyết định *nhìn thấy được*. Từ 2026-10-28, cổng còn có sàn **theo từng file**
@@ -830,8 +833,8 @@ trả về; fast-path 503 vẫn còn nhưng không còn là bảo đảm. Mutant
   `AIAssistant/**` (`run_tool_eval.py` cho envelope tool-call — 16 case gồm
   adversarial: tool bịa, tham số lạ, type không coerce, JSON cụt;
   `run_agentic_eval.py` cho chính sách supervisor + gateway thật — 12 nhóm
-  scenario, 27 scenario/136 case khi cài đủ `a2a-sdk`/LangSmith (case phụ
-  thuộc tuỳ chọn báo *not run* và exit khác 0 khi thiếu), gồm grant
+  scenario, 27 scenario/136 case; A2A là transport nội bộ luôn được kiểm tra,
+  còn case LangSmith tuỳ chọn báo *not run* và exit khác 0 khi thiếu; gồm grant
   dùng-một-lần, rollback/cancel, scope và classification; ADR 0025).
   `run_rag_framework_eval.py` chạy `hybrid_retrieve` thật trên golden set song
   ngữ; RAGAS 0.4.3 chấm ID-based context precision/recall và DeepEval 4.3.3
@@ -862,7 +865,7 @@ accuracy tổng 0.9, accuracy từng slice 0.75 và freshness 0.9. Lần đo
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 57 Architecture Decision Record (0001–0057) |
+| [`Docs/adr/`](Docs/adr/) | 59 Architecture Decision Record (0001–0059) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -927,7 +930,9 @@ Các quyết định trọng yếu, theo thứ tự:
 [0054](Docs/adr/0054-owned-tool-deadlines-and-drain-before-close.md) deadline tool có owner và drain mọi worker trước khi đóng shared store,
 [0055](Docs/adr/0055-runtime-path-parity-web-grounding-hardening-and-shutdown-bounds.md) đồng bộ path runtime, cứng hoá web grounding và chặn đóng worker,
 [0056](Docs/adr/0056-isolated-mutation-workers-and-teardown-ownership.md) cô lập mutation worker và làm rõ quyền sở hữu tài nguyên teardown,
-[0057](Docs/adr/0057-checkpoint-retention-is-a-runtime-contract.md) biến cửa sổ retention checkpoint thành contract runtime fail-closed.
+[0057](Docs/adr/0057-checkpoint-retention-is-a-runtime-contract.md) biến cửa sổ retention checkpoint thành contract runtime fail-closed,
+[0058](Docs/adr/0058-verified-file-handles-and-executable-resource-leak-gate.md) xác minh file handle sau khi mở, chặn hard-link alias và biến resource leak thành gate thực thi được,
+[0059](Docs/adr/0059-close-container-memory-and-concurrency-trust-gaps.md) đóng các lỗ trust của Docker peer, metadata continuation, memory prompt, reload đồng thời, state path, A2A và STM owner.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

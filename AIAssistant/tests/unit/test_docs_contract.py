@@ -117,6 +117,17 @@ class DocumentedCountTests(unittest.TestCase):
         self.assertIn(
             f"MIN_MUTANTS = {mutation_check.MIN_MUTANTS}", current,
         )
+        repository_guide = (ROOT.parent / "AGENTS.md").read_text(encoding="utf-8")
+        latest_adr = len(tuple(ADR_DIR.glob("*.md")))
+        self.assertIn(
+            f"({mutation_check.MIN_MUTANTS} mutants, ADR 0032–{latest_adr:04d})",
+            repository_guide,
+        )
+        for gate in (
+            "Pinned model-in-loop", "Model pins", "Supply chain", "Lock verify",
+            "Lock sync", "Container lock", "Cross-language contract",
+        ):
+            self.assertIn(f"| {gate} |", current)
         workflow = (ROOT.parent / ".github" / "workflows" / "agent-evals.yml").read_text(
             encoding="utf-8",
         )
@@ -140,8 +151,13 @@ class OperationalDocsTests(unittest.TestCase):
         self.assertEqual(environment["AI_STORAGE_KEY_FILE"], "/run/secrets/ai_assistant.key")
         self.assertEqual(environment["AGENT_CHECKPOINT_BACKEND"], "sqlite")
         self.assertEqual(environment["AGENT_CHECKPOINT_REQUIRED"], "1")
+        self.assertEqual(environment["AGENT_MEMORY_PATH"], "/app/data/AIAssistant/Cache/memory.sqlite")
+        self.assertEqual(environment["AI_TRUSTED_LOCAL_PEER_CIDRS"], "172.30.255.1/32")
         self.assertEqual(environment["AGENT_SANDBOX_ENABLED"], "0")
         self.assertIn("127.0.0.1", service["ports"][0])
+        self.assertEqual(service["networks"]["ai_local"]["ipv4_address"], "172.30.255.2")
+        network = payload["networks"]["ai_local"]["ipam"]["config"][0]
+        self.assertEqual(network["gateway"], "172.30.255.1")
         self.assertIn("ai_data:/app/data", service["volumes"])
         self.assertIn("ai_secrets:/run/secrets:ro", service["volumes"])
         self.assertTrue(service["read_only"])

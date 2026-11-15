@@ -605,6 +605,36 @@ class ArchitectureBoundaryTests(unittest.TestCase):
                     violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
         self.assertEqual(violations, [], _format(violations))
 
+    def test_untrusted_filesystem_readers_use_the_verified_handle_gate(self):
+        """Every reader of client/workspace paths opens through one kernel.
+
+        A path-only preflight can be replaced before a second ``open`` and a
+        hard link has no target spelling for ``realpath`` to expose. These
+        modules therefore may not call the builtin ``open`` directly; the
+        shared handle gate performs ``fstat`` and file-identity checks.
+        Third-party parser calls such as ``pdfplumber.open`` are allowed
+        because they receive an already-verified handle.
+        """
+        readers = (
+            "adapters/http/chat_routes.py",
+            "image_utils.py",
+            "rag/loaders.py",
+            "tools/lsp_client.py",
+            "tools/builtin/code_tools.py",
+            "tools/builtin/file_tools.py",
+            "tools/builtin/search_tools.py",
+            "tools/builtin/system_tools.py",
+        )
+        violations: list[str] = []
+        for relative in readers:
+            path = PACKAGE / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id == "open":
+                        violations.append(f"{relative}:{node.lineno}")
+        self.assertEqual(violations, [], "direct unverified reads: " + ", ".join(violations))
+
     def test_the_orchestration_package_init_stays_framework_free(self):
         """Importing ``ai_assistant.orchestration`` must not pull the graph.
 

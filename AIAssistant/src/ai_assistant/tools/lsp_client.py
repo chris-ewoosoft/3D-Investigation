@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from ai_assistant.config.paths import get_paths
 from ai_assistant.exec_policy import resolve_tool_binary
-from ai_assistant.path_policy import resolve_within
+from ai_assistant.path_policy import open_verified_regular_file, resolve_within
 from ai_assistant.settings import lsp_binaries
 
 _CPP_EXTS = {".cpp", ".c", ".h", ".hpp", ".cc", ".cxx"}
@@ -175,11 +176,15 @@ def _lsp_call(
     project_dir = _get_project_dir()
     proc: subprocess.Popen[bytes] | None = None
     try:
+        extra_kwargs: dict[str, Any] = {}
+        if sys.platform == 'win32':
+            extra_kwargs['creationflags'] = 0x08000000
         proc = subprocess.Popen(
             [resolved_bin, *server_args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            **extra_kwargs,
         )
 
         init_params = {
@@ -198,7 +203,9 @@ def _lsp_call(
         proc.stdin.flush()  # type: ignore[union-attr]
 
         try:
-            with open(abs_path, encoding="utf-8", errors="replace") as f:
+            with open_verified_regular_file(
+                abs_path, "r", encoding="utf-8", errors="replace",
+            ) as f:
                 doc_text = f.read()
         except OSError as e:
             return {"error": f"Could not read {abs_path}: {e}"}

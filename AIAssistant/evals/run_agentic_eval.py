@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 # root alone leaves ``ai_assistant`` unimportable.
 sys.path.insert(0, str(ROOT / "src"))
 
+# A2A is built in (ADR 0059), so an import failure is a hard eval failure rather
+# than an optional-dependency skip.
+from ai_assistant.adapters.a2a_protocol import A2ARouter, AgentCard, build_agent_card
 from ai_assistant.application.approvals import InMemoryApprovalGrantStore
 from ai_assistant.application.tools import ToolExecutionService
 from ai_assistant.domain.memory import format_memory_block, recall_rank
@@ -40,18 +43,10 @@ from ai_assistant.orchestration.supervisor import (
     verify_result,
 )
 
-# A2A and LangSmith imports — guarded so the eval runs even without them.
-# A guard must not mean *silence*: the three cases below record why they could
-# not run, and ``main`` exits non-zero when any of them is skipped, so a green
-# run can never come from an unchecked case (the failure mode this repo keeps
-# deleting under ADR 0015).
-try:
-    from ai_assistant.adapters.a2a_protocol import A2ARouter, AgentCard, build_agent_card
-    _a2a_eval_ok = True
-    _a2a_import_error = ""
-except ImportError as exc:
-    _a2a_eval_ok = False
-    _a2a_import_error = str(exc)
+# Keep the status attributes because the docs contract reports the combined
+# A2A/LangSmith readiness state.
+_a2a_eval_ok = True
+_a2a_import_error = ""
 
 try:
     from ai_assistant.observability import langsmith_available, langsmith_trace, span

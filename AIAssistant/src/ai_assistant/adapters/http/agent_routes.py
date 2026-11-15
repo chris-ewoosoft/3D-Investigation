@@ -163,7 +163,7 @@ def _stream_langgraph_execution(
     return StreamingResponse(
         _sse_events(events, on_disconnect),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "close"},
     )
 
 

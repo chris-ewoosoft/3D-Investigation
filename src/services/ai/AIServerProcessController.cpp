@@ -10,6 +10,16 @@
 #include <QRandomGenerator>
 #include <QStandardPaths>
 
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <utility>
 
 namespace {
@@ -37,6 +47,11 @@ AIServerProcessController::AIServerProcessController(ILanguageService *lang,
     , m_accessToken(createAccessToken())
     , m_process(new QProcess(this))
 {
+#if defined(Q_OS_WIN)
+    m_process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+        args->flags |= CREATE_NO_WINDOW;
+    });
+#endif
     // Bounded fallback for a wrapper that ignores terminate(): armed by
     // requestStop(), disarmed in onFinished().
     m_killTimer.setSingleShot(true);

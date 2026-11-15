@@ -342,7 +342,10 @@ void AIAssistant::processNextQueuedRequest() {
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     const bool streamsResponse = !request.isAgent ||
         (!request.isApproval && !request.isUiActionAck);
-    if (streamsResponse) req.setRawHeader("Accept", "text/event-stream");
+    if (streamsResponse) {
+        req.setRawHeader("Accept", "text/event-stream");
+        req.setRawHeader("Connection", "close");
+    }
     authorizeRequest(req);
     const int timeoutMs = (m_currentModelIndex == AppConstants::AIAssistant::VISION_MODEL_INDEX)
         ? AppConstants::AIServer::VISION_INFERENCE_TIMEOUT_MS
@@ -895,16 +898,19 @@ void AIAssistant::onReplyFinished(QNetworkReply* reply) {
             !streamed) {
             request.retryCount++;
             m_requests.prepend(request);
-            m_serverReadyEmitted = false;
 
-            if (!m_server.isRunning()) {
-                m_server.start(m_currentModelIndex);
-            }
-
-            m_isThinking = true;
-            emit historyChanged();
             clearStreamState(reply);
             reply->deleteLater();
+
+            if (!m_server.isRunning()) {
+                m_serverReadyEmitted = false;
+                m_server.start(m_currentModelIndex);
+            } else {
+                processNextQueuedRequest();
+            }
+
+            m_isThinking = hasPendingWork();
+            emit historyChanged();
             return;
         }
 

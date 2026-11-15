@@ -107,7 +107,7 @@ jobs:
         # statements *and* branches (Oct 2026, ADR 0016), so any single
         # uncovered line or partial branch turns the job red.
         run: |
-          python -m coverage run -m unittest discover -s tests -p "test_*.py"
+          python -m coverage run -m tests.run_suite
           python -m coverage report
 
       - name: Static analysis — import-linter architecture contracts
@@ -166,7 +166,7 @@ jobs:
       - name: Run test suite with coverage gate
         working-directory: AIAssistant
         run: |
-          python -m coverage run -m unittest discover -s tests -p "test_*.py"
+          python -m coverage run -m tests.run_suite
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m coverage report
 

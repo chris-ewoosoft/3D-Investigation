@@ -82,7 +82,11 @@ class TaskService:
                context_id: str | None = None, classification: DataClassification = DataClassification.INTERNAL,
                *, owner: str = "default") -> AgentTask:
         self._ensure_open()
-        task = AgentTask.new(capability, message, context_id=context_id, metadata=dict(metadata or {}),
+        public_metadata = {
+            str(key): value for key, value in (metadata or {}).items()
+            if not str(key).startswith("agent_run.")
+        }
+        task = AgentTask.new(capability, message, context_id=context_id, metadata=public_metadata,
                              classification=classification, owner=owner)
         if capability not in self._capabilities:
             task = task.transition(TaskStatus.REJECTED, error=f"Unsupported capability: {capability}")

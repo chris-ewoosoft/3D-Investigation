@@ -21,6 +21,15 @@
 #include <QFutureWatcher>
 #include <QMenu>
 #include <QProcess>
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 #include <QUrl>
 #include <QFile>
 #include <QDockWidget>
@@ -475,6 +484,11 @@ void AIProcessorPlugin::onViewCharts() {
   }
 
   m_tensorboardProcess = new QProcess(this);
+#if defined(Q_OS_WIN)
+  m_tensorboardProcess->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *args) {
+      args->flags |= CREATE_NO_WINDOW;
+  });
+#endif
   m_tensorboardProcess->setWorkingDirectory(aiComputerVisionDir);
   m_tensorboardProcess->setProcessChannelMode(QProcess::MergedChannels);
   m_tensorboardProcess->start("python", {"-m", "tensorboard.main", "--logdir", runsDir,

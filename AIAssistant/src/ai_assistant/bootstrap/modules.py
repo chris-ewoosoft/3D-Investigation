@@ -71,6 +71,7 @@ class LlmModule:
         # reload waits for every lease before swapping the backend. New leases
         # wait while a reload is in progress, so a run sees one model end to end.
         self._model_condition = threading.Condition()
+        self._reload_lock = threading.Lock()
         self._active_leases = 0
         self._reloading = False
 
@@ -91,16 +92,17 @@ class LlmModule:
     @contextmanager
     def model_reload(self) -> Iterator[None]:
         """Wait for active runs, block new leases, then swap the model."""
-        with self._model_condition:
-            self._reloading = True
-            while self._active_leases:
-                self._model_condition.wait()
-        try:
-            yield
-        finally:
+        with self._reload_lock:
             with self._model_condition:
-                self._reloading = False
-                self._model_condition.notify_all()
+                self._reloading = True
+                while self._active_leases:
+                    self._model_condition.wait()
+            try:
+                yield
+            finally:
+                with self._model_condition:
+                    self._reloading = False
+                    self._model_condition.notify_all()
 
     def _require_reload_window(self) -> None:
         """Refuse a backend swap outside :meth:`model_reload`.

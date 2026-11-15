@@ -95,11 +95,11 @@ class BoundedShortTermMemory:
             session.owner = owner
             self._evict_locked(owner)
 
-    def recent(self, session_id: str) -> list[dict[str, str]]:
-        """A copy of the remembered window (``[]`` for an unknown session)."""
+    def recent(self, session_id: str, *, owner: str = "") -> list[dict[str, str]]:
+        """Return a copy only when both the session id and owner match."""
         with self._lock:
             session = self._sessions.get(session_id)
-            if session is None:
+            if session is None or session.owner != owner:
                 return []
             return [dict(m) for m in session.messages]
 

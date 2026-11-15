@@ -1,7 +1,6 @@
 """Targeted coverage for remaining bootstrap/server.py and config/logging.py gaps."""
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import unittest
@@ -40,69 +39,47 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
         self.assertEqual(s._resolve_model_idx(["server.py", "0"], models), 0)
         self.assertIn(s._resolve_model_idx(["server.py", "1"], models), (0, 1))
 
-    def test_memory_store_path_honors_explicit_and_legacy_paths(self) -> None:
+    def test_memory_store_path_is_independent_of_cwd_and_test_path_names(self) -> None:
         from ai_assistant.bootstrap import server as s
 
-        with tempfile.TemporaryDirectory(dir=".") as directory:
-            root = Path(directory)
-            relative_root = Path(root.name)
+        with tempfile.TemporaryDirectory(prefix="Template-pytest-") as directory:
+            data = Path(directory) / "AIAssistant"
+            paths = MagicMock(data_dir=data)
+            configured = MagicMock(memory_path="Cache/memory.sqlite")
+            with (
+                patch("ai_assistant.config.paths.get_paths", return_value=paths),
+                patch("ai_assistant.settings.load_agent_runtime_settings", return_value=configured),
+                patch.object(Path, "cwd", return_value=Path("Z:/unrelated/cwd")),
+            ):
+                self.assertEqual(
+                    Path(s._memory_store_path()),
+                    data / "Cache" / "memory.sqlite",
+                )
 
-            absolute = root.resolve() / "absolute.sqlite"
-            with patch.dict(
-                os.environ,
-                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(absolute)},
+    def test_memory_store_path_accepts_explicit_absolute_and_legacy_prefix(self) -> None:
+        from ai_assistant.bootstrap import server as s
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "AIAssistant"
+            paths = MagicMock(data_dir=data)
+            absolute = root / "absolute.sqlite"
+            with (
+                patch("ai_assistant.config.paths.get_paths", return_value=paths),
+                patch(
+                    "ai_assistant.settings.load_agent_runtime_settings",
+                    return_value=MagicMock(memory_path=str(absolute)),
+                ),
             ):
                 self.assertEqual(Path(s._memory_store_path()), absolute)
-            self.assertTrue(absolute.parent.is_dir())
-
-            existing = relative_root / "existing.sql"
-            existing.write_text("", encoding="utf-8")
-            explicit = (
-                Path("AIAssistant") / existing
-                if Path.cwd().name == "AIAssistant"
-                else existing
-            )
-            with patch.dict(
-                os.environ,
-                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(explicit)},
+            with (
+                patch("ai_assistant.config.paths.get_paths", return_value=paths),
+                patch(
+                    "ai_assistant.settings.load_agent_runtime_settings",
+                    return_value=MagicMock(memory_path="AIAssistant/Cache/memory.sql"),
+                ),
             ):
-                self.assertEqual(Path(s._memory_store_path()), existing)
-
-            sql_path = relative_root / "from-sql.sql"
-            sql_path.write_text("", encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                {
-                    "APP_DATA_DIR": "",
-                    "AGENT_MEMORY_PATH": str(sql_path.with_suffix(".sqlite")),
-                },
-            ):
-                self.assertEqual(Path(s._memory_store_path()), sql_path)
-
-            sqlite_path = relative_root / "from-sqlite.sqlite"
-            sqlite_path.write_text("", encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                {
-                    "APP_DATA_DIR": "",
-                    "AGENT_MEMORY_PATH": str(sqlite_path.with_suffix(".sql")),
-                },
-            ):
-                self.assertEqual(Path(s._memory_store_path()), sqlite_path)
-
-            missing = relative_root / "missing.db"
-            with patch.dict(
-                os.environ,
-                {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": str(missing)},
-            ):
-                self.assertEqual(Path(s._memory_store_path()), missing)
-
-        with (
-            patch.dict(os.environ, {"APP_DATA_DIR": "", "AGENT_MEMORY_PATH": ""}),
-            patch.object(Path, "mkdir") as mkdir,
-        ):
-            self.assertEqual(Path(s._memory_store_path()), Path("Cache/memory.sql"))
-        mkdir.assert_any_call(parents=True, exist_ok=True)
+                self.assertEqual(Path(s._memory_store_path()), data / "Cache" / "memory.sql")
 
     def test_adopt_backend_refuses_a_missing_backend(self) -> None:
         """A failed load must be visible, not leave the old model advertised."""
@@ -178,6 +155,52 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
         self.assertFalse(lease_entered.wait(0.1), "a lease entered during a reload")
         release_reload.set()
         swapper.join(2)
+        self.assertTrue(lease_entered.wait(2))
+        leaser.join(2)
+
+    def test_reload_windows_are_mutually_exclusive(self) -> None:
+        """One finisher cannot reopen leases while another reload is active."""
+        import threading
+
+        from ai_assistant.bootstrap.modules import LlmModule
+
+        module = LlmModule(registry=MagicMock(), paths=MagicMock(), model_idx=0,
+                           use_vision_llm=False)
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        release_second = threading.Event()
+        lease_entered = threading.Event()
+
+        def first_reload() -> None:
+            with module.model_reload():
+                first_entered.set()
+                release_first.wait(5)
+
+        def second_reload() -> None:
+            with module.model_reload():
+                second_entered.set()
+                release_second.wait(5)
+
+        first = threading.Thread(target=first_reload)
+        second = threading.Thread(target=second_reload)
+        first.start()
+        self.assertTrue(first_entered.wait(2))
+        second.start()
+        self.assertFalse(second_entered.wait(0.1), "reload windows overlapped")
+        release_first.set()
+        first.join(2)
+        self.assertTrue(second_entered.wait(2))
+
+        def take_lease() -> None:
+            with module.model_lease():
+                lease_entered.set()
+
+        leaser = threading.Thread(target=take_lease)
+        leaser.start()
+        self.assertFalse(lease_entered.wait(0.1), "a lease entered during the second reload")
+        release_second.set()
+        second.join(2)
         self.assertTrue(lease_entered.wait(2))
         leaser.join(2)
 

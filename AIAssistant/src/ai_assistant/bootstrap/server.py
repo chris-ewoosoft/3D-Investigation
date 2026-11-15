@@ -319,45 +319,23 @@ def _memory_store_path() -> str:
     Same rule as the pending-action file: the path is a composition-root
     decision, the agent layer only ever sees the injected port.
     """
-    import os
-
     from ai_assistant.config.paths import get_paths
+    from ai_assistant.settings import load_agent_runtime_settings
 
     paths = get_paths()
-    app_data = os.environ.get("APP_DATA_DIR", "").strip()
-
-    # Test isolation: when APP_DATA_DIR points to a temporary test directory
-    # (e.g. test_composition_root_bootstrap), isolate memory under that test data_root.
-    is_temp_data = bool(app_data and any(m in app_data.lower() for m in ("temp", "tmp", "pytest")))
-    if is_temp_data:
-        data_root = paths.data_dir if paths.data_dir.name == "AIAssistant" else paths.data_dir / "AIAssistant"
-        return str(data_root / "memory.sqlite")
-
-    env_path = os.environ.get("AGENT_MEMORY_PATH", "").strip()
-    if not env_path:
-        env_path = "Cache/memory.sql"
-
-    p = Path(env_path)
-    if p.is_absolute():
-        p.parent.mkdir(parents=True, exist_ok=True)
-        return str(p)
-
-    cwd = Path.cwd()
-    parts = p.parts
-
-    # If CWD is already AIAssistant and path also starts with AIAssistant:
-    if cwd.name == "AIAssistant" and len(parts) > 1 and parts[0] == "AIAssistant":
-        resolved = Path(*parts[1:])
+    configured = Path(load_agent_runtime_settings().memory_path)
+    data_root = (
+        paths.data_dir
+        if paths.data_dir.name.casefold() == "aiassistant"
+        else paths.data_dir / "AIAssistant"
+    )
+    if configured.is_absolute():
+        resolved = configured
     else:
-        resolved = p
-
-    # Check for existing alternate extension (.sql vs .sqlite)
-    if not resolved.exists():
-        if resolved.suffix == ".sqlite" and resolved.with_suffix(".sql").exists():
-            resolved = resolved.with_suffix(".sql")
-        elif resolved.suffix == ".sql" and resolved.with_suffix(".sqlite").exists():
-            resolved = resolved.with_suffix(".sqlite")
-
+        parts = configured.parts
+        if parts and parts[0].casefold() == "aiassistant":
+            configured = Path(*parts[1:])
+        resolved = data_root / configured
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return str(resolved)
 

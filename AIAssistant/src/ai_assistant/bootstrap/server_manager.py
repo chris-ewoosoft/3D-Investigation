@@ -168,10 +168,11 @@ def _detached_popen_kwargs() -> dict[str, object]:
     ``creationflags`` is Windows-only: passing a non-zero value on POSIX makes
     ``Popen`` raise ``ValueError``, so the flag set is chosen per platform.
     POSIX gets ``start_new_session`` for the equivalent "survive the parent
-    exiting" behaviour.
+    exiting" behaviour. On Windows we also specify CREATE_NO_WINDOW (0x08000000)
+    to prevent console windows from popping up.
     """
     if sys.platform == "win32":
-        return {"creationflags": 0x00000008 | 0x00000200}  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        return {"creationflags": 0x00000008 | 0x00000200 | 0x08000000}  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
     return {"start_new_session": True}
 
 
@@ -183,6 +184,7 @@ def find_pid_on_port(port: int = PORT) -> int | None:
                 ["netstat", "-ano", "-p", "tcp"],
                 text=True,
                 errors="replace",
+                creationflags=0x08000000,
             )
             for line in out.splitlines():
                 parts = line.strip().split()
@@ -217,7 +219,12 @@ def kill_process_on_port(port: int = PORT) -> bool:
         return False
     try:
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                capture_output=True,
+                check=False,
+                creationflags=0x08000000,
+            )
         else:
             import signal
 

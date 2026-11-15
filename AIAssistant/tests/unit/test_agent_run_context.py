@@ -86,7 +86,7 @@ class AgentRunContextWiringTests(unittest.TestCase):
         for name in (
             "delegate_fn", "authorise_delegation_fn", "audit_agent_fn", "verify_result_fn",
             "reflect_result_fn", "is_coding_task_fn",
-            "record_tool_fn", "record_schema_error_fn", "langsmith_trace_fn", "span_fn",
+            "record_tool_fn", "record_schema_error_fn", "span_fn",
             "backend_mode_fn", "openai_compatible_fn", "record_token_usage_fn",
         ):
             self.assertTrue(callable(getattr(deps, name)), f"{name} must be callable")

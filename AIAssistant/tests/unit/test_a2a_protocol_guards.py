@@ -1,24 +1,12 @@
 """Guard-path coverage for the A2A protocol adapter's local-only edges.
 
-Three seams here have no runtime test: ``AgentSkill.__repr__`` (the debugging
-aid a reviewer actually reads when a card looks wrong), the module-scope
-``a2a-sdk`` probe (it runs exactly once at import, so the ``ImportError`` arm
-is invisible unless the module is re-imported with the SDK masked) and the
-registry lookup behind the supervisor's injected port (ADR 0002).
-
-The probe tests reload ``a2a_protocol`` on purpose: reloading re-executes the
-real ``try``/``except`` block against a controlled ``sys.modules``. Because a
-reload also rebinds the module's classes, every test that reloads restores the
-whole captured module dictionary afterwards — otherwise ``isinstance`` checks
-in unrelated tests would compare against a stale class object.
+These tests pin ``AgentSkill.__repr__`` (the debugging aid a reviewer reads
+when a card looks wrong) and the registry lookup behind the supervisor's
+injected port (ADR 0002).
 """
 from __future__ import annotations
 
-import importlib
 import json
-import os
-import sys
-import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -33,42 +21,6 @@ from ai_assistant.adapters.a2a_protocol import (
     build_agent_card,
 )
 
-# Captured before any test reloads the module; used to put it back exactly as
-# it was found, class objects and mutable registry included.
-_MODULE_STATE = dict(a2a_protocol.__dict__)
-
-
-def _install_fake_a2a() -> None:
-    """Put a minimal ``a2a`` package in ``sys.modules`` so the probe succeeds."""
-    package = types.ModuleType("a2a")
-    types_module = types.ModuleType("a2a.types")
-    types_module.AgentCard = object
-    package.types = types_module
-    sys.modules["a2a"] = package
-    sys.modules["a2a.types"] = types_module
-
-
-def _remove_fake_a2a() -> None:
-    sys.modules.pop("a2a.types", None)
-    sys.modules.pop("a2a", None)
-
-
-class _ReloadableAdapterTest(unittest.TestCase):
-    """Base class: run with the SDK probe enabled, restore the module after."""
-
-    def setUp(self) -> None:
-        self._saved_enabled = os.environ.get("A2A_ENABLED")
-        os.environ["A2A_ENABLED"] = "1"
-
-    def tearDown(self) -> None:
-        if self._saved_enabled is None:
-            os.environ.pop("A2A_ENABLED", None)
-        else:
-            os.environ["A2A_ENABLED"] = self._saved_enabled
-        _remove_fake_a2a()
-        a2a_protocol.__dict__.clear()
-        a2a_protocol.__dict__.update(_MODULE_STATE)
-
 
 class AgentSkillTests(unittest.TestCase):
     def test_repr_shows_the_identity_not_the_body(self):
@@ -80,44 +32,10 @@ class AgentSkillTests(unittest.TestCase):
         self.assertEqual(skill.tags, [])
 
 
-class SdkProbeTests(_ReloadableAdapterTest):
-    """Re-run the import-time probe under both installation states."""
-
-    def test_the_probe_marks_the_transport_available_when_the_sdk_imports(self):
-        _install_fake_a2a()
-        importlib.reload(a2a_protocol)
-        self.assertTrue(a2a_protocol.a2a_available())
-        self.assertTrue(a2a_protocol._sdk_available)
-
-    def test_the_probe_falls_back_to_local_only_mode_when_the_sdk_is_missing(self):
-        _remove_fake_a2a()
-        importlib.reload(a2a_protocol)
-        self.assertFalse(a2a_protocol.a2a_available())
-        self.assertFalse(a2a_protocol._sdk_available)
-
-    def test_the_probe_is_skipped_when_a2a_is_disabled(self):
-        _install_fake_a2a()
-        importlib.reload(a2a_protocol)
-        with patch.object(a2a_protocol, "a2a_enabled", return_value=False):
-            self.assertFalse(a2a_protocol._sdk_present())
-        self.assertFalse(a2a_protocol._sdk_available)
-
-    def test_the_probe_result_is_cached_after_the_first_call(self):
-        _install_fake_a2a()
-        importlib.reload(a2a_protocol)
-        self.assertTrue(a2a_protocol._sdk_present())
-        # Second call takes the cached branch and must not re-import.
-        with patch.object(a2a_protocol, "a2a_enabled", return_value=True):
-            self.assertTrue(a2a_protocol._sdk_present())
-
-
-class RemoteSpecialistLookupTests(_ReloadableAdapterTest):
+class RemoteSpecialistLookupTests(unittest.TestCase):
     """The composition root's resolver returns a URL only for an advertised skill."""
 
     def setUp(self) -> None:
-        super().setUp()
-        _install_fake_a2a()
-        importlib.reload(a2a_protocol)
         self.registry = a2a_protocol.RemoteAgentRegistry(bearer_token="peer-token")
 
     def test_a_discovered_advertisement_resolves_to_its_endpoint(self):
@@ -135,11 +53,6 @@ class RemoteSpecialistLookupTests(_ReloadableAdapterTest):
 
     def test_an_empty_registry_delegates_locally(self):
         self.assertIsNone(self.registry.resolve("chatbot"))
-
-    def test_resolution_is_disabled_with_the_transport(self):
-        self.registry._agents["http://remote.test/a2a"] = SimpleNamespace(skills=["chatbot"])
-        with patch.object(a2a_protocol, "a2a_available", return_value=False):
-            self.assertIsNone(self.registry.resolve("chatbot"))
 
     def test_find_returns_the_agent_not_only_its_url(self):
         agent = SimpleNamespace(skills=["code"])

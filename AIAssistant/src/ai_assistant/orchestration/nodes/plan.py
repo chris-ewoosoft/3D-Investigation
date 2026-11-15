@@ -64,7 +64,8 @@ def _reuse_prior_plan(state: AgentState) -> dict[str, Any] | None:
         return {
             "plan": plan,
             "plan_spec": plan_spec,
-            "plan_verified": True,
+            # A remembered plan is data, not current-run critic evidence.
+            "plan_verified": False,
             "steps": steps,
             "plan_attempts": state.get("plan_attempts", 0) + 1,
             "plan_feedback": "",

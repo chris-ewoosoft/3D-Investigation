@@ -6,9 +6,11 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
+from typing import Any, cast
 
 from ai_assistant.config.paths import safe_relpath
 from ai_assistant.image_utils import is_image_file
+from ai_assistant.path_policy import open_verified_regular_file
 
 from .domain import ChunkResult
 
@@ -84,7 +86,7 @@ class BaseDocumentLoader(ABC):
     def _read_text_file(self, filepath: str) -> str | None:
         for enc in ("utf-8", "utf-16", "cp1252", "latin-1"):
             try:
-                with open(filepath, "r", encoding=enc) as f:
+                with open_verified_regular_file(filepath, "r", encoding=enc) as f:
                     return f.read()
             except (UnicodeDecodeError, ValueError):
                 continue
@@ -95,7 +97,8 @@ class DocxLoader(BaseDocumentLoader):
     def can_handle(self, fp: str) -> bool: return fp.lower().endswith(".docx")
     def load(self, fp: str, project_dir: str) -> list[ChunkResult]:
         from docx import Document
-        doc = Document(fp)
+        with open_verified_regular_file(fp, "rb") as handle:
+            doc = Document(handle)
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
         return self._sliding_window_chunks(text, fp, project_dir, label="Tai lieu")
 
@@ -112,7 +115,9 @@ class PdfLoader(BaseDocumentLoader):
     def _extract_pdf_text(self, fp: str) -> str:
         try:
             import pdfplumber
-            with pdfplumber.open(fp) as pdf:
+            with open_verified_regular_file(fp, "rb") as handle, pdfplumber.open(
+                cast(Any, handle),
+            ) as pdf:
                 parts = [pg.extract_text(x_tolerance=2, y_tolerance=2) for pg in pdf.pages]
             text = "\n\n".join(p for p in parts if p).strip()
             if len(text) > 100:
@@ -121,7 +126,8 @@ class PdfLoader(BaseDocumentLoader):
             logger.warning("pdfplumber failed %s: %s", fp, e)
         try:
             from pdfminer.high_level import extract_text
-            text = extract_text(fp)
+            with open_verified_regular_file(fp, "rb") as handle:
+                text = extract_text(cast(Any, handle))
             if text and len(text.strip()) > 100:
                 return text.strip()
         except Exception as e:
@@ -145,7 +151,7 @@ class EmailLoader(BaseDocumentLoader):
         from email import policy
         from email.parser import BytesParser
 
-        with open(fp, "rb") as handle:
+        with open_verified_regular_file(fp, "rb") as handle:
             message = BytesParser(policy=policy.default).parse(handle)
         parts = []
         subject = str(message.get("subject", "")).strip()

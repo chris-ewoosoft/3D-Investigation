@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 from ai_assistant.exec_policy import (
@@ -97,16 +98,28 @@ class SandboxRunTests(unittest.TestCase):
         sub.assert_not_called()
 
     def test_allowed_command_runs_local(self) -> None:
-        with mock.patch(
-            "ai_assistant.tools.sandbox.subprocess.run",
-            return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
-        ) as sub:
-            result = run("python --version", "C:/workspace", 30)
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "linux"):
+            with mock.patch(
+                "ai_assistant.tools.sandbox.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as sub:
+                result = run("python --version", "C:/workspace", 30)
         self.assertEqual(result["return_code"], 0)
         self.assertEqual(result["stdout"], "ok")
         self.assertEqual(sub.call_args.kwargs["cwd"], "C:/workspace")
         self.assertFalse(sub.call_args.kwargs["shell"])
         self.assertEqual(sub.call_args.kwargs["timeout"], 30)
+        self.assertNotIn("creationflags", sub.call_args.kwargs)
+
+    def test_allowed_command_hides_the_console_on_windows(self) -> None:
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "win32"):
+            with mock.patch(
+                "ai_assistant.tools.sandbox.subprocess.run",
+                return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+            ) as sub:
+                result = run("python --version", "C:/workspace", 30)
+        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(sub.call_args.kwargs["creationflags"], 0x08000000)
 
     def test_timeout_returns_error(self) -> None:
         with mock.patch(
@@ -193,16 +206,30 @@ class SandboxRunTests(unittest.TestCase):
         """No docker daemon (or a vanished container) must not mask the timeout."""
         from ai_assistant.tools.sandbox import _force_remove_container
 
-        with mock.patch(
-            "ai_assistant.tools.sandbox.subprocess.run", side_effect=OSError("no docker"),
-        ) as sub:
-            self.assertIsNone(_force_remove_container("agent-sbx-gone"))  # must not raise
-        # The removal really was attempted — the swallow covers its failure,
-        # not a missing call.
-        sub.assert_called_once_with(
-            ["docker", "rm", "-f", "agent-sbx-gone"],
-            capture_output=True, timeout=15, shell=False, check=False,
-        )
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                with mock.patch("ai_assistant.tools.sandbox.sys.platform", platform):
+                    with mock.patch(
+                        "ai_assistant.tools.sandbox.subprocess.run",
+                        side_effect=OSError("no docker"),
+                    ) as sub:
+                        self.assertIsNone(
+                            _force_remove_container("agent-sbx-gone")
+                        )  # must not raise
+                # The removal really was attempted — the swallow covers its
+                # failure, not a missing call.
+                expected_kwargs: dict[str, Any] = {
+                    "capture_output": True,
+                    "timeout": 15,
+                    "shell": False,
+                    "check": False,
+                }
+                if platform == "win32":
+                    expected_kwargs["creationflags"] = 0x08000000
+                sub.assert_called_once_with(
+                    ["docker", "rm", "-f", "agent-sbx-gone"],
+                    **expected_kwargs,
+                )
 
     def test_inline_interpreter_code_is_rejected(self) -> None:
         """``python -c`` / ``-m`` must not turn the allow-list into an RCE."""
@@ -818,6 +845,15 @@ class SandboxWriteFileTests(unittest.TestCase):
                 target = self.root / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
                 result = write_file(str(target), "x", str(self.root))
+                self.assertIn("denied by sandbox policy", result["error"])
+
+    def test_memory_and_checkpoint_databases_and_sidecars_are_denied(self) -> None:
+        for name in (
+            "memory.sql", "memory.sqlite-wal", "memory.db-shm",
+            "checkpoint.sql", "checkpoints.sqlite-journal",
+        ):
+            with self.subTest(name=name):
+                result = write_file(str(self.root / "src" / name), "x", str(self.root))
                 self.assertIn("denied by sandbox policy", result["error"])
 
     def test_the_policy_trees_are_denied(self) -> None:

@@ -31,7 +31,6 @@ from ..domain.parallel import PARALLEL_MAX_DEFAULT
 from ..llm.defaults import CHARS_PER_TOKEN, LLM_N_CTX
 from ..llm.inference import backend_mode, openai_compatible_completion
 from ..observability import (
-    langsmith_trace,
     record_schema_error,
     record_token_usage,
     record_tool,
@@ -194,7 +193,6 @@ class AgentRunContext:
     # ── Observability ─────────────────────────────────────────────────────
     record_tool_fn: Callable[..., None] = record_tool
     record_schema_error_fn: Callable[..., None] = record_schema_error
-    langsmith_trace_fn: Callable[..., Any] = langsmith_trace
     span_fn: Callable[..., Any] = span
 
     #: Fan-out width for one parallel tool group (ADR 0044), clamped by the
@@ -303,7 +301,6 @@ class AgentRunContext:
             reflect_result_fn=self.reflect_result_fn,
             record_tool_fn=self.record_tool_fn,
             record_schema_error_fn=self.record_schema_error_fn,
-            langsmith_trace_fn=self.langsmith_trace_fn,
             span_fn=self.span_fn,
             is_coding_task_fn=self.is_coding_task_fn,
             local_agent_graph=self.local_agent_graph,

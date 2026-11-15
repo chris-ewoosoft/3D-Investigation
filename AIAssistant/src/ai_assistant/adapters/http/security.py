@@ -4,8 +4,9 @@ The desktop server binds to loopback, but binding is a deployment detail and
 must not be the only control.  Every mutating surface therefore fails closed on
 three independent checks:
 
-1. **Peer check** — the socket peer must be loopback unless the deployment
-   explicitly opts the surface into remote access.
+1. **Peer check** — the socket peer must be loopback or belong to an explicit
+   local-transport CIDR (for example one pinned Docker bridge gateway), unless
+   the deployment explicitly opts the surface into remote access.
 2. **Origin check** — a browser-sent ``Origin``/``Referer`` must match the
    configured allow-list, which blocks cross-site request forgery even for
    endpoints that accept ``application/json``.
@@ -13,22 +14,28 @@ three independent checks:
    loopback. The Qt owner generates one 256-bit token per child process and
    sends it on every request; standalone deployments provide their own.
 
-Tokens are read from the child environment. Loopback is still required for
-desktop-only surfaces, but no local process can reach them merely by guessing
-the port.
+Tokens are read from the child environment. A trusted local peer is still
+required for desktop-only surfaces, but no local process can reach them merely
+by guessing the port.
 """
 from __future__ import annotations
 
 import hmac
 from dataclasses import dataclass, field
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ...settings import DEFAULT_HOST, DEFAULT_PORT, a2a_tenants, transport_tokens
+from ...settings import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    a2a_tenants,
+    transport_tokens,
+    trusted_local_peer_cidrs,
+)
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "::1", "127.0.0.1"})
 # The deployment bind plus the dev-server port are implicitly allowed loopback
@@ -46,6 +53,7 @@ class TransportPolicy:
     a2a_token: str = ""
     mcp_token: str = ""
     allow_remote_a2a: bool = False
+    trusted_local_peer_cidrs: tuple[str, ...] = ()
     #: Bearer token → tenant id for the A2A surface. Empty means single-tenant:
     #: the single ``a2a_token`` maps every task to ``"default"``.
     a2a_tenants: dict[str, str] = field(default_factory=dict)
@@ -62,6 +70,7 @@ class TransportPolicy:
             mcp_token=tokens.mcp,
             allow_remote_a2a=allow_remote_a2a,
             a2a_tenants=a2a_tenants(env),
+            trusted_local_peer_cidrs=trusted_local_peer_cidrs(env),
         )
 
 
@@ -80,11 +89,28 @@ def _is_loopback(host: str | None) -> bool:
 def _reject(status_code: int, detail: str) -> NoReturn:
     raise HTTPException(status_code=status_code, detail=detail)
 
-def require_loopback(request: Request, surface: str) -> None:
-    """Reject any peer that is not loopback (403)."""
+def require_local_peer(request: Request, policy: TransportPolicy, surface: str) -> None:
+    """Accept loopback or an explicitly configured local transport peer."""
     peer = request.client.host if request.client else None
-    if not _is_loopback(peer):
-        _reject(403, f"{surface} is restricted to loopback callers")
+    if _is_loopback(peer):
+        return
+    try:
+        address = ip_address(peer or "")
+    except ValueError:
+        address = None
+    if address is not None:
+        for raw_network in policy.trusted_local_peer_cidrs:
+            try:
+                if address in ip_network(raw_network, strict=False):
+                    return
+            except ValueError:
+                continue
+    _reject(403, f"{surface} is restricted to trusted local callers")
+
+
+def require_loopback(request: Request, surface: str) -> None:
+    """Compatibility wrapper for callers that require literal loopback."""
+    require_local_peer(request, TransportPolicy(), surface)
 
 
 def _origin_of(value: str) -> str:
@@ -133,7 +159,7 @@ def _evaluate(request: Request, *, policy: TransportPolicy, surface: str, token:
     if not has_token:
         _reject(503, f"{surface} requires a configured access token")
     if not allow_remote:
-        require_loopback(request, surface)
+        require_local_peer(request, policy, surface)
     if token:
         require_token(request, token, surface)
     require_local_origin(request, policy, surface)
@@ -149,19 +175,19 @@ def _guards(policy: TransportPolicy, *, surface: str, token: str, allow_remote: 
 
 
 def admin_guards(policy: TransportPolicy | None) -> list[Any]:
-    """Destructive management surface: loopback + origin + mandatory bearer."""
+    """Destructive management surface: local peer + origin + mandatory bearer."""
     resolved = policy or TransportPolicy()
     return _guards(resolved, surface="admin", token=resolved.admin_token, allow_remote=False)
 
 
 def agent_guards(policy: TransportPolicy | None) -> list[Any]:
-    """Qt agent surface: loopback + origin + mandatory bearer."""
+    """Qt agent surface: local peer + origin + mandatory bearer."""
     resolved = policy or TransportPolicy()
     return _guards(resolved, surface="agent", token=resolved.agent_token, allow_remote=False)
 
 
 def chat_guards(policy: TransportPolicy | None) -> list[Any]:
-    """Qt completion surface: loopback + origin + mandatory bearer."""
+    """Qt completion surface: local peer + origin + mandatory bearer."""
     resolved = policy or TransportPolicy()
     return _guards(resolved, surface="chat", token=resolved.agent_token, allow_remote=False)
 

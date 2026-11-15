@@ -42,13 +42,15 @@ class ProjectStatusTests(unittest.TestCase):
             return pending[key]
 
         with mock.patch.object(vcs_tools, "get_paths", return_value=SimpleNamespace(project_root=self.root)):
-            with mock.patch.object(vcs_tools.subprocess, "run", side_effect=fake_run):
-                with mock.patch.object(vcs_tools, "resolve_executable", return_value="/usr/bin/git"):
-                    result = vcs_tools.tool_get_project_status({})
+            with mock.patch.object(vcs_tools.sys, "platform", "linux"):
+                with mock.patch.object(vcs_tools.subprocess, "run", side_effect=fake_run) as run:
+                    with mock.patch.object(vcs_tools, "resolve_executable", return_value="/usr/bin/git"):
+                        result = vcs_tools.tool_get_project_status({})
         self.assertEqual(result["source_file_counts"], {".py": 1, ".h": 1})
         self.assertNotIn(".txt", result["source_file_counts"])
         self.assertEqual(result["git_branch"], "main")
         self.assertEqual(result["changed_files"], ["M main.py"])
+        self.assertNotIn("creationflags", run.call_args.kwargs)
 
     def test_git_failure_falls_back_to_empty(self):
         def fake_run(command, **kwargs):
@@ -62,6 +64,14 @@ class ProjectStatusTests(unittest.TestCase):
         self.assertEqual(result["git_branch"], "")
         self.assertEqual(result["changed_files"], [])
         self.assertIn(".py", result["source_file_counts"])
+
+    def test_git_is_started_without_a_console_on_windows(self):
+        completed = _fake_completed()
+        with mock.patch.object(vcs_tools.sys, "platform", "win32"):
+            with mock.patch.object(vcs_tools.subprocess, "run", return_value=completed) as run:
+                with mock.patch.object(vcs_tools, "resolve_executable", return_value="C:/Git/git.exe"):
+                    vcs_tools._run_git(["status"], self.root, 5)
+        self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
 
 
 class GitDiffTests(unittest.TestCase):

@@ -6,6 +6,8 @@ import os
 import re
 from typing import Any
 
+from ai_assistant.path_policy import open_verified_regular_file
+
 from .file_tools import _agent_safe_path
 
 
@@ -20,7 +22,9 @@ def tool_analyze_code(params: dict[str, Any]) -> dict[str, Any]:
 
     ext = os.path.splitext(abs_path)[1].lower()
     try:
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+        with open_verified_regular_file(
+            abs_path, "r", encoding="utf-8", errors="replace",
+        ) as f:
             content = f.read()
     except Exception as e:
         return {"error": f"Lỗi đọc file: {e}"}

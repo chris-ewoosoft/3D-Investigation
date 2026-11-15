@@ -286,6 +286,32 @@ class ParallelBatchRunTests(unittest.TestCase):
                          ["head query", results[1]["result"]["documents"][0]])
         self.assertNotIn("error", results[0]["result"])
 
+    def test_the_batch_uses_one_trace_payload_for_both_backends(self) -> None:
+        recorded: dict[str, Any] = {}
+
+        class _Trace:
+            def __enter__(self):
+                recorded["context"] = {"outputs": {}}
+                return recorded["context"]
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def _span(name: str, **kwargs: Any) -> _Trace:
+            recorded["name"] = name
+            recorded["kwargs"] = kwargs
+            return _Trace()
+
+        with patch.object(tool_module, "span", _span):
+            tool_node(_group_state(), _ctx())
+
+        self.assertEqual(recorded["name"], "agent.tool_batch")
+        self.assertEqual(recorded["kwargs"]["trace_inputs"]["branches"], 2)
+        self.assertEqual(recorded["kwargs"]["trace_inputs"]["calls"],
+                         ["rag_search", "rag_search"])
+        self.assertEqual(recorded["context"]["outputs"]["failed_branches"], 0)
+        self.assertEqual(len(recorded["context"]["outputs"]["result_summaries"]), 2)
+
     def test_the_pool_width_is_bounded_by_the_setting_and_the_group(self) -> None:
         with patch.object(tool_module, "ThreadPoolExecutor", _RecordingPool):
             tool_node(_group_state(), _ctx(max_parallel=8))

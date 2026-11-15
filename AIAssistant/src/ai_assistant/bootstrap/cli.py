@@ -51,6 +51,7 @@ def main() -> None:
     uvicorn_server = uvicorn.Server(uvicorn.Config(
         server.app, host=server.agent_bind_host(), port=server.agent_bind_port(),
         log_config=None, access_log=False, timeout_graceful_shutdown=10,
+        timeout_keep_alive=30,
     ))
     threading.Thread(
         target=server._stop_server_when_requested,

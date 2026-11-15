@@ -26,7 +26,6 @@ from ai_assistant.domain.security import DataClassification
 from ai_assistant.domain.specialists import Specialist
 from ai_assistant.settings import (
     DEFAULT_BASE_URL,
-    a2a_enabled,
     a2a_trusted_endpoints,
 )
 
@@ -50,10 +49,8 @@ urlopen = _no_redirect_urlopen
 
 # ── A2A configuration (ADR 0001) ─────────────────────────────────────────────
 #
-# Nothing here is read at import time: ``a2a_enabled()`` and
-# ``a2a_trusted_endpoints()`` are consulted when the transport is actually
-# used, so importing this adapter never freezes the process environment and
-# tests can reconfigure A2A without reloading the module.
+# Nothing here is read at import time. The composition profile owns whether
+# A2A is mounted; trusted endpoints are consulted only when transport is used.
 
 # ── Remote Agent ─────────────────────────────────────────────────────────────
 
@@ -102,8 +99,6 @@ class RemoteAgentRegistry:
 
     def resolve(self, specialist_id: str) -> str | None:
         """Return the endpoint advertising ``specialist_id``, or ``None``."""
-        if not a2a_available():
-            return None
         with self._lock:
             items = list(self._agents.items())
         for url, agent in items:
@@ -279,13 +274,6 @@ class A2ARouter:
     def route(self, specialist_id: str, task: str,
               params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Attempt remote A2A dispatch and return its explicit outcome."""
-        if not a2a_available():
-            return {
-                "source": "remote",
-                "status": "unavailable",
-                "error": "A2A transport is disabled or unavailable",
-            }
-
         remote = self.find_remote(specialist_id)
         if remote is None:
             return {
@@ -338,37 +326,11 @@ class A2ARouter:
         return outcome
 
 
-# ── Optional SDK import ──────────────────────────────────────────────────────
-
-#: ``None`` = not probed yet, ``True``/``False`` = cached result. The SDK cannot
-#: appear at runtime, so one probe per process is enough; keeping it lazy means
-#: importing this adapter has no configuration-dependent side effects.
-_sdk_available: bool | None = None
-_sdk_probe_lock = threading.Lock()
-
-
-def _sdk_present() -> bool:
-    """Import-probe the optional ``a2a`` SDK once, on first use."""
-    global _sdk_available
-    with _sdk_probe_lock:
-        if _sdk_available is None:
-            if not a2a_enabled():
-                _sdk_available = False
-            else:
-                try:
-                    from a2a.types import AgentCard as _SdkAgentCard  # noqa: F401
-                except ImportError:
-                    logger.info("a2a-sdk not installed — A2A layer operates in local-only mode")
-                    _sdk_available = False
-                else:
-                    logger.info("a2a-sdk loaded successfully")
-                    _sdk_available = True
-        return _sdk_available
-
+# ── Compatibility probe ───────────────────────────────────────────────────
 
 def a2a_available() -> bool:
-    """Return True when the A2A transport can be used."""
-    return a2a_enabled() and _sdk_present()
+    """The shipped A2A transport is available without an optional SDK."""
+    return True
 
 
 # NOTE (ADR 0013): this module used to carry its own ``_text_message`` /

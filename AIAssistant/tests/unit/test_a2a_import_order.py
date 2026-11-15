@@ -20,7 +20,6 @@ import ast
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -100,8 +99,7 @@ class OrchestrationDoesNotImportAdaptersTest(unittest.TestCase):
         """``RemoteAgentRegistry.resolve`` satisfies the supervisor's port shape."""
         registry = a2a_protocol.RemoteAgentRegistry()
         self.assertTrue(callable(registry.resolve))
-        with patch.object(a2a_protocol, "a2a_available", return_value=False):
-            self.assertIsNone(registry.resolve("code"))
+        self.assertIsNone(registry.resolve("code"))
 
     def test_agent_service_exposes_the_injected_delegate_to_the_run_context(self) -> None:
         """A facade built without wiring keeps the local default; an injected

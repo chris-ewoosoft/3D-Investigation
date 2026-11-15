@@ -269,6 +269,8 @@ def span(
                 trace_span.set_attribute(key, value)
         if trace_inputs is not None:
             _set_trace_payload_attributes(trace_span, "agent.node.input", trace_inputs)
+        if trace_metadata is not None:
+            _set_trace_payload_attributes(trace_span, "agent.node.metadata", trace_metadata)
 
     langsmith_inputs = trace_inputs if trace_inputs is not None else {"attributes": attributes}
     langsmith_metadata = trace_metadata if trace_metadata is not None else attributes
@@ -293,15 +295,15 @@ def span(
         outputs = context.get("outputs", {})
         if not isinstance(outputs, dict):
             outputs = {"value": outputs}
+        run_outputs = dict(outputs)
+        run_outputs["outcome"] = outcome
+        run_outputs.setdefault("duration_ms", round(elapsed * 1000))
         if trace_span is not None and trace_inputs is not None:
-            _set_trace_payload_attributes(trace_span, "agent.node.output", outputs)
+            _set_trace_payload_attributes(trace_span, "agent.node.output", run_outputs)
         if trace_cm:
             trace_cm.__exit__(type(error) if error else None, error,
                               error.__traceback__ if error else None)
         if run_id:
-            run_outputs = dict(outputs)
-            run_outputs["outcome"] = outcome
-            run_outputs["duration_ms"] = round(elapsed * 1000)
             finish_langsmith_run(run_id, run_outputs, error)
         if token is not None:
             _active_langsmith_run.reset(token)

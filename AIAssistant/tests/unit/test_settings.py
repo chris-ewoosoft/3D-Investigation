@@ -21,7 +21,6 @@ from ai_assistant.settings import (
     ArchitectureSettings,
     a2a_card_name,
     a2a_card_url,
-    a2a_enabled,
     a2a_max_subscribers,
     a2a_outbound_token,
     a2a_remote_agent_urls,
@@ -210,6 +209,11 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.max_write_bytes, 1048576)
         self.assertEqual(settings.checkpoint_backend, "memory")
         self.assertEqual(settings.checkpoint_url, "")
+        self.assertEqual(settings.memory_path, "Cache/memory.sqlite")
+        self.assertEqual(
+            AgentRuntimeSettings.from_env({"AGENT_MEMORY_PATH": "  "}).memory_path,
+            "Cache/memory.sqlite",
+        )
         self.assertFalse(settings.native_tool_calls)
         # The sandbox gate defaults to *on*: an allow-list is not an OS
         # boundary, so a deployment that says nothing gets the isolated
@@ -238,6 +242,7 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
             "AGENT_SANDBOX_RUNTIME": "DOCKER",
             "AGENT_MAX_WRITE_BYTES": "2048",
             "AGENT_CHECKPOINT_BACKEND": "SQLITE",
+            "AGENT_MEMORY_PATH": "state/remember.sqlite",
             "AGENT_NATIVE_TOOL_CALLS": "1",
             "AGENT_SANDBOX_REQUIRE_ISOLATION": "1",
             "AGENT_CHECKPOINT_REQUIRED": "1",
@@ -248,6 +253,7 @@ class AgentRuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.sandbox_runtime, "docker")
         self.assertEqual(settings.max_write_bytes, 2048)
         self.assertEqual(settings.checkpoint_backend, "sqlite")
+        self.assertEqual(settings.memory_path, "state/remember.sqlite")
         self.assertTrue(settings.native_tool_calls)
         self.assertTrue(settings.sandbox_require_isolation)
         self.assertTrue(settings.checkpoint_required)
@@ -314,10 +320,6 @@ class LangsmithSettingsTests(unittest.TestCase):
 
 
 class A2ASettingsTests(unittest.TestCase):
-    def test_enabled(self):
-        self.assertFalse(a2a_enabled({}))
-        self.assertTrue(a2a_enabled({"A2A_ENABLED": "1"}))
-
     def test_remote_agent_urls_filters_blanks(self):
         self.assertEqual(a2a_remote_agent_urls({}), ())
         self.assertEqual(

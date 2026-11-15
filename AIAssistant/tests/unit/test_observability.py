@@ -9,6 +9,7 @@ or LangSmith for real.
 """
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from collections import deque
@@ -328,11 +329,19 @@ class TracingTests(unittest.TestCase):
         attributes = dict(tracer.spans[0].attributes)
         self.assertEqual(attributes["agent.node.input.node"], "plan")
         self.assertIn('"user_request":"build a model"', attributes["agent.node.input.json"])
+        self.assertEqual(attributes["agent.node.metadata.specialist"], "supervisor")
+        self.assertIn('"node":"plan"', attributes["agent.node.metadata.json"])
         self.assertEqual(attributes["agent.node.output.decision"], "plan_created")
         self.assertIn('"plan":["inspect","build"]', attributes["agent.node.output.json"])
+        self.assertEqual(attributes["agent.node.output.outcome"], "success")
+        self.assertIn("agent.node.output.duration_ms", attributes)
         self.assertFalse(attributes["agent.node.input.truncated"])
         self.assertEqual(finished[0][1]["plan"], ["inspect", "build"])
         self.assertEqual(finished[0][1]["outcome"], "success")
+        self.assertEqual(
+            json.loads(attributes["agent.node.output.json"]),
+            finished[0][1],
+        )
 
     def test_unified_span_normalises_a_non_mapping_output(self):
         finished: list = []

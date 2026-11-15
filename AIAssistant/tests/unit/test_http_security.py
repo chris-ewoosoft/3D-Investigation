@@ -24,6 +24,7 @@ from ai_assistant.adapters.http.security import (
     agent_guards,
     mcp_exposed_without_token,
     mcp_guarded_app,
+    require_loopback,
     resolve_a2a_tenant,
 )
 
@@ -80,6 +81,40 @@ class LocalSurfaceGuardTests(unittest.TestCase):
         response = _client(TransportPolicy(admin_token="secret"), admin_guards,
                            peer=_REMOTE, token="secret").get("/probe")
         self.assertEqual(response.status_code, 403)
+
+    def test_explicit_container_gateway_is_treated_as_local(self) -> None:
+        policy = TransportPolicy(
+            admin_token="secret",
+            trusted_local_peer_cidrs=("172.30.255.1/32",),
+        )
+        response = _client(
+            policy, admin_guards, peer=("172.30.255.1", 50000), token="secret",
+        ).get("/probe")
+        self.assertEqual(response.status_code, 200)
+
+    def test_unlisted_or_malformed_container_network_stays_closed(self) -> None:
+        policy = TransportPolicy(
+            admin_token="secret",
+            trusted_local_peer_cidrs=("not-a-network", "172.30.255.1/32"),
+        )
+        response = _client(
+            policy, admin_guards, peer=("172.30.255.2", 50000), token="secret",
+        ).get("/probe")
+        self.assertEqual(response.status_code, 403)
+
+    def test_unparseable_peer_stays_closed(self) -> None:
+        response = _client(
+            TransportPolicy(admin_token="secret"), admin_guards,
+            peer=("not-an-ip", 50000), token="secret",
+        ).get("/probe")
+        self.assertEqual(response.status_code, 403)
+
+    def test_literal_loopback_compatibility_guard(self) -> None:
+        request = Request({
+            "type": "http", "method": "GET", "path": "/", "headers": [],
+            "client": _LOCAL,
+        })
+        require_loopback(request, "legacy")
 
     def test_foreign_browser_origin_is_refused(self) -> None:
         client = _client(TransportPolicy(allowed_origins=("http://127.0.0.1",),
@@ -216,13 +251,15 @@ class PolicyLoadingTests(unittest.TestCase):
             allowed_origins=("http://127.0.0.1",),
             allow_remote_a2a=True,
             env={"AI_ADMIN_TOKEN": " admin ", "AI_AGENT_TOKEN": "agent",
-                 "AI_A2A_TOKEN": "a2a", "AI_MCP_TOKEN": " mcp "},
+                 "AI_A2A_TOKEN": "a2a", "AI_MCP_TOKEN": " mcp ",
+                 "AI_TRUSTED_LOCAL_PEER_CIDRS": "172.30.255.1/32"},
         )
         self.assertEqual(policy.admin_token, "admin")
         self.assertEqual(policy.agent_token, "agent")
         self.assertEqual(policy.a2a_token, "a2a")
         self.assertEqual(policy.mcp_token, "mcp")
         self.assertTrue(policy.allow_remote_a2a)
+        self.assertEqual(policy.trusted_local_peer_cidrs, ("172.30.255.1/32",))
 
     def test_from_env_defaults_to_no_tokens(self) -> None:
         policy = TransportPolicy.from_env(env={})

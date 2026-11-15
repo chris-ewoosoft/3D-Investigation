@@ -1,6 +1,7 @@
 """Unit tests for file read/write/patch and directory tools."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,6 +91,16 @@ class ToolReadFileTests(FileToolsBase):
         result = tool_read_file({"path": "AIAssistant/notes.txt"})
         self.assertIn("error", result)
         self.assertNotIn("AI_STORAGE_KEY", str(result))
+
+    def test_a_hard_link_to_a_secret_is_not_readable(self) -> None:
+        """A hard link has no target spelling for realpath to reveal."""
+        secret = self._write("AIAssistant/.env", "AI_STORAGE_KEY=demonstration-only\n")
+        alias = self.root / "AIAssistant" / "notes.txt"
+        os.link(secret, alias)
+        self.assertTrue(os.path.samefile(secret, alias))
+        result = tool_read_file({"path": "AIAssistant/notes.txt"})
+        self.assertIn("error", result)
+        self.assertNotIn("demonstration-only", str(result))
 
     def test_read_python_symbol_range(self) -> None:
         content = (

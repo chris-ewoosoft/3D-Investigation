@@ -31,26 +31,16 @@ def _delegation(remote_endpoint=None):
     )
 
 
-class _LSContext:
-    """Fake langsmith trace context manager (dict-backed __enter__)."""
-
+class _Span:
     def __init__(self):
-        self._ctx = {}
+        self.context = {"outputs": {}}
         self.exited = []
 
     def __enter__(self):
-        return self._ctx
+        return self.context
 
     def __exit__(self, exc_type, exc, tb):
         self.exited.append((exc_type, exc))
-        return False
-
-
-class _Span:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
         return False
 
 
@@ -115,7 +105,6 @@ def _deps_kwargs(**overrides):
         reflect_result_fn=lambda d, result, verification: {"passed": True, "reason": "reflected"},
         record_tool_fn=lambda t, ok, duration: None,
         record_schema_error_fn=lambda t: None,
-        langsmith_trace_fn=lambda *a, **k: _LSContext(),
         span_fn=lambda *a, **k: _Span(),
         is_coding_task_fn=lambda t: True,
         save_pending_fn=lambda: None,
@@ -179,6 +168,24 @@ class RunLanggraphAgentTests(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["iterations"], 2)
         self.assertEqual(result["steps"], [{"type": "final_answer", "content": "done"}])
+
+    def test_session_uses_one_trace_payload_for_both_backends(self):
+        calls = []
+
+        def span_fn(name, **kwargs):
+            trace = _Span()
+            calls.append((name, kwargs, trace))
+            return trace
+
+        self._run(span_fn=span_fn)
+
+        self.assertEqual(len(calls), 1)
+        name, kwargs, trace = calls[0]
+        self.assertEqual(name, "agent.session")
+        self.assertEqual(kwargs["run_type"], "chain")
+        self.assertEqual(kwargs["trace_inputs"]["session_id"], "session-1")
+        self.assertEqual(kwargs["trace_metadata"]["language"], "vi")
+        self.assertEqual(trace.context["outputs"]["status"], "completed")
 
     def test_completed_without_final_answer_appends_sentinel(self):
         _FakeGraph.state = {
@@ -316,15 +323,16 @@ class RunLanggraphAgentTests(unittest.TestCase):
 
     def test_graph_exception_propagates_and_trace_closed(self):
         _FakeGraph.run_error = RuntimeError("boom")
-        ls = _LSContext()
+        trace = _Span()
 
-        def langsmith_trace_fn(*a, **k):
-            return ls
+        def span_fn(*a, **k):
+            return trace
 
         with self.assertRaises(RuntimeError):
-            self._run(langsmith_trace_fn=langsmith_trace_fn)
-        self.assertEqual(len(ls.exited), 1)
-        self.assertIs(ls.exited[0][0], RuntimeError)
+            self._run(span_fn=span_fn)
+        self.assertEqual(trace.context["outputs"], {"status": "error", "error": "boom"})
+        self.assertEqual(len(trace.exited), 1)
+        self.assertIs(trace.exited[0][0], RuntimeError)
 
     def test_an_aborted_run_still_finishes_the_task_record(self):
         """The abort branch used to re-raise without ever reaching
@@ -401,6 +409,36 @@ class RunnerCallbackTests(unittest.TestCase):
         self.assertEqual(answer, "hi")
         self.assertEqual(recorded, [(10, 5)])
         self.assertIn("messages", calls[0])
+
+    def test_llm_and_local_tool_use_the_unified_trace_contract(self):
+        calls = []
+
+        def span_fn(name, **kwargs):
+            trace = _Span()
+            calls.append((name, kwargs, trace))
+            return trace
+
+        run_langgraph_agent(**_base_kwargs(span_fn=span_fn))
+        callbacks = _FakeGraph._last.kwargs
+        with mock.patch(
+            "ai_assistant.agents.completion.constrained_completion",
+            return_value="answer",
+        ):
+            self.assertEqual(
+                callbacks["complete"]([{"role": "user", "content": "hello"}], 0.4),
+                "answer",
+            )
+        self.assertTrue(callbacks["execute"]("run_command", {"command": "ls"})["success"])
+
+        by_name = {name: (kwargs, trace) for name, kwargs, trace in calls}
+        llm_kwargs, llm_trace = by_name["agent.llm.completion"]
+        self.assertEqual(llm_kwargs["run_type"], "llm")
+        self.assertEqual(llm_kwargs["trace_inputs"]["messages_count"], 1)
+        self.assertEqual(llm_trace.context["outputs"], {"answer_chars": 6})
+        tool_kwargs, tool_trace = by_name["agent.tool.run_command"]
+        self.assertEqual(tool_kwargs["run_type"], "tool")
+        self.assertEqual(tool_kwargs["trace_inputs"]["params"], {"command": "ls"})
+        self.assertEqual(tool_trace.context["outputs"], {"success": True})
 
     def test_parse_valid_and_invalid(self):
         run_langgraph_agent(**_base_kwargs())
@@ -485,6 +523,12 @@ class RunnerCallbackTests(unittest.TestCase):
 
     def test_execute_remote_a2a_delegation(self):
         routed = []
+        trace_calls = []
+
+        def span_fn(name, **kwargs):
+            trace = _Span()
+            trace_calls.append((name, kwargs, trace))
+            return trace
 
         class _A2ARouter:
             def route(self, specialist, task, payload):
@@ -496,6 +540,7 @@ class RunnerCallbackTests(unittest.TestCase):
                 remote_endpoint="http://remote"
             ),
             a2a_router=_A2ARouter(),
+            span_fn=span_fn,
         )
         run_langgraph_agent(**kwargs)
         execute = _FakeGraph._last.kwargs["execute"]
@@ -503,6 +548,13 @@ class RunnerCallbackTests(unittest.TestCase):
         self.assertEqual(res["source"], "remote")
         self.assertEqual(routed[0][1], "do the thing")
         self.assertEqual(routed[0][2]["idempotency_key"], "ik-1")
+        trace_kwargs, trace = next(
+            (kwargs, item) for name, kwargs, item in trace_calls
+            if name == "agent.a2a_delegate.run_command"
+        )
+        self.assertEqual(trace_kwargs["run_type"], "tool")
+        self.assertEqual(trace_kwargs["trace_inputs"]["tool"], "run_command")
+        self.assertEqual(trace.context["outputs"], {"source": "remote", "success": True})
 
     def test_remote_dispatch_clears_the_gateway_gate_first(self):
         # The remote leg leaves the process, so it must clear the same policy

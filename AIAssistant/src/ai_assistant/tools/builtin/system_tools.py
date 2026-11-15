@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from ai_assistant.config.paths import get_paths
+from ai_assistant.path_policy import open_verified_regular_file
 from ai_assistant.tools.sandbox import run as run_sandboxed_command
 
 from .file_tools import _agent_safe_path
@@ -19,7 +20,7 @@ def tool_validate_file(params: dict[str, Any]) -> dict[str, Any]:
         return {"error": f"Invalid or missing file: {path}"}
     ext = os.path.splitext(abs_path)[1].lower()
     try:
-        with open(abs_path, "r", encoding="utf-8") as handle:
+        with open_verified_regular_file(abs_path, "r", encoding="utf-8") as handle:
             content = handle.read()
         if ext == ".py":
             compile(content, path, "exec")

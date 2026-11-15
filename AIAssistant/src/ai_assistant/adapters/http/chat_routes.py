@@ -6,9 +6,7 @@ endpoint — RAG retrieval, vision, context limit check, and streaming inference
 from __future__ import annotations
 
 import json
-import os
 import re
-import stat
 import time
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Callable, cast
@@ -21,7 +19,11 @@ from ...config.paths import attachment_roots
 from ...domain.context_budget import completion_token_budget, context_exhausted
 from ...domain.governance import scrub_pii
 from ...domain.specialists import Specialist
-from ...path_policy import resolve_within
+from ...path_policy import (
+    is_single_link_regular_file,
+    open_verified_regular_file,
+    resolve_within,
+)
 from ...ports import SEALED_BINARY_PREFIX
 from .security import TransportPolicy, chat_guards
 
@@ -255,9 +257,9 @@ def _attachment_may_be_opened(path: str) -> bool:
         if resolve_within(root, path) is not None:
             return True
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):
+        if not is_single_link_regular_file(path):
             return False
-        with open(path, "rb") as handle:
+        with open_verified_regular_file(path, "rb") as handle:
             return handle.read(len(SEALED_BINARY_PREFIX)) == SEALED_BINARY_PREFIX
     except OSError:
         return False

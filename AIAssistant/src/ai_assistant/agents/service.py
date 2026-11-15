@@ -311,7 +311,9 @@ class AgentService:
         # client no longer holds (ADR 0043). Off when nothing is injected.
         short_term = self._short_term
         if short_term is not None:
-            history_messages = merge_history(short_term.recent(session_id), history_messages)
+            history_messages = merge_history(
+                short_term.recent(session_id, owner=owner), history_messages
+            )
 
         task_with_attachments = task
         if request.attachments:

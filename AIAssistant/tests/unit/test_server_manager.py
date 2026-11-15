@@ -192,7 +192,7 @@ class ServerManagerTests(unittest.TestCase):
             kwargs = server_manager._detached_popen_kwargs()
         self.assertEqual(
             kwargs,
-            {"creationflags": 0x00000008 | 0x00000200},
+            {"creationflags": 0x00000008 | 0x00000200 | 0x08000000},
         )
 
     def test_detached_kwargs_use_a_new_session_on_posix(self) -> None:

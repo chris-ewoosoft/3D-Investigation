@@ -1,6 +1,7 @@
 """Unit tests for search/discovery tools."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -133,6 +134,15 @@ class SearchToolsTests(unittest.TestCase):
         result = tool_search_text({"query": "secret-value"})
         self.assertEqual(result["count"], 0)
         result = tool_search_text({"query": "AI_STORAGE_KEY"})
+        self.assertEqual(result["count"], 0)
+
+    def test_a_hard_link_alias_of_a_secret_is_not_searched(self) -> None:
+        secret = self.root / "src" / ".env"
+        secret.write_text("AI_STORAGE_KEY=hard-link-secret\n", encoding="utf-8")
+        alias = self.root / "src" / "innocent.txt"
+        os.link(secret, alias)
+        self.assertTrue(os.path.samefile(secret, alias))
+        result = tool_search_text({"query": "hard-link-secret"})
         self.assertEqual(result["count"], 0)
 
 

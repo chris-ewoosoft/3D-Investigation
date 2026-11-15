@@ -217,6 +217,15 @@ class CorpusBoundaryTests(unittest.TestCase):
         self.assertIn("data.json", readable)
         self.assertNotIn("credentials.json", readable)
 
+    def test_a_hard_link_alias_of_a_secret_is_never_indexed(self) -> None:
+        secret = self.project / ".env"
+        secret.write_text("AI_STORAGE_KEY=hard-link-secret", encoding="utf-8")
+        alias = self.project / "innocent.json"
+        os.link(secret, alias)
+        self.assertTrue(os.path.samefile(secret, alias))
+        readable = {Path(path).name for path in _indexable_files(self.project, {".json"})}
+        self.assertNotIn("innocent.json", readable)
+
     def test_a_file_is_indexed_once(self) -> None:
         """The two walks must not cover the same file.
 

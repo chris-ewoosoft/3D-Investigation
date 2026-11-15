@@ -250,15 +250,36 @@ class LspClientHelperTests(unittest.TestCase):
 
     def test_lsp_call_initialize_timeout(self) -> None:
         with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
-            with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
-                proc = mock.MagicMock()
-                proc.stdin = mock.MagicMock()
-                proc.stdout = mock.MagicMock()
-                proc.stdout.readline.side_effect = [b"", b""]
-                proc.poll.return_value = 1
-                popen.return_value = proc
-                result = lsp_client._lsp_call("clangd", [], str(self.root / "src/main.py"), 1, 0, "textDocument/definition")
+            with mock.patch("ai_assistant.tools.lsp_client.sys.platform", "linux"):
+                with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
+                    proc = mock.MagicMock()
+                    proc.stdin = mock.MagicMock()
+                    proc.stdout = mock.MagicMock()
+                    proc.stdout.readline.side_effect = [b"", b""]
+                    proc.poll.return_value = 1
+                    popen.return_value = proc
+                    result = lsp_client._lsp_call(
+                        "clangd", [], str(self.root / "src/main.py"), 1, 0,
+                        "textDocument/definition",
+                    )
         self.assertIn("did not respond", result["error"])
+        self.assertNotIn("creationflags", popen.call_args.kwargs)
+
+    def test_lsp_call_hides_the_console_on_windows(self) -> None:
+        with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):
+            with mock.patch("ai_assistant.tools.lsp_client.sys.platform", "win32"):
+                with mock.patch("ai_assistant.tools.lsp_client.subprocess.Popen") as popen:
+                    proc = mock.MagicMock()
+                    proc.stdin = mock.MagicMock()
+                    proc.stdout = mock.MagicMock()
+                    proc.stdout.readline.side_effect = [b"", b""]
+                    proc.poll.return_value = 1
+                    popen.return_value = proc
+                    lsp_client._lsp_call(
+                        "clangd", [], str(self.root / "src/main.py"), 1, 0,
+                        "textDocument/definition",
+                    )
+        self.assertEqual(popen.call_args.kwargs["creationflags"], 0x08000000)
 
     def test_lsp_call_happy_path(self) -> None:
         with mock.patch("ai_assistant.tools.lsp_client.resolve_tool_binary", return_value="clangd"):

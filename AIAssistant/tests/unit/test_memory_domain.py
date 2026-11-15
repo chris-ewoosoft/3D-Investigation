@@ -297,10 +297,10 @@ class BuildRunRecordTests(unittest.TestCase):
         the task, the plan and the fact are identical."""
         steps = [
             {"type": "plan", "steps": ["doc thu muc", "tim ten file"]},
-            {"type": "final_answer", "content": "Toi thich mau xanh"},
+            {"type": "final_answer", "content": "done"},
         ]
-        alice = build_run_records("tim file", "s1", steps, "alice", now=NOW)
-        bob = build_run_records("tim file", "s2", steps, "bob", now=NOW)
+        alice = build_run_records("Toi thich mau xanh", "s1", steps, "alice", now=NOW)
+        bob = build_run_records("Toi thich mau xanh", "s2", steps, "bob", now=NOW)
         alice_ids = {record["id"] for record in alice}
         bob_ids = {record["id"] for record in bob}
         self.assertEqual(len(alice_ids), 3)
@@ -326,11 +326,11 @@ class BuildRunRecordTests(unittest.TestCase):
         self.assertEqual(len(semantic), 1)
         self.assertEqual(semantic[0]["text"], "mau xanh")
 
-    def test_a_preference_in_the_final_answer_is_also_extracted(self) -> None:
+    def test_a_preference_in_the_model_answer_is_not_promoted(self) -> None:
         records = build_run_records("hoi mau", "s1", [
             {"type": "final_answer", "content": "Toi thich mau xanh"},
         ], "u")
-        self.assertIn("mau xanh", [r["text"] for r in records if r["kind"] == "semantic"])
+        self.assertEqual([r for r in records if r["kind"] == "semantic"], [])
 
     def test_semantic_records_are_capped_per_run(self) -> None:
         task = ("Toi thich mau xanh. Toi thich cafe. "
@@ -360,11 +360,13 @@ class FormatMemoryBlockTests(unittest.TestCase):
 
     def test_records_render_as_a_kind_tagged_block(self) -> None:
         block = format_memory_block([_record(kind="semantic", text="thich mau xanh")])
-        self.assertEqual(block, "[Long-term memory]\n- [semantic] thich mau xanh")
+        self.assertIn("[UNTRUSTED DATA:", block)
+        self.assertIn("- [semantic] thich mau xanh", block)
+        self.assertTrue(block.endswith("[END UNTRUSTED DATA]"))
 
     def test_a_sparse_record_still_renders(self) -> None:
         block = format_memory_block([{}])
-        self.assertEqual(block, "[Long-term memory]\n- [] ")
+        self.assertIn("- [] ", block)
 
 
 if __name__ == "__main__":

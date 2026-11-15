@@ -268,8 +268,8 @@ hai release là cách kiểm tra dependency trôi.
 ### 4.7 Eval & regression
 
 - CI (`agent-evals.yml`) chạy tool eval (16 case, gồm adversarial),
-  agentic eval (12 nhóm, 27 scenario/136 case khi cài đủ `a2a-sdk`/LangSmith,
-  gồm gateway policy; case phụ thuộc tuỳ chọn báo *not run*), RAG framework eval
+  agentic eval (12 nhóm, 27 scenario/136 case; A2A built-in luôn chạy,
+  gồm gateway policy; case LangSmith tuỳ chọn báo *not run*), RAG framework eval
   (4 case song ngữ; RAGAS precision/recall + DeepEval retrieval-F1, không gọi
   judge/API ngoài) và model-in-loop
   (ADR 0053 mở rộng từ 24 lên 32 case planner cân bằng vi/en × bốn kind cộng

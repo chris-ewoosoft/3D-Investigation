@@ -58,7 +58,6 @@ class RunDeps:
     audit_agent_fn: Callable[..., None]
     record_tool_fn: Callable[..., None]
     record_schema_error_fn: Callable[..., None]
-    langsmith_trace_fn: Callable[..., Any]
     span_fn: Callable[..., Any]
 
     # ── Optional wiring, injected by the composition root ─────────────────

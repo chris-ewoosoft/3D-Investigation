@@ -17,6 +17,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from .path_policy import open_verified_regular_file
 from .ports import SEALED_BINARY_PREFIX
 
 if TYPE_CHECKING:
@@ -36,7 +37,7 @@ def read_sealed_or_plain(path: str, unseal: Callable[[bytes], bytes] | None = No
     A file that is not a sealed envelope is returned unchanged, so an
     attachment written before sealing existed still loads.
     """
-    with open(path, "rb") as handle:
+    with open_verified_regular_file(path, "rb") as handle:
         raw = handle.read()
     if unseal is not None and raw.startswith(SEALED_BINARY_PREFIX):
         return unseal(raw)
@@ -91,7 +92,7 @@ def image_to_data_uri(filepath: str, max_dim: int = 512, *,
 def load_image_for_embedding(filepath: str, max_dim: int = 256) -> Image.Image:
     """Load and thumbnail an image for Clip/embedding models."""
     from PIL import Image, ImageOps
-    with Image.open(filepath) as opened:
+    with open_verified_regular_file(filepath, "rb") as handle, Image.open(handle) as opened:
         transposed: Image.Image = ImageOps.exif_transpose(opened) or opened
         img = transposed.convert("RGB")
         img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)

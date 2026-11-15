@@ -93,14 +93,14 @@ class ProceduralReuseTests(unittest.TestCase):
     an ordinary fresh request with no recipe in memory reaches the planner.
     """
 
-    def test_a_remembered_plan_is_verified_without_calling_the_planner(self):
+    def test_a_remembered_plan_must_pass_the_current_critic(self):
         planner = MagicMock()
         state = _state(prior_plan=["Buoc mot", "Buoc hai"])
         outcome = plan_node(state, planner)
         planner.assert_not_called()
         self.assertEqual(outcome["plan"], ["Buoc mot", "Buoc hai"])
         self.assertEqual(outcome["plan_spec"], {"steps": ["Buoc mot", "Buoc hai"]})
-        self.assertTrue(outcome["plan_verified"])
+        self.assertFalse(outcome["plan_verified"])
         self.assertEqual(outcome["plan_attempts"], 1)
         # The reuse is observable: the plan step lands on the step log.
         self.assertEqual(outcome["steps"][-1]["type"], "plan")

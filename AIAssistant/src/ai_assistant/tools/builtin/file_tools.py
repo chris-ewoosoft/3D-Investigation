@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from ai_assistant.config.paths import get_paths
+from ai_assistant.path_policy import open_verified_regular_file
 from ai_assistant.tools.sandbox import create_directory
 from ai_assistant.tools.sandbox import write_file as write_sandboxed_file
 
@@ -35,7 +36,7 @@ def tool_read_file(params: dict[str, Any]) -> dict[str, Any]:
     try:
         for enc in ("utf-8", "utf-16", "cp1252", "latin-1"):
             try:
-                with open(abs_path, "r", encoding=enc) as f:
+                with open_verified_regular_file(abs_path, "r", encoding=enc) as f:
                     lines = f.readlines()
                 break
             except (UnicodeDecodeError, ValueError):
@@ -207,7 +208,7 @@ def tool_patch_file(params: dict[str, Any]) -> dict[str, Any]:
     if not find_text:
         return {"error": "Find text must not be empty."}
     try:
-        with open(abs_path, "r", encoding="utf-8") as handle:
+        with open_verified_regular_file(abs_path, "r", encoding="utf-8") as handle:
             content = handle.read()
         matches = content.count(find_text)
         if matches != 1:
@@ -232,7 +233,7 @@ def tool_replace_file_content(params: dict[str, Any]) -> dict[str, Any]:
     if not target:
         return {"error": "Target content must not be empty."}
     try:
-        with open(abs_path, "r", encoding="utf-8") as handle:
+        with open_verified_regular_file(abs_path, "r", encoding="utf-8") as handle:
             content = handle.read()
         matches = content.count(target)
         if matches != 1:
@@ -256,7 +257,7 @@ def tool_multi_replace_file_content(params: dict[str, Any]) -> dict[str, Any]:
     if not replacements:
         return {"error": "Replacements list must not be empty."}
     try:
-        with open(abs_path, "r", encoding="utf-8") as handle:
+        with open_verified_regular_file(abs_path, "r", encoding="utf-8") as handle:
             content = handle.read()
         
         for idx, rep in enumerate(replacements):

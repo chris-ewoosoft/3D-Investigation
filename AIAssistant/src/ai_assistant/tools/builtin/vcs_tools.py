@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from typing import Any
 
 from ai_assistant.config.paths import get_paths
@@ -49,9 +50,13 @@ def _run_git(args: list[str], cwd: str, timeout: int) -> subprocess.CompletedPro
     if binary is None:
         msg = "Executable 'git' was not found on PATH."
         raise RuntimeError(msg)
+    extra_kwargs: dict[str, Any] = {}
+    if sys.platform == "win32":
+        extra_kwargs["creationflags"] = 0x08000000
     return subprocess.run([binary, *args], cwd=cwd,
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, check=False)
+                          errors="replace", timeout=timeout, check=False,
+                          **extra_kwargs)
 
 
 def tool_get_project_status(params: dict[str, Any]) -> dict[str, Any]:

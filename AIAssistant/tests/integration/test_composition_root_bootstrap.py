@@ -317,7 +317,7 @@ class LazyCompositionTests(unittest.TestCase):
             "data_root = Path(os.environ['APP_DATA_DIR']).resolve() / 'AIAssistant'\n"
             "assert Path(s.LOG_FILE_PATH).resolve().parent == data_root / 'logs', s.LOG_FILE_PATH\n"
             "assert Path(s.platform.settings.data_dir).resolve() == data_root, s.platform.settings.data_dir\n"
-            "assert Path(s.memory_store.path).resolve().parent == data_root, s.memory_store.path\n"
+            "assert Path(s.memory_store.path).resolve().parent == data_root / 'Cache', s.memory_store.path\n"
             "assert s.runtime_modules.chatbot_agent.get()._web_search is None\n"
             "assert s._tool_registry.get('web_search') is None\n"
         )

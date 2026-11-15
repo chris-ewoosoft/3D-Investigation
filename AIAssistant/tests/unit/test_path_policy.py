@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ai_assistant.path_policy import (
     BLOCKED_DIR_NAMES,
@@ -25,6 +26,8 @@ from ai_assistant.path_policy import (
     canonical_path,
     is_blocked_dir,
     is_secret_name,
+    is_single_link_regular_file,
+    open_verified_regular_file,
     resolve_within,
 )
 
@@ -128,6 +131,47 @@ class ResolveWithinTests(unittest.TestCase):
             side_effect=ValueError("mix of drives"),
         ):
             self.assertIsNone(resolve_within(str(self.root), "src/main.py"))
+
+
+class VerifiedRegularFileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.source = self.root / "source.txt"
+        self.source.write_text("safe payload", encoding="utf-8")
+
+    def test_a_single_link_regular_file_is_readable(self) -> None:
+        self.assertTrue(is_single_link_regular_file(self.source))
+        with open_verified_regular_file(self.source, "r", encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "safe payload")
+
+    def test_a_hard_link_is_refused_on_the_opened_handle(self) -> None:
+        alias = self.root / "innocent.txt"
+        os.link(self.source, alias)
+        self.assertTrue(os.path.samefile(self.source, alias))
+        self.assertFalse(is_single_link_regular_file(alias))
+        with self.assertRaisesRegex(OSError, "multiply-linked"):
+            open_verified_regular_file(alias, "rb")
+
+    def test_a_directory_and_a_missing_path_are_not_readable_files(self) -> None:
+        self.assertFalse(is_single_link_regular_file(self.root))
+        self.assertFalse(is_single_link_regular_file(self.root / "missing"))
+
+    def test_only_read_modes_are_accepted(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only supports"):
+            open_verified_regular_file(self.source, "w")
+
+    def test_a_path_replaced_between_resolution_and_open_is_refused(self) -> None:
+        real_stat = os.stat
+        opened_stat = real_stat(self.source)
+        different = real_stat(self.root)
+        with (
+            mock.patch("ai_assistant.path_policy.os.fstat", return_value=opened_stat),
+            mock.patch("ai_assistant.path_policy.os.stat", return_value=different),
+        ):
+            with self.assertRaisesRegex(OSError, "replaced"):
+                open_verified_regular_file(self.source, "rb")
 
     def test_the_spelling_half_of_the_check_is_not_redundant(self) -> None:
         """A path whose *spelling* points elsewhere is refused.

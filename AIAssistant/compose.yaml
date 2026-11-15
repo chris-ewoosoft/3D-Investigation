@@ -43,10 +43,14 @@ services:
       AI_AGENT_TOKEN: ${AI_AGENT_TOKEN:?Set AI_AGENT_TOKEN in AIAssistant/.env}
       AI_STORAGE_KEY: ""
       AI_STORAGE_KEY_FILE: /run/secrets/ai_assistant.key
+      # Host-published traffic reaches the container from this bridge gateway,
+      # not from 127.0.0.1. Trust only the fixed gateway, never the whole RFC1918 range.
+      AI_TRUSTED_LOCAL_PEER_CIDRS: 172.30.255.1/32
       AGENT_HOST: 0.0.0.0
       AGENT_PORT: "8080"
       AGENT_CHECKPOINT_BACKEND: sqlite
       AGENT_CHECKPOINT_PATH: /app/data/AIAssistant/Cache/checkpoints.sqlite
+      AGENT_MEMORY_PATH: /app/data/AIAssistant/Cache/memory.sqlite
       AGENT_CHECKPOINT_REQUIRED: "1"
       # Docker-in-Docker is deliberately not enabled by mounting the daemon
       # socket: doing so would make the non-root service equivalent to root on
@@ -68,6 +72,9 @@ services:
         exec python -m ai_assistant.bootstrap.server
     ports:
       - "${AI_ASSISTANT_BIND_IP:-127.0.0.1}:${AI_ASSISTANT_PORT:-8080}:8080"
+    networks:
+      ai_local:
+        ipv4_address: 172.30.255.2
     volumes:
       - ai_data:/app/data
       - ai_secrets:/run/secrets:ro
@@ -98,3 +105,11 @@ services:
 volumes:
   ai_data:
   ai_secrets:
+
+networks:
+  ai_local:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.255.0/24
+          gateway: 172.30.255.1

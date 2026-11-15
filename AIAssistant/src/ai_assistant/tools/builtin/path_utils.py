@@ -15,6 +15,7 @@ from ai_assistant.path_policy import (
     BLOCKED_DIR_NAMES,
     is_blocked_dir,
     is_secret_name,
+    is_single_link_regular_file,
     resolve_within,
 )
 
@@ -33,6 +34,7 @@ __all__ = [
     "agent_safe_path",
     "is_blocked_dir",
     "is_secret_name",
+    "is_single_link_regular_file",
 ]
 
 
@@ -81,5 +83,11 @@ def agent_safe_path(rel_path: str) -> str | None:
     # caller asked for, and the real one a symlink points at.
     real_basename = os.path.basename(os.path.realpath(abs_path))
     if is_secret_name(os.path.basename(rel_path)) or is_secret_name(real_basename):
+        return None
+    # A hard link has no target spelling for realpath() to reveal.  Refuse a
+    # multiply-linked file here so every agent tool shares the same preflight;
+    # readers repeat the decision on their opened handle to remove the
+    # check-then-open race.
+    if os.path.isfile(abs_path) and not is_single_link_regular_file(abs_path):
         return None
     return abs_path

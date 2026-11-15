@@ -775,20 +775,14 @@ class A2ARouterFacadeTests(unittest.TestCase):
         registry._agents["https://r.example.com"] = self._remote()
         return registry
 
-    def test_a2a_available_reflects_sdk_and_setting(self) -> None:
-        with patch.object(a2a_protocol, "a2a_enabled", return_value=True), patch.object(
-            a2a_protocol, "_sdk_available", return_value=True
-        ):
-            self.assertTrue(a2a_available())
-        with patch.object(a2a_protocol, "a2a_enabled", return_value=False), patch.object(
-            a2a_protocol, "_sdk_available", return_value=True
-        ):
-            self.assertFalse(a2a_available())
+    def test_built_in_transport_has_no_optional_sdk_gate(self) -> None:
+        self.assertTrue(a2a_available())
 
-    def test_route_unavailable_when_transport_disabled(self) -> None:
+    def test_route_does_not_consult_the_legacy_availability_probe(self) -> None:
+        client = self._FakeClient({"routing": "remote_selected", "task": {"id": "t1"}})
         with patch.object(a2a_protocol, "a2a_available", return_value=False):
-            result = A2ARouter(registry=self._registry()).route("supervisor", "hi")
-        self.assertEqual(result["status"], "unavailable")
+            result = A2ARouter(client=client, registry=self._registry()).route("supervisor", "hi")
+        self.assertEqual(result["task"]["id"], "t1")
 
     def test_route_unavailable_when_no_remote(self) -> None:
         with patch.object(a2a_protocol, "a2a_available", return_value=True):

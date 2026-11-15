@@ -158,6 +158,7 @@ class AgentRuntimeSettings:
     checkpoint_backend: str
     checkpoint_url: str
     checkpoint_path: str
+    memory_path: str
     native_tool_calls: bool
     #: Memory subsystem (ADR 0043). ``memory_enabled`` gates both halves:
     #: the bounded short-term buffer and the long-term store. The retention
@@ -199,6 +200,8 @@ class AgentRuntimeSettings:
             checkpoint_backend=values.get("AGENT_CHECKPOINT_BACKEND", "memory").casefold(),
             checkpoint_url=values.get("AGENT_CHECKPOINT_URL", ""),
             checkpoint_path=values.get("AGENT_CHECKPOINT_PATH", "AIAssistant/Cache/checkpoint.sql"),
+            memory_path=(values.get("AGENT_MEMORY_PATH", "").strip()
+                         or "Cache/memory.sqlite"),
             native_tool_calls=values.get("AGENT_NATIVE_TOOL_CALLS", "0") == "1",
             memory_enabled=values.get("AGENT_MEMORY_ENABLED", "1") == "1",
             memory_stm_max_messages=max(1, int(values.get("AGENT_MEMORY_STM_MAX_MESSAGES", "40"))),
@@ -353,6 +356,21 @@ def transport_tokens(env: Mapping[str, str] | None = None) -> TransportTokens:
         agent=values.get("AI_AGENT_TOKEN", "").strip(),
         a2a=values.get("AI_A2A_TOKEN", "").strip(),
         mcp=values.get("AI_MCP_TOKEN", "").strip(),
+    )
+
+
+def trusted_local_peer_cidrs(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Return explicitly trusted local-transport peer networks.
+
+    A container sees a host-published request as its bridge gateway rather
+    than as loopback. Deployments must name that exact gateway (or another
+    deliberately narrow CIDR); an empty value keeps loopback-only behavior.
+    """
+    values = os.environ if env is None else env
+    return tuple(
+        item.strip()
+        for item in values.get("AI_TRUSTED_LOCAL_PEER_CIDRS", "").split(",")
+        if item.strip()
     )
 
 
@@ -531,12 +549,6 @@ def otlp_exporter_endpoint(env: Mapping[str, str] | None = None) -> str | None:
         return None
     endpoint = values.get("AGENT_OTLP_ENDPOINT", "").strip()
     return endpoint or None
-
-
-def a2a_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Return whether the A2A transport layer is active (``A2A_ENABLED=1``)."""
-    values = os.environ if env is None else env
-    return values.get("A2A_ENABLED", "0") == "1"
 
 
 def a2a_remote_agent_urls(env: Mapping[str, str] | None = None) -> tuple[str, ...]:

@@ -290,6 +290,34 @@ class FileSystemHashTests(unittest.TestCase):
             self.assertNotEqual(failing, readable)
             self.assertEqual(failing, again)
 
+    def test_hash_survives_files_disappearing_after_scan(self):
+        """Both scan roots tolerate a file removed before metadata is read."""
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = _paths(tmp)
+            doc = paths.docs_dirs[0] / "vanished.md"
+            source = paths.project_root / "vanished.cpp"
+
+            real_stat = os.stat
+
+            def raising_stat(path, *args, **kwargs):
+                if Path(path) in {doc, source}:
+                    raise OSError("removed")
+                return real_stat(path, *args, **kwargs)
+
+            with (
+                mock.patch(
+                    "ai_assistant.rag.index._indexable_files",
+                    side_effect=(iter((doc,)), iter((source,))),
+                ),
+                mock.patch(
+                    "ai_assistant.rag.index.os.stat",
+                    side_effect=raising_stat,
+                ),
+            ):
+                digest = get_file_system_hash(paths, _settings())
+
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
 
 class CacheValidityTests(unittest.TestCase):
     def _write_all(self, paths: AppPaths, settings: RAGSettings) -> None:

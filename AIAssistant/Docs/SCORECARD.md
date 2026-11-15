@@ -18,14 +18,37 @@
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 153 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py"` | **2 606 tests**, 0 failures, 6 skipped; `ResourceWarning` promoted to error (ADR 0056/0057) |
-| Coverage | `PYTHONPATH=src python -m coverage run … && python -m coverage report` | **100.00%** — 11 388 statements, 3 176 branches, 0 missed, 0 partial (ADR 0056/0057 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **313/313** killed, 0 survived, 0 stale in 407.7 s; isolated workers with green owning-suite preflight (ADR 0056/0057; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 313` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 631 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 433 statements, 3 184 branches, 0 missed, 0 partial (ADR 0058/0059 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **327/327** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 327` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
+| Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
+| Model pins | `python scripts/verify_models.py --require-all` | **6/6 artifact local khớp pin**, 0 missing, **0 mismatched** (ADR 0023; measured 2026-11-12) |
+| Supply chain | `python scripts/generate_sbom.py` | CycloneDX 1.5: 171 distribution (kèm **3 941 SHA-256**) + 6 artifact GGUF kèm commit/SHA-256 (ADR 0023) |
+| Lock verify | `pip install --require-hashes --dry-run -r requirements.lock` + `pip download --require-hashes -r requirements-test.lock` | runtime lock: exit 0, 0 ERROR; test lock: **83/83 artifact tải về, SHA-256 khớp** (CI job `test` cài đúng lock này bằng `--require-hashes`); runtime mẫu 6/6 (ADR 0023) |
+| Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
+| Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
+| Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
 
-## Structured agent-node tracing (2026-11-15)
+## Verified read handles and executable resource ownership (2026-11-15, ADR 0058)
+
+All package-owned readers of untrusted paths now consume data from a shared,
+already-open handle that has passed `fstat`: it must be a regular file with one
+link, and the path must still identify that handle. This closes the hard-link
+alias bypass and the identity gap at the final open; it does not make earlier
+path-based root/name policy checks atomic against a hostile concurrent local
+writer. An AST boundary test rejects direct built-in `open()` in the guarded
+reader set. The contract is intentionally read-side only; ADR 0033's
+write/create TOCTOU limitation and the OS sandbox/ACL boundary remain explicit.
+
+CI and local coverage now use `tests.run_suite`, which records ordinary and
+unraisable `ResourceWarning` channels through a forced final collection. Two
+new mutants pin the single-link decision and the leak-gate failure branch,
+raising the measured floor from 313 to **315/315 killed**.
+
+## Unified LangSmith/OpenTelemetry tracing (2026-11-15)
 
 `agent.plan`, `agent.plan_reflect`, `agent.reason`, `agent.tool` and
 `agent.reflect` now emit one unified OpenTelemetry span + LangSmith run per
@@ -37,11 +60,21 @@ and reflect traces expose the decision, current plan step, observation and
 verification that produced the next state. The shared governance redactor runs
 before either exporter, and oversized strings/collections are bounded.
 
-`test_graph_run_guards`, `test_observability` and
-`test_checkpoint_langsmith_guards` pin all five payload shapes, unified
-backend export, nested LangSmith context and failure containment. Five new
+The same contract now covers `agent.session`, `agent.llm.completion`, local
+`agent.tool.<name>`, `agent.a2a_delegate.<name>` and `agent.tool_batch` instead
+of nesting a payload-poor OTel span around a separate LangSmith run. OTel also
+receives the LangSmith metadata and the exact enriched output object, including
+`outcome` and `duration_ms`; both exporters therefore observe the same logical
+operation, inputs, metadata, outputs and failure lifecycle.
+
+`test_graph_run_guards`, `test_observability`, `test_runner`,
+`test_parallel_batch` and `test_checkpoint_langsmith_guards` pin all payload
+shapes, unified backend export, nested LangSmith context and failure
+containment. Five new
 decision mutants pin redaction plus LangSmith/OTel input/output delivery,
 raising the full measured mutation gate from 308 to **313/313 killed**.
+Two additional parity mutants pin OTel metadata delivery and the enriched
+output identity, raising the current floor from 315 to **317/317 killed**.
 
 ## Checkpoint retention runtime contract (2026-11-12, ADR 0057)
 
@@ -82,7 +115,6 @@ the same freshness decision. Endpoint, enablement, timeout, result count and
 User-Agent are deployment settings. Credential-shaped queries are refused,
 PII is scrubbed, redirects are not followed, responses are capped at 1 MB and
 web text enters the prompt as untrusted evidence with source URLs.
-| Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
 
 ## Owned streaming shutdown and honest freshness gate (2026-11-11, ADR 0053)
 
@@ -145,13 +177,6 @@ Fourteen new decision mutants raise `MIN_MUTANTS` from **286 to 300** (adding
 with **300/300 killed** across the full suite (**2 569 tests**, 0 failures, 6
 skipped; **100.00%** coverage — 10 963 statements, 2 998 branches, 0 missed, 0
 partial).
-
-| Model pins | `python scripts/verify_models.py --require-all` | **6/6 artifact local khớp pin**, 0 missing, **0 mismatched** (ADR 0023; measured 2026-11-12) |
-| Supply chain | `python scripts/generate_sbom.py` | CycloneDX 1.5: 171 distribution (kèm **3 941 SHA-256**) + 6 artifact GGUF kèm commit/SHA-256 (ADR 0023) |
-| Lock verify | `pip install --require-hashes --dry-run -r requirements.lock` + `pip download --require-hashes -r requirements-test.lock` | runtime lock: exit 0, 0 ERROR; test lock: **83/83 artifact tải về, SHA-256 khớp** (CI job `test` cài đúng lock này bằng `--require-hashes`); runtime mẫu 6/6 (ADR 0023) |
-| Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
-| Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
-| Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
 
 The 2026-11-11 (ADR 0055) pass re-ran lint, types, layer contracts,
 byte-compile, tests (`test_lockfile_sync` and `test_at_rest_cipher_contract`
@@ -1182,9 +1207,10 @@ following defects it found are now closed and pinned by regression tests:
   `compose()` before the modules that snapshot settings are imported, so the
   module import remains configuration-free.
 - **A2A configuration was frozen at import.** `a2a_protocol` no longer reads
-  `A2A_ENABLED`/`A2A_REMOTE_AGENTS`/card settings at module scope: the optional
-  SDK probe and the discovery target list are resolved on first use, so
-  importing the adapter has no environment-dependent side effects.
+  `A2A_ENABLED`/`A2A_REMOTE_AGENTS`/card settings at module scope. ADR 0059
+  later removed the unused optional-SDK probe and enable switch entirely;
+  only the discovery target list is resolved on first use, so importing the
+  adapter has no environment-dependent side effects.
 - **Remote A2A discovery was never invoked.** Startup now populates the remote
   registry from the merged deployment allowlist (`[a2a] trusted_endpoints` plus
   `A2A_REMOTE_AGENTS`) in a worker thread; an empty allowlist — the default —
