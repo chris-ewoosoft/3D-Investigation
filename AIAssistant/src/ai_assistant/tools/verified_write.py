@@ -15,6 +15,7 @@ import stat
 import sys
 from ctypes import wintypes
 from pathlib import Path
+from typing import Any, cast
 
 _DIRECTORY_ACCESS = 0x0001 | 0x0080
 _FILE_SHARE_READ = 0x00000001
@@ -152,7 +153,7 @@ def _open_windows_chain(root: Path, relative: Path, *, create: bool) -> _Directo
 
 
 def _open_windows_directory(path: Path) -> int:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = cast(Any, ctypes).WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
         wintypes.LPCWSTR,
@@ -174,7 +175,10 @@ def _open_windows_directory(path: Path) -> int:
         None,
     )
     if handle == _INVALID_HANDLE_VALUE:
-        raise OSError(ctypes.get_last_error(), f"cannot open verified directory {path}")
+        raise OSError(
+            cast(Any, ctypes).get_last_error(),
+            f"cannot open verified directory {path}",
+        )
     numeric = int(handle)
     try:
         information = _ByHandleFileInformation()
@@ -208,16 +212,22 @@ def _verify_windows_directory(
 
 
 def _final_windows_path(handle: int) -> Path:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = cast(Any, ctypes).WinDLL("kernel32", use_last_error=True)
     get_name = kernel32.GetFinalPathNameByHandleW
     get_name.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     get_name.restype = wintypes.DWORD
     size = get_name(handle, None, 0, 0)
     if size == 0:
-        raise OSError(ctypes.get_last_error(), "cannot resolve verified directory handle")
+        raise OSError(
+            cast(Any, ctypes).get_last_error(),
+            "cannot resolve verified directory handle",
+        )
     buffer = ctypes.create_unicode_buffer(size + 1)
     if get_name(handle, buffer, len(buffer), 0) == 0:
-        raise OSError(ctypes.get_last_error(), "cannot resolve verified directory handle")
+        raise OSError(
+            cast(Any, ctypes).get_last_error(),
+            "cannot resolve verified directory handle",
+        )
     value = buffer.value
     if value.startswith("\\\\?\\UNC\\"):
         value = "\\\\" + value[8:]
@@ -227,7 +237,7 @@ def _final_windows_path(handle: int) -> Path:
 
 
 def _close_windows_handle(handle: int) -> None:
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = cast(Any, ctypes).WinDLL("kernel32", use_last_error=True)
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL

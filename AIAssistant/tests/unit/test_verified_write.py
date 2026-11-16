@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import stat
 import tempfile
 import unittest
@@ -8,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from ai_assistant.tools.verified_write import (
+    _INVALID_HANDLE_VALUE,
     DirectoryIdentityError,
     DirectoryInspectionError,
     NonEmptyPathError,
@@ -15,11 +15,13 @@ from ai_assistant.tools.verified_write import (
     UnsafeDirectoryError,
     VerifiedWriteProgressError,
     _ByHandleFileInformation,
+    _close_windows_handle,
     _DirectoryChain,
     _final_windows_path,
     _open_directory_chain,
     _open_posix_chain,
     _open_windows_chain,
+    _open_windows_directory,
     _verify_windows_directory,
     _write_all,
     _write_posix,
@@ -103,6 +105,12 @@ class VerifiedWriteTests(unittest.TestCase):
             self.assertIs(_open_directory_chain(self.root, Path("a"), create=True), chain)
         opened.assert_called_once_with(self.root, Path("a"), create=True)
 
+        with mock.patch("ai_assistant.tools.verified_write.sys.platform", "win32"), mock.patch(
+            "ai_assistant.tools.verified_write._open_windows_chain", return_value=chain,
+        ) as opened:
+            self.assertIs(_open_directory_chain(self.root, Path("a"), create=True), chain)
+        opened.assert_called_once_with(self.root, Path("a"), create=True)
+
         directory = type("Stat", (), {"st_mode": stat.S_IFDIR | 0o700})()
         with mock.patch("ai_assistant.tools.verified_write.os.open", side_effect=[20, 21, 22]), mock.patch(
             "ai_assistant.tools.verified_write.os.mkdir",
@@ -164,6 +172,30 @@ class VerifiedWriteTests(unittest.TestCase):
         write.assert_called_once()
         chain.close.assert_called_once()
 
+    def test_atomic_write_dispatches_to_the_windows_commit(self) -> None:
+        chain = mock.Mock()
+        with mock.patch("ai_assistant.tools.verified_write.sys.platform", "win32"), mock.patch(
+            "ai_assistant.tools.verified_write._open_directory_chain", return_value=chain,
+        ), mock.patch("ai_assistant.tools.verified_write._write_windows") as write:
+            atomic_write_beneath(self.root, Path("a.txt"), b"x")
+        write.assert_called_once()
+        chain.close.assert_called_once()
+
+    def test_windows_chain_tracks_created_leaf_and_reuses_existing_components(self) -> None:
+        with mock.patch(
+            "ai_assistant.tools.verified_write._open_windows_directory",
+            side_effect=[10, 11, 12],
+        ), mock.patch(
+            "ai_assistant.tools.verified_write._final_windows_path",
+            side_effect=[self.root / "a", self.root / "a" / "b"],
+        ), mock.patch(
+            "ai_assistant.tools.verified_write.Path.mkdir",
+            side_effect=[None, FileExistsError],
+        ):
+            chain = _open_windows_chain(self.root, Path("a/b"), create=True)
+        self.assertEqual(chain.handles, [10, 11, 12])
+        self.assertFalse(chain.created)
+
     def test_windows_chain_closes_every_handle_when_a_child_open_fails(self) -> None:
         with mock.patch(
             "ai_assistant.tools.verified_write._open_windows_directory",
@@ -172,6 +204,44 @@ class VerifiedWriteTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "swapped"):
                 _open_windows_chain(self.root, Path("child"), create=False)
         close.assert_called_once_with(1)
+
+    def test_windows_directory_open_contains_native_failures(self) -> None:
+        kernel = mock.Mock()
+        kernel.CreateFileW.return_value = _INVALID_HANDLE_VALUE
+        with mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
+        ), mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.get_last_error", return_value=5, create=True,
+        ):
+            with self.assertRaises(OSError):
+                _open_windows_directory(self.root)
+
+        kernel.CreateFileW.return_value = 42
+        with mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
+        ), mock.patch(
+            "ai_assistant.tools.verified_write._verify_windows_directory",
+        ) as verify:
+            self.assertEqual(_open_windows_directory(self.root), 42)
+        verify.assert_called_once()
+
+        with mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
+        ), mock.patch(
+            "ai_assistant.tools.verified_write._verify_windows_directory",
+            side_effect=UnsafeDirectoryError(self.root),
+        ), mock.patch("ai_assistant.tools.verified_write._close_windows_handle") as close:
+            with self.assertRaises(UnsafeDirectoryError):
+                _open_windows_directory(self.root)
+        close.assert_called_once_with(42)
+
+    def test_windows_close_delegates_to_close_handle(self) -> None:
+        kernel = mock.Mock()
+        with mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
+        ):
+            _close_windows_handle(42)
+        kernel.CloseHandle.assert_called_once_with(42)
 
     def test_windows_handle_verification_rejects_failed_or_reparse_metadata(self) -> None:
         kernel = mock.Mock()
@@ -218,7 +288,19 @@ class VerifiedWriteTests(unittest.TestCase):
         with mock.patch(
             "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
         ):
-            self.assertEqual(_final_windows_path(1), Path("C:/plain"))
+            self.assertEqual(_final_windows_path(1), Path(r"C:\plain"))
+
+        def return_prefixed_drive(_handle, buffer, _size, _flags):
+            if buffer is None:
+                return 16
+            buffer.value = r"\\?\C:\plain"
+            return len(buffer.value)
+
+        kernel.GetFinalPathNameByHandleW.side_effect = return_prefixed_drive
+        with mock.patch(
+            "ai_assistant.tools.verified_write.ctypes.WinDLL", return_value=kernel, create=True,
+        ):
+            self.assertEqual(_final_windows_path(1), Path(r"C:\plain"))
 
         def return_unc(_handle, buffer, _size, _flags):
             if buffer is None:
@@ -243,14 +325,37 @@ class VerifiedWriteTests(unittest.TestCase):
                 _write_windows(chain, ".tmp", "target", b"x")
         close.assert_called_once_with(40)
 
-    @unittest.skipUnless(os.name == "nt", "Windows directory-handle identity test")
+    def test_windows_write_flushes_closes_and_replaces_on_success(self) -> None:
+        chain = _DirectoryChain([1], self.root, False)
+        with mock.patch("ai_assistant.tools.verified_write.os.open", return_value=40), mock.patch(
+            "ai_assistant.tools.verified_write._write_all",
+        ), mock.patch("ai_assistant.tools.verified_write.os.fsync") as fsync, mock.patch(
+            "ai_assistant.tools.verified_write.os.close",
+        ) as close, mock.patch("ai_assistant.tools.verified_write.os.replace") as replace, mock.patch(
+            "ai_assistant.tools.verified_write.Path.unlink", side_effect=FileNotFoundError,
+        ):
+            _write_windows(chain, ".tmp", "target", b"x")
+        fsync.assert_called_once_with(40)
+        close.assert_called_once_with(40)
+        replace.assert_called_once_with(self.root / ".tmp", self.root / "target")
+
     def test_windows_identity_mismatch_is_refused(self) -> None:
+        kernel = mock.Mock()
+        kernel.GetFileInformationByHandle.return_value = True
+        information = _ByHandleFileInformation()
+        information.dwFileAttributes = 0x10
         with mock.patch(
             "ai_assistant.tools.verified_write._final_windows_path",
             return_value=self.root / "different",
         ):
             with self.assertRaises(DirectoryIdentityError):
-                create_directory_beneath(self.root, Path("child"))
+                _verify_windows_directory(kernel, 1, 1, information, self.root)
+
+        with mock.patch(
+            "ai_assistant.tools.verified_write._final_windows_path",
+            return_value=self.root,
+        ):
+            _verify_windows_directory(kernel, 1, 1, information, self.root)
 
 
 if __name__ == "__main__":

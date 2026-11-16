@@ -16,7 +16,7 @@ import base64
 import ctypes
 import sys
 from ctypes import wintypes
-from typing import Any
+from typing import Any, cast
 
 from ai_assistant.ports import StorageKeyError
 
@@ -80,8 +80,8 @@ def _blob(value: bytes) -> tuple[Any, _DataBlob]:
 def _call_dpapi(function_name: str, value: bytes) -> bytes:
     """Invoke one DPAPI transform and always release its LocalAlloc output."""
     try:
-        crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        crypt32 = cast(Any, ctypes).WinDLL("crypt32", use_last_error=True)
+        kernel32 = cast(Any, ctypes).WinDLL("kernel32", use_last_error=True)
     except (AttributeError, OSError) as error:
         message = "Windows DPAPI is unavailable"
         raise StorageKeyError(message) from error
@@ -115,7 +115,7 @@ def _call_dpapi(function_name: str, value: bytes) -> bytes:
         _CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(output_blob),
     ):
-        code = ctypes.get_last_error()
+        code = cast(Any, ctypes).get_last_error()
         message = f"Windows DPAPI {function_name} failed (error {code})"
         raise StorageKeyError(message)
     if not output_blob.pbData or output_blob.cbData == 0:

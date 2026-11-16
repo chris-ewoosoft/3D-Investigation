@@ -18,8 +18,8 @@
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 155 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 673 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062) |
-| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 849 statements, 3 284 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062 full baseline) |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 678 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 850 statements, 3 284 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062 full baseline) |
 | Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **344/344** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062; CI uses 2 workers) |
 | Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 344` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |

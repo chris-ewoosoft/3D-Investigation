@@ -318,9 +318,13 @@ class DpapiKeyCustodyTests(unittest.TestCase):
         self.assertEqual(called.call_args_list[0].args, ("CryptProtectData", _KEY))
         self.assertEqual(called.call_args_list[1].args, ("CryptUnprotectData", b"wrapped"))
 
-        for envelope in ("base64:not-dpapi", f"{DPAPI_PREFIX}!!!", DPAPI_PREFIX):
-            with self.subTest(envelope=envelope), self.assertRaises(StorageKeyError):
-                unprotect_local_key(envelope)
+        with mock.patch(
+            "ai_assistant.adapters.persistence.key_custody.os_key_protection_available",
+            return_value=True,
+        ):
+            for envelope in ("base64:not-dpapi", f"{DPAPI_PREFIX}!!!", DPAPI_PREFIX):
+                with self.subTest(envelope=envelope), self.assertRaises(StorageKeyError):
+                    unprotect_local_key(envelope)
 
     def test_os_protection_refuses_an_unsupported_platform(self):
         with mock.patch(
