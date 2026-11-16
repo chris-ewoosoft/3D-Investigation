@@ -153,7 +153,9 @@ class OperationalDocsTests(unittest.TestCase):
         self.assertEqual(environment["AGENT_CHECKPOINT_REQUIRED"], "1")
         self.assertEqual(environment["AGENT_MEMORY_PATH"], "/app/data/AIAssistant/Cache/memory.sqlite")
         self.assertEqual(environment["AI_TRUSTED_LOCAL_PEER_CIDRS"], "172.30.255.1/32")
-        self.assertEqual(environment["AGENT_SANDBOX_ENABLED"], "0")
+        self.assertEqual(environment["AGENT_SANDBOX_ENABLED"], "1")
+        self.assertEqual(environment["AGENT_SANDBOX_RUNTIME"], "container")
+        self.assertEqual(environment["AGENT_SANDBOX_REQUIRE_ISOLATION"], "1")
         self.assertIn("127.0.0.1", service["ports"][0])
         self.assertEqual(service["networks"]["ai_local"]["ipv4_address"], "172.30.255.2")
         network = payload["networks"]["ai_local"]["ipam"]["config"][0]

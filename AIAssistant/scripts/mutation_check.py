@@ -194,9 +194,106 @@ class Mutant:
 #: refusing task submit/resume before committing while closing, preserving
 #: single-use grants on close and capping lingering tool workers, containing
 #: BaseException in SSE stream workers, and bounding uvicorn graceful shutdown.
-MIN_MUTANTS = 334
+#: ADR 0061 adds five more: Windows DPAPI availability, protected creation,
+#: legacy-key migration, payload-length validation and native failure
+#: containment.
+#: ADR 0062 adds five more: detected ambient isolation, descriptor-anchored
+#: write/create commits, reparse-point refusal and opened-directory identity.
+MIN_MUTANTS = 344
 
 MUTANTS: tuple[Mutant, ...] = (
+    # ── Local storage-key custody (ADR 0061) ─────────────────────────────────
+    Mutant(
+        "src/ai_assistant/adapters/persistence/key_custody.py",
+        '    return sys.platform == "win32"',
+        "    return False",
+        ("tests.unit.test_storage_crypto",),
+        "the Windows DPAPI backend is reported unavailable and new local keys fall back to plaintext",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/storage_crypto.py",
+        "    if _create_key_file(path, key, protect=not explicit and os_key_protection_available()):",
+        "    if _create_key_file(path, key, protect=False):",
+        ("tests.unit.test_storage_crypto",),
+        "a newly generated Windows desktop key is written in plaintext instead of a DPAPI envelope",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/storage_crypto.py",
+        "    if local_default and os_key_protection_available():\n"
+        "        _replace_key_file(path, protect_local_key(key))",
+        "    if False:\n"
+        "        _replace_key_file(path, protect_local_key(key))",
+        ("tests.unit.test_storage_crypto",),
+        "a legacy plaintext Windows desktop key is used without being migrated to DPAPI",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/key_custody.py",
+        "    if not transform(\n",
+        "    if False and not transform(\n",
+        ("tests.unit.test_storage_crypto",),
+        "a failing Windows DPAPI call is not reported with its native error",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/persistence/storage_crypto.py",
+        "    text = (\n"
+        "        protect_local_key(key)\n"
+        "        if protect\n"
+        "        else f\"base64:{base64.urlsafe_b64encode(key).decode('ascii')}\"\n"
+        "    )\n"
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    try:\n"
+        "        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+        "    except FileExistsError:\n"
+        "        return False",
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    try:\n"
+        "        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)\n"
+        "    except FileExistsError:\n"
+        "        return False\n"
+        "    text = (\n"
+        "        protect_local_key(key)\n"
+        "        if protect\n"
+        "        else f\"base64:{base64.urlsafe_b64encode(key).decode('ascii')}\"\n"
+        "    )",
+        ("tests.unit.test_storage_crypto",),
+        "a failed DPAPI envelope creation leaves an empty local key file behind",
+    ),
+    # Descriptor-anchored writes and ambient container parity (ADR 0062).
+    Mutant(
+        "src/ai_assistant/tools/sandbox.py",
+        '    ambient = runtime == "container" and _ambient_container_isolation_available()',
+        "    ambient = False",
+        ("tests.unit.test_sandbox",),
+        "the compose runtime claims ambient isolation without detecting its container boundary",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/sandbox.py",
+        "        atomic_write_beneath(root, relative, payload)",
+        "        (root / relative).write_bytes(payload)",
+        ("tests.unit.test_sandbox",),
+        "the write sandbox reopens a checked path instead of committing through verified handles",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/sandbox.py",
+        "        created = create_directory_beneath(root, relative)",
+        "        created = False",
+        ("tests.unit.test_sandbox",),
+        "directory creation bypasses the verified component-handle chain",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/verified_write.py",
+        "    if not attributes & _FILE_ATTRIBUTE_DIRECTORY or attributes & _FILE_ATTRIBUTE_REPARSE_POINT:",
+        "    if not attributes & _FILE_ATTRIBUTE_DIRECTORY:",
+        ("tests.unit.test_verified_write",),
+        "a junction or symbolic-link directory component is accepted by the write commit",
+    ),
+    Mutant(
+        "src/ai_assistant/tools/verified_write.py",
+        "    if os.path.normcase(str(actual)) != os.path.normcase(str(path.resolve())):",
+        "    if False:",
+        ("tests.unit.test_verified_write",),
+        "the directory opened after policy validation is not checked against the authorised identity",
+    ),
     # ── Sandbox allow-list (ADR 0011) ────────────────────────────────────────
     Mutant(
         "src/ai_assistant/tools/sandbox.py",
@@ -910,8 +1007,8 @@ MUTANTS: tuple[Mutant, ...] = (
     # ── Production gates & admission governor (ADR 0023/0024) ────────────────
     Mutant(
         "src/ai_assistant/tools/sandbox.py",
-        'if runtime_settings.sandbox_require_isolation and runtime_settings.sandbox_runtime != "docker":',
-        "if False:",
+        '    if required and runtime != "docker" and not ambient:',
+        "    if False:",
         ("tests.unit.test_sandbox",),
         "isolation gate removed (local runtime runs with server privileges)",
     ),
@@ -1032,11 +1129,11 @@ MUTANTS: tuple[Mutant, ...] = (
     ),
     Mutant(
         "src/ai_assistant/adapters/persistence/storage_crypto.py",
-        "    if _create_key_file(path, key):\n"
+        "    if _create_key_file(path, key, protect=not explicit and os_key_protection_available()):\n"
         "        return AesGcmFieldCipher(key)\n"
         "    # Another process won the O_EXCL race; its key is the one on disk.\n"
-        "    return AesGcmFieldCipher(_read_key_file(path))",
-        "    if _create_key_file(path, key):\n"
+        "    return AesGcmFieldCipher(_read_key_file(path, local_default=not explicit))",
+        "    if _create_key_file(path, key, protect=not explicit and os_key_protection_available()):\n"
         "        return AesGcmFieldCipher(key)\n"
         "    return AesGcmFieldCipher(key)",
         ("tests.unit.test_storage_crypto",),
@@ -3318,6 +3415,7 @@ PINNED_DECISION_FILES: tuple[str, ...] = (
     "src/ai_assistant/adapters/http/health_routes.py",
     "src/ai_assistant/adapters/http/security.py",
     "src/ai_assistant/adapters/persistence/checkpointing.py",
+    "src/ai_assistant/adapters/persistence/key_custody.py",
     "src/ai_assistant/adapters/persistence/memory_store.py",
     "src/ai_assistant/adapters/persistence/sqlite_store.py",
     "src/ai_assistant/adapters/web_search.py",
@@ -3347,6 +3445,7 @@ PINNED_DECISION_FILES: tuple[str, ...] = (
     "src/ai_assistant/settings.py",
     "src/ai_assistant/tools/factory.py",
     "src/ai_assistant/tools/sandbox.py",
+    "src/ai_assistant/tools/verified_write.py",
     "src/ai_assistant/tools/tool_contract.py",
     "src/ai_assistant/tools/builtin/web_tools.py",
     "tests/run_suite.py",

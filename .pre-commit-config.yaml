@@ -55,13 +55,14 @@ repos:
         stages: [pre-commit]
 
   # ─── PRE-COMMIT: Python Linting (Ruff) ────────────────────────────────────
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+  - repo: local
     hooks:
-      - id: ruff
+      - id: ruff-ai-assistant
         name: ruff check (AIAssistant)
-        args: ["--config=AIAssistant/pyproject.toml"]
+        entry: powershell -NoProfile -Command "Set-Location AIAssistant; ruff check ."
+        language: system
         files: ^AIAssistant/
+        pass_filenames: false
         stages: [pre-commit]
 
   - repo: local

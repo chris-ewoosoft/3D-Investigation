@@ -153,6 +153,69 @@ class SandboxRunTests(unittest.TestCase):
         self.assertEqual(result["return_code"], 0)
         sub.assert_called_once()
 
+    def test_compose_runtime_uses_the_ambient_container_boundary(self) -> None:
+        with mock.patch(
+            "ai_assistant.tools.sandbox.load_agent_runtime_settings",
+            return_value=_settings(sandbox_runtime="container", sandbox_require_isolation=True),
+        ), mock.patch(
+            "ai_assistant.tools.sandbox._ambient_container_isolation_available",
+            return_value=True,
+        ), mock.patch(
+            "ai_assistant.tools.sandbox.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ):
+            result = run("python --version", "C:/workspace", 30)
+        self.assertEqual(result["return_code"], 0)
+        self.assertEqual(result["sandbox"], "ambient-container")
+
+    def test_container_runtime_fails_closed_outside_a_container(self) -> None:
+        with mock.patch(
+            "ai_assistant.tools.sandbox.load_agent_runtime_settings",
+            return_value=_settings(sandbox_runtime="container", sandbox_require_isolation=True),
+        ), mock.patch(
+            "ai_assistant.tools.sandbox._ambient_container_isolation_available",
+            return_value=False,
+        ), mock.patch("ai_assistant.tools.sandbox.subprocess.run") as sub:
+            result = run("python --version", "C:/workspace", 30)
+        self.assertIn("outside a detected container", result["error"])
+        sub.assert_not_called()
+
+    def test_unknown_sandbox_runtime_is_refused(self) -> None:
+        with mock.patch(
+            "ai_assistant.tools.sandbox.load_agent_runtime_settings",
+            return_value=_settings(sandbox_runtime="host"),
+        ):
+            result = run("python --version", "C:/workspace", 30)
+        self.assertIn("Unsupported sandbox runtime", result["error"])
+
+    def test_ambient_container_detection_requires_linux_evidence(self) -> None:
+        from ai_assistant.tools.sandbox import _ambient_container_isolation_available
+
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "win32"):
+            self.assertFalse(_ambient_container_isolation_available())
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "linux"), mock.patch(
+            "ai_assistant.tools.sandbox.Path.is_file", return_value=True,
+        ):
+            self.assertTrue(_ambient_container_isolation_available())
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "linux"), mock.patch(
+            "ai_assistant.tools.sandbox.Path.is_file", return_value=False,
+        ), mock.patch(
+            "ai_assistant.tools.sandbox.Path.read_text", return_value="0::/kubepods/pod/id",
+        ):
+            self.assertTrue(_ambient_container_isolation_available())
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "linux"), mock.patch(
+            "ai_assistant.tools.sandbox.Path.is_file", return_value=False,
+        ), mock.patch(
+            "ai_assistant.tools.sandbox.Path.read_text", return_value="0::/user.slice",
+        ):
+            self.assertFalse(_ambient_container_isolation_available())
+        with mock.patch("ai_assistant.tools.sandbox.sys.platform", "linux"), mock.patch(
+            "ai_assistant.tools.sandbox.Path.is_file", return_value=False,
+        ), mock.patch(
+            "ai_assistant.tools.sandbox.Path.read_text", side_effect=OSError("blocked"),
+        ):
+            self.assertFalse(_ambient_container_isolation_available())
+
     def test_docker_runtime_builds_docker_argv(self) -> None:
         with mock.patch(
             "ai_assistant.tools.sandbox.load_agent_runtime_settings",
@@ -937,6 +1000,13 @@ class SandboxWriteFileTests(unittest.TestCase):
         self.assertEqual((self.root / "src" / "out.txt").read_text(encoding="utf-8"), "hello")
         self.assertEqual(result["path"], "src/out.txt")
 
+    def test_write_commit_is_delegated_to_the_verified_handle_boundary(self) -> None:
+        target = self.root / "src" / "out.txt"
+        with mock.patch("ai_assistant.tools.sandbox.atomic_write_beneath") as commit:
+            result = write_file(str(target), "hello", str(self.root))
+        self.assertTrue(result["success"])
+        commit.assert_called_once_with(self.root.resolve(), Path("src/out.txt"), b"hello")
+
     def test_os_error_reported(self) -> None:
         with mock.patch("ai_assistant.tools.sandbox.os.replace", side_effect=OSError("disk full")):
             result = write_file(str(self.root / "src" / "out.txt"), "hello", str(self.root))
@@ -987,8 +1057,20 @@ class SandboxCreateDirectoryTests(unittest.TestCase):
         second = create_directory(str(self.root / "src" / "newdir"), str(self.root))
         self.assertFalse(second["created"])
 
+    def test_directory_commit_is_delegated_to_the_verified_handle_boundary(self) -> None:
+        target = self.root / "src" / "newdir"
+        with mock.patch(
+            "ai_assistant.tools.sandbox.create_directory_beneath", return_value=True,
+        ) as commit:
+            result = create_directory(str(target), str(self.root))
+        self.assertTrue(result["created"])
+        commit.assert_called_once_with(self.root.resolve(), Path("src/newdir"))
+
     def test_os_error_reported(self) -> None:
-        with mock.patch("ai_assistant.tools.sandbox.Path.mkdir", side_effect=OSError("perm")):
+        with mock.patch(
+            "ai_assistant.tools.sandbox.create_directory_beneath",
+            side_effect=OSError("perm"),
+        ):
             result = create_directory(str(self.root / "src" / "x"), str(self.root))
         self.assertIn("Unable to create", result["error"])
 

@@ -1,8 +1,8 @@
 """Policy-first sandbox for destructive agent tools.
 
-Docker isolation is opt-in because the Qt desktop distribution must still work
-without Docker.  Even the local fallback uses an allow-list and blocks shell
-metacharacters rather than executing arbitrary commands.
+The desktop may explicitly use the local allow-list, a host deployment may
+launch a nested Docker sandbox, and compose reuses its already-constrained
+service container. Every runtime shares the same command and write policy.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import os
 import shlex
 import subprocess
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,8 @@ from typing import Any
 from ai_assistant.exec_policy import executable_candidates, resolve_executable
 from ai_assistant.path_policy import canonical_path
 from ai_assistant.settings import agent_write_roots, load_agent_runtime_settings
+
+from .verified_write import atomic_write_beneath, create_directory_beneath
 
 _ALLOWED = {"cmake", "ctest", "python", "pytest", "ruff", "git"}
 # ADR 0011: allow-list must restrict subcommand / flag; deny arbitrary code execution.
@@ -565,15 +566,51 @@ def _resolve_executable(name: str, path: str) -> str | None:
     return resolve_executable(name, path)
 
 
+def _ambient_container_isolation_available() -> bool:
+    """Return whether this process is already inside a Linux container.
+
+    The compose service must not mount the host Docker socket merely to start
+    a second container.  Its own read-only, capability-dropped container is
+    already the OS boundary, but the claim is accepted only when the runtime
+    can observe a container marker; an environment variable alone is not
+    evidence of isolation.
+    """
+    if sys.platform != "linux":
+        return False
+    if Path("/.dockerenv").is_file():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in ("/docker/", "/kubepods/", "/containerd/"))
+
+
+def _runtime_isolation(runtime: str, *, required: bool) -> tuple[str | None, bool]:
+    """Return ``(rejection, ambient)`` for one configured runtime."""
+    if runtime not in {"local", "docker", "container"}:
+        return f"Unsupported sandbox runtime: {runtime}.", False
+    ambient = runtime == "container" and _ambient_container_isolation_available()
+    if runtime == "container" and not ambient:
+        return "Container sandbox runtime requested outside a detected container.", False
+    if required and runtime != "docker" and not ambient:
+        return "Sandbox isolation is required by policy; set AGENT_SANDBOX_RUNTIME=docker.", False
+    return None, ambient
+
+
 def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:
     runtime_settings = load_agent_runtime_settings()
     if not runtime_settings.sandbox_enabled:
         return {"error": "Agent command sandbox is disabled by policy."}
-    if runtime_settings.sandbox_require_isolation and runtime_settings.sandbox_runtime != "docker":
+    runtime = runtime_settings.sandbox_runtime
+    runtime_rejection, ambient_isolation = _runtime_isolation(
+        runtime, required=runtime_settings.sandbox_require_isolation,
+    )
+    if runtime_rejection:
         # Production gate (ADR 0023): an allow-list is not an OS boundary, so
         # deployments that declare untrusted tool execution refuse to run
         # commands with the server's own privileges.
-        return {"error": "Sandbox isolation is required by policy; set AGENT_SANDBOX_RUNTIME=docker."}
+        return {"error": runtime_rejection}
     rejection = _policy_rejection(command)
     if rejection:
         return {"error": rejection}
@@ -597,7 +634,7 @@ def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONUTF8": "1"}
     container_name = None
     sandbox_label = "local-allowlist"
-    if runtime_settings.sandbox_runtime == "docker":
+    if runtime == "docker":
         argv, container_name = _docker_argv(argv, cwd, runtime_settings.sandbox_image)
         sandbox_label = "docker"
     else:
@@ -608,6 +645,8 @@ def run(command: str, cwd: str, timeout: int) -> dict[str, Any]:
         if resolved is None:
             return {"error": f"Executable '{argv[0]}' was not found on PATH."}
         argv = [resolved, *argv[1:]]
+        if ambient_isolation:
+            sandbox_label = "ambient-container"
     try:
         extra_kwargs: dict[str, Any] = {}
         if sys.platform == "win32":
@@ -666,7 +705,8 @@ def write_file(path: str, content: str, project_root: str) -> dict[str, Any]:
     runtime_settings = load_agent_runtime_settings()
     if not runtime_settings.sandbox_enabled:
         return {"error": "Agent write sandbox is disabled by policy."}
-    if len(content.encode("utf-8")) > runtime_settings.max_write_bytes:
+    payload = content.encode("utf-8")
+    if len(payload) > runtime_settings.max_write_bytes:
         return {"error": "Write exceeds AGENT_MAX_WRITE_BYTES."}
     # The gate compares the *canonical* spelling of the target and of the
     # project root: the target is resolved (a symlink is followed, so a link
@@ -674,8 +714,9 @@ def write_file(path: str, content: str, project_root: str) -> dict[str, Any]:
     # so a path that never left the project root cannot read as an escape
     # just because Windows handed us two spellings of one directory.
     resolved = _canonical_path(Path(path))
+    root = _canonical_path(Path(project_root))
     try:
-        relative = resolved.relative_to(_canonical_path(Path(project_root)))
+        relative = resolved.relative_to(root)
     except ValueError:
         return {"error": "Write target escapes the project root."}
     # ADR 0015 / ADR 0011 / ADR 0032: deny writing to policy / sandbox /
@@ -704,17 +745,11 @@ def write_file(path: str, content: str, project_root: str) -> dict[str, Any]:
         return {"error": "Write target is denied by sandbox policy (policy tree)."}
     if not relative.parts or relative.parts[0] not in agent_write_roots():
         return {"error": "Write target is not in AGENT_WRITE_ALLOWLIST."}
-    target = Path(path)
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=target.parent,
-                                         delete=False) as temporary:
-            temporary.write(content)
-            temporary_path = temporary.name
-        os.replace(temporary_path, target)
+        atomic_write_beneath(root, relative, payload)
         return {"success": True, "path": str(relative).replace("\\", "/"),
-                "bytes_written": len(content.encode("utf-8")), "sandbox": "write-allowlist"}
-    except OSError as error:
+                "bytes_written": len(payload), "sandbox": "verified-write-allowlist"}
+    except (OSError, ValueError) as error:
         return {"error": f"Unable to write sandboxed target: {error}"}
 
 
@@ -738,9 +773,8 @@ def create_directory(path: str, project_root: str) -> dict[str, Any]:
     if not relative.parts or relative.parts[0] not in agent_write_roots():
         return {"error": "Directory target is not in AGENT_WRITE_ALLOWLIST."}
     try:
-        existed = target.is_dir()
-        target.mkdir(parents=True, exist_ok=True)
-        return {"success": True, "path": str(relative).replace("\\", "/"), "created": not existed,
-                "sandbox": "directory-allowlist"}
-    except OSError as error:
+        created = create_directory_beneath(root, relative)
+        return {"success": True, "path": str(relative).replace("\\", "/"), "created": created,
+                "sandbox": "verified-directory-allowlist"}
+    except (OSError, ValueError) as error:
         return {"error": f"Unable to create sandboxed directory: {error}"}

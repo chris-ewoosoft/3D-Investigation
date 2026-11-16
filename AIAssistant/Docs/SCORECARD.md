@@ -15,13 +15,13 @@
 | Gate | Command | Measured 2026-11-16 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
-| Types | `python -m mypy src/ai_assistant` | 0 issues, 153 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
+| Types | `python -m mypy src/ai_assistant` | 0 issues, 155 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 640 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060) |
-| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 515 statements, 3 202 branches, 0 missed, 0 partial (ADR 0058/0059/0060 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **334/334** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 334` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 673 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 849 statements, 3 284 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **344/344** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 344` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
 | Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
@@ -31,6 +31,27 @@
 | Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
 | Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
 | Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
+
+## Windows DPAPI storage-key custody (2026-11-16, ADR 0061)
+
+The automatically generated Windows desktop key is no longer readable base64.
+New keys are stored as user-scope `dpapi:v1` envelopes, and a legacy plaintext
+key is atomically migrated before it can be used. DPAPI or migration failure
+aborts startup instead of silently retaining plaintext. A real Windows native
+round trip plus cross-platform failure tests pin the boundary. Five new
+decision mutants raise the floor from 334 to **339/339 killed**.
+
+## Verified write handles and container sandbox parity (2026-11-16, ADR 0062)
+
+Write/create commits no longer reopen an authorised path string. Windows
+holds a non-reparse directory-handle chain without delete sharing; POSIX uses
+`dir_fd` plus `O_NOFOLLOW`, and both create and atomically replace relative to
+the verified parent. The compose profile now enables command tools through
+the already-running, read-only capability-dropped service container, and the
+runtime accepts that boundary only after observing a Linux container marker.
+The native mechanism is isolated in `tools/verified_write.py`, removing this
+responsibility from the sandbox policy hotspot. Five new decision mutants
+raise the measured floor from 339 to **344/344 killed**.
 
 ## Bounded LSP and durable worker handoff (2026-11-16, ADR 0060)
 
@@ -54,8 +75,10 @@ link, and the path must still identify that handle. This closes the hard-link
 alias bypass and the identity gap at the final open; it does not make earlier
 path-based root/name policy checks atomic against a hostile concurrent local
 writer. An AST boundary test rejects direct built-in `open()` in the guarded
-reader set. The contract is intentionally read-side only; ADR 0033's
-write/create TOCTOU limitation and the OS sandbox/ACL boundary remain explicit.
+reader set. The original contract was intentionally read-side only. ADR 0062
+subsequently closed ADR 0033's write/create symlink/junction TOCTOU limitation
+with a verified directory-handle chain; the wider OS sandbox/ACL boundary
+remains explicit.
 
 CI and local coverage now use `tests.run_suite`, which records ordinary and
 unraisable `ResourceWarning` channels through a forced final collection. Two
@@ -1305,12 +1328,13 @@ following defects it found are now closed and pinned by regression tests:
 Remaining tracked gaps (not measured-gate failures — each is a decision the
 repository deliberately does not make, with the reason written down):
 
-- **Unattended rotation and KMS/DPAPI integration.** The at-rest key can be
+- **Unattended rotation and KMS integration.** The at-rest key can be
   rotated now — `scripts/rekey_storage.py` re-encrypts the task store in one
   transaction, re-seals the pending payload atomically, deletes the derived
   RAG cache, and refuses to write anything unless the old key actually opens
-  the state (ADR 0030). What is missing is calling a KMS/DPAPI directly and
-  rotating without an operator in the loop.
+  the state (ADR 0030). Windows desktop custody now uses DPAPI (ADR 0061).
+  What remains is a generic KMS integration and rotation without an operator
+  in the loop.
 - **The source documents are still the user's own files.** ADR 0028 seals the
   *copy* the assistant creates; encrypting the original document tree is the
   user's and the operator's business (volume encryption).
@@ -1318,9 +1342,10 @@ repository deliberately does not make, with the reason written down):
   covers the listed content columns, the cache artifacts and the chat
   attachments; BitLocker/LUKS, volume ACLs and backup encryption remain
   deployment responsibilities.
-- **The key file relies on the account's filesystem ACL** (owner-only on POSIX,
-  the account ACL on Windows). A deployment that needs stronger custody sets
-  `AI_STORAGE_KEY_FILE` to a KMS-mounted secret instead.
+- **The POSIX default key file relies on the account's filesystem ACL**
+  (owner-only mode 0600). Windows uses user-scope DPAPI. A POSIX deployment
+  that needs stronger custody sets `AI_STORAGE_KEY_FILE` to a KMS-mounted
+  secret instead.
 - **The Postgres and Redis checkpoint backends** keep their published
   constructor signature (`from_conn_string` takes no `serde`), so their
   state is protected by the database's own encryption rather than by the

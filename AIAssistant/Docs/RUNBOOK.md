@@ -75,7 +75,7 @@ không đọc được):
 |-------|----------|---------|
 | `AI_STORAGE_KEY` | production có secret store | `base64:<url-safe>` / `hex:<digits>` / base64 trần; phải giải ra đúng 32 byte |
 | `AI_STORAGE_KEY_FILE` | production mount secret file | File thiếu/không đọc được → **abort lúc khởi động**, không sinh key thay thế |
-| tự sinh một lần | desktop single-user | `%LOCALAPPDATA%\3d-reconstruction\ai_assistant.key` (Windows) hoặc `$XDG_CONFIG_HOME/3d-reconstruction/ai_assistant.key` (POSIX), 0600 — **ngoài** `APP_DATA_DIR` nên backup volume không tự mang theo key |
+| tự sinh một lần | desktop single-user | `%LOCALAPPDATA%\3d-reconstruction\ai_assistant.key` dùng user-scope **DPAPI** trên Windows; POSIX dùng `$XDG_CONFIG_HOME/3d-reconstruction/ai_assistant.key` với mode 0600 — đều **ngoài** `APP_DATA_DIR` nên backup volume không tự mang theo key |
 
 Vì vậy, trước khi coi deployment là production:
 
@@ -91,9 +91,10 @@ Vì vậy, trước khi coi deployment là production:
   CI.
 
 Cơ chế này chống được sao chép volume, đọc backup và account khác trên cùng
-máy; **không** chống được attacker đã chạy được code dưới user đó (họ đọc
-được file key). Cùng giới hạn đã nêu cho HMAC cache RAG. Tích hợp xoay khoá tự
-động qua KMS/DPAPI chưa có trong repo; quy trình re-key offline có ở mục 1.2:
+máy; **không** chống được attacker đã chạy được code dưới user đó (trên Windows
+họ có thể gọi DPAPI dưới cùng account). Windows desktop đã dùng DPAPI để giữ
+khóa local (ADR 0061); tích hợp xoay khoá tự động qua KMS vẫn chưa có. Quy
+trình re-key offline có ở mục 1.2:
 [`Docs/adr/0027-at-rest-encryption-local-state.md`](adr/0027-at-rest-encryption-local-state.md).
 
 ### 1.2 Xoay khoá at-rest (ADR 0030)
@@ -215,8 +216,11 @@ log (đường dẫn/DSN/package thiếu). Cả hai trường hợp là fail clo
   container) là đường *không có OS boundary* — allow-list chỉ lọc lệnh, còn
   `cmake -P`/`ctest`/`pytest` vốn dĩ thực thi code — nên nó phải là một quyết
   định được viết ra, không phải một mặc định.
-- Bật `AGENT_SANDBOX_RUNTIME=docker` + image đã duyệt trước khi bật
-  `AGENT_SANDBOX_REQUIRE_ISOLATION=1`.
+- Trên host, bật `AGENT_SANDBOX_RUNTIME=docker` + image đã duyệt trước khi bật
+  `AGENT_SANDBOX_REQUIRE_ISOLATION=1`. Trong `compose.yaml`, runtime
+  `container` chạy lệnh ngay trong service container hiện tại và chỉ được
+  chấp nhận khi quan sát được marker Docker/Kubernetes; Docker socket của
+  host không được mount.
 - Desktop một người dùng (loopback) không có Docker: khai báo rõ
   `AGENT_SANDBOX_REQUIRE_ISOLATION=0` trong `AIAssistant/.env` (file này được
   `load_local_dotenv(PACKAGE_ROOT)` nạp khi compose) hoặc trong environment

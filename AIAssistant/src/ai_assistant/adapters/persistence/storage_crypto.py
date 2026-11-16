@@ -14,8 +14,9 @@ Key management is explicit and fail-closed:
   file fails startup; it never silently generates a replacement.
 * Otherwise one random key is generated at
   :func:`ai_assistant.settings.storage_key_location` (outside
-  ``APP_DATA_DIR``) with owner-only permissions on POSIX and the account ACL
-  on Windows, then reused.
+  ``APP_DATA_DIR``). Windows stores only a user-scope DPAPI envelope; a legacy
+  plaintext key is atomically migrated before use. POSIX uses owner-only
+  permissions because it has no standard-library OS keyring backend.
 
 Format: ``enc:v1:<url-safe base64(nonce || ciphertext)>``. The 96-bit nonce is
 random per field and the field name is included as associated data, so a
@@ -54,10 +55,18 @@ from ai_assistant.ports import (
 )
 from ai_assistant.settings import storage_key, storage_key_location
 
+from .key_custody import (
+    DPAPI_PREFIX,
+    os_key_protection_available,
+    protect_local_key,
+    unprotect_local_key,
+)
+
 #: The exception types and the protocol live in ``ports`` (the port layer owns
 #: the contract, this adapter implements it); they are re-exported here so
 #: the persistence package has a single import site for them.
 __all__ = [
+    "DPAPI_PREFIX",
     "SEALED_BINARY_PREFIX",
     "SEALED_PREFIX",
     "AesGcmFieldCipher",
@@ -189,16 +198,16 @@ def load_storage_cipher(env: Mapping[str, str] | None = None) -> AesGcmFieldCiph
 
     path, explicit = storage_key_location(env)
     if path.exists():
-        return AesGcmFieldCipher(_read_key_file(path))
+        return AesGcmFieldCipher(_read_key_file(path, local_default=not explicit))
     if explicit:
         message = f"AI_STORAGE_KEY_FILE does not exist: {path}"
         raise StorageKeyError(message)
 
     key = secrets.token_bytes(KEY_BYTES)
-    if _create_key_file(path, key):
+    if _create_key_file(path, key, protect=not explicit and os_key_protection_available()):
         return AesGcmFieldCipher(key)
     # Another process won the O_EXCL race; its key is the one on disk.
-    return AesGcmFieldCipher(_read_key_file(path))
+    return AesGcmFieldCipher(_read_key_file(path, local_default=not explicit))
 
 
 def cipher_from_key_text(value: str, *, source: str) -> AesGcmFieldCipher:
@@ -220,7 +229,7 @@ def cipher_from_key_file(path: Path) -> AesGcmFieldCipher:
     :func:`cipher_from_key_text` accepts; an unreadable file or a malformed
     key aborts instead of falling back to a generated key.
     """
-    return AesGcmFieldCipher(_read_key_file(path))
+    return AesGcmFieldCipher(_read_key_file(path, local_default=False))
 
 
 def reseal_text(
@@ -282,23 +291,37 @@ def _decode_key(value: str, *, source: str) -> bytes:
     return key
 
 
-def _read_key_file(path: Path) -> bytes:
+def _read_key_file(path: Path, *, local_default: bool) -> bytes:
     try:
         text = path.read_text(encoding="ascii")
     except (OSError, ValueError) as error:
         message = f"cannot read at-rest key file {path}: {error}"
         raise StorageKeyError(message) from error
-    return _decode_key(text, source=str(path))
+    stripped = text.strip()
+    if stripped.startswith(DPAPI_PREFIX):
+        return unprotect_local_key(stripped)
+    key = _decode_key(text, source=str(path))
+    if local_default and os_key_protection_available():
+        _replace_key_file(path, protect_local_key(key))
+    return key
 
 
-def _create_key_file(path: Path, key: bytes) -> bool:
+def _create_key_file(path: Path, key: bytes, *, protect: bool) -> bool:
     """Create ``path`` with owner-only permissions; return False on a race."""
+    # Build the fail-closed envelope before creating the file.  If the OS
+    # backend fails, startup must leave no empty key file behind for the next
+    # process to mistake for a configured key.
+    text = (
+        protect_local_key(key)
+        if protect
+        else f"base64:{base64.urlsafe_b64encode(key).decode('ascii')}"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
-    payload = f"base64:{base64.urlsafe_b64encode(key).decode('ascii')}\n".encode("ascii")
+    payload = f"{text}\n".encode("ascii")
     try:
         os.write(descriptor, payload)
         os.fsync(descriptor)
@@ -306,6 +329,31 @@ def _create_key_file(path: Path, key: bytes) -> bool:
         os.close(descriptor)
     _fsync_directory(path.parent)
     return True
+
+
+def _replace_key_file(path: Path, text: str) -> None:
+    """Atomically replace a legacy local key with an OS-protected envelope."""
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    payload = f"{text}\n".encode("ascii")
+    descriptor = -1
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.write(descriptor, payload)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    except OSError as error:
+        message = f"cannot migrate local at-rest key to OS protection: {error}"
+        raise StorageKeyError(message) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _fsync_directory(directory: Path) -> None:

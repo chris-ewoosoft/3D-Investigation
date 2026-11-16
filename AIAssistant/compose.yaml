@@ -52,10 +52,11 @@ services:
       AGENT_CHECKPOINT_PATH: /app/data/AIAssistant/Cache/checkpoints.sqlite
       AGENT_MEMORY_PATH: /app/data/AIAssistant/Cache/memory.sqlite
       AGENT_CHECKPOINT_REQUIRED: "1"
-      # Docker-in-Docker is deliberately not enabled by mounting the daemon
-      # socket: doing so would make the non-root service equivalent to root on
-      # the host and the sandbox's /app paths do not exist in the host daemon.
-      AGENT_SANDBOX_ENABLED: "0"
+      # The service container itself is the OS boundary. Docker-in-Docker is
+      # deliberately not enabled: mounting the daemon socket would make the
+      # non-root service equivalent to root on the host.
+      AGENT_SANDBOX_ENABLED: "1"
+      AGENT_SANDBOX_RUNTIME: container
       AGENT_SANDBOX_REQUIRE_ISOLATION: "1"
       APP_DATA_DIR: /app/data
       HF_HOME: /app/data/AIAssistant/Cache/huggingface

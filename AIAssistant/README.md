@@ -111,6 +111,7 @@ AIAssistant/
 │  │  ├─ validation.py                # Validate đầu vào công cụ theo schema tại gateway
 │  │  ├─ tool_contract.py             # Ánh xạ và tương thích hợp đồng công cụ
 │  │  ├─ sandbox.py                   # Sandbox policy-first cho công cụ phá huỷ (run_command…)
+│  │  ├─ verified_write.py            # Commit write/create qua directory handle đã xác minh
 │  │  ├─ action_manifest.py           # Hợp đồng hành động desktop có phiên bản (chia sẻ với C++)
 │  │  ├─ aliases.py                   # Alias tên tool tương thích
 │  │  ├─ lsp_client.py                # Client LSP cho công cụ của Coding Agent
@@ -238,7 +239,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 60 Architecture Decision Record (0001–0060)
+├─ Docs/adr/                          # 62 Architecture Decision Record (0001–0062)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -688,9 +689,9 @@ lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy stri
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
 một thứ. Theo lần đo ngày 2026-11-16 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 515 statement / 3 202 branch, 2 640 test);
-inventory mutation hiện có **334/334** killed, 0 survived, 0 stale trong sandbox
-biệt lập của ADR 0056/0058/0059/0060.
+branch toàn package (11 849 statement / 3 284 branch, 2 673 test);
+inventory mutation hiện có **344/344** killed, 0 survived, 0 stale trong sandbox
+biệt lập của ADR 0056/0058/0059/0060/0061/0062.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
 quyết định *nhìn thấy được*. Từ 2026-10-28, cổng còn có sàn **theo từng file**
@@ -865,7 +866,7 @@ accuracy tổng 0.9, accuracy từng slice 0.75 và freshness 0.9. Lần đo
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 60 Architecture Decision Record (0001–0060) |
+| [`Docs/adr/`](Docs/adr/) | 62 Architecture Decision Record (0001–0062) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -933,7 +934,9 @@ Các quyết định trọng yếu, theo thứ tự:
 [0057](Docs/adr/0057-checkpoint-retention-is-a-runtime-contract.md) biến cửa sổ retention checkpoint thành contract runtime fail-closed,
 [0058](Docs/adr/0058-verified-file-handles-and-executable-resource-leak-gate.md) xác minh file handle sau khi mở, chặn hard-link alias và biến resource leak thành gate thực thi được,
 [0059](Docs/adr/0059-close-container-memory-and-concurrency-trust-gaps.md) đóng các lỗ trust của Docker peer, metadata continuation, memory prompt, reload đồng thời, state path, A2A và STM owner,
-[0060](Docs/adr/0060-bounded-lsp-and-durable-worker-handoff.md) deadline LSP thật, correlation JSON-RPC, teardown process đầy đủ và handoff durable từ task sang worker.
+[0060](Docs/adr/0060-bounded-lsp-and-durable-worker-handoff.md) deadline LSP thật, correlation JSON-RPC, teardown process đầy đủ và handoff durable từ task sang worker,
+[0061](Docs/adr/0061-windows-dpapi-storage-key-custody.md) custody khóa local Windows bằng DPAPI, migration plaintext nguyên tử và fail-closed,
+[0062](Docs/adr/0062-verified-write-handles-and-ambient-container-sandbox.md) commit write/create qua handle đã xác minh và sandbox compose dùng chính container hiện tại làm OS boundary.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.
