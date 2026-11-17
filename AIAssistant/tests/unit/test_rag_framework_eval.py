@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 import unittest
@@ -12,10 +13,7 @@ from unittest.mock import patch
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "evals" / "run_rag_framework_eval.py"
 _LOAD_ERROR = "cannot load RAG framework eval"
-_HAS_EVAL_FRAMEWORKS = (
-    importlib.util.find_spec("deepeval") is not None
-    and importlib.util.find_spec("ragas") is not None
-)
+_RUN_PINNED_FRAMEWORK_IMPORT = os.getenv("AI_RUN_RAG_FRAMEWORK_TESTS") == "1"
 
 
 def _fake_framework_modules(warning_message: str) -> dict[str, types.ModuleType]:
@@ -130,8 +128,8 @@ class FrameworkGateTests(unittest.TestCase):
                 self.eval._load_frameworks()
 
     @unittest.skipUnless(
-        _HAS_EVAL_FRAMEWORKS,
-        "requires ragas and deepeval (requirements-eval.lock)",
+        _RUN_PINNED_FRAMEWORK_IMPORT,
+        "requires the explicit requirements-eval.lock environment",
     )
     def test_pinned_framework_import_is_deprecation_clean(self) -> None:
         with warnings.catch_warnings():

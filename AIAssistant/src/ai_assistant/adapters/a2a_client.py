@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ..domain.governance import has_sensitive_content, scrub_credentials
@@ -42,6 +42,30 @@ _OPENER = build_opener(_RefuseRedirects())
 urlopen = _OPENER.open
 
 
+def is_allowed_a2a_transport(endpoint: str, *, allow_insecure_http: bool = False) -> bool:
+    """Accept authenticated A2A traffic only over HTTPS by default.
+
+    Plain HTTP is an explicit development escape hatch. Credentials embedded
+    in URLs, queries, and fragments are never valid endpoint identities.
+    """
+    try:
+        parsed = urlsplit(endpoint)
+        parsed.port  # Validate malformed/out-of-range ports eagerly.
+    except (TypeError, ValueError):
+        return False
+    scheme_allowed = parsed.scheme.casefold() == "https" or (
+        allow_insecure_http and parsed.scheme.casefold() == "http"
+    )
+    return bool(
+        scheme_allowed
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 def _read_bounded(response: Any) -> bytes:
     """Read at most ``_MAX_RESPONSE_BYTES``; refuse anything larger."""
     body: bytes = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -64,10 +88,11 @@ class TrustedA2AClient:
     """Discovers and calls only endpoints provided by deployment config."""
 
     def __init__(self, trusted_endpoints: frozenset[str], timeout_seconds: float = 10.0,
-                 bearer_token: str = "") -> None:
+                 bearer_token: str = "", *, allow_insecure_http: bool = False) -> None:
         self._trusted_endpoints = frozenset(endpoint.rstrip("/") for endpoint in trusted_endpoints)
         self._timeout_seconds = timeout_seconds
         self._bearer_token = bearer_token.strip()
+        self._allow_insecure_http = allow_insecure_http
 
     def _headers(self, *, content_type: bool = False) -> dict[str, str]:
         """Build the mandatory authenticated headers for one peer request."""
@@ -85,6 +110,10 @@ class TrustedA2AClient:
     def discover(self) -> dict[str, RemoteAgentCard]:
         cards: dict[str, RemoteAgentCard] = {}
         for endpoint in self._trusted_endpoints:
+            if not is_allowed_a2a_transport(
+                endpoint, allow_insecure_http=self._allow_insecure_http,
+            ):
+                continue
             try:
                 cards[endpoint] = self._read_card(endpoint)
             except (OSError, ValueError, URLError):
@@ -97,6 +126,10 @@ class TrustedA2AClient:
         endpoint = endpoint.rstrip("/")
         if endpoint not in self._trusted_endpoints:
             return {"routing": "rejected_policy", "error": "A2A endpoint is not trusted"}
+        if not is_allowed_a2a_transport(
+            endpoint, allow_insecure_http=self._allow_insecure_http,
+        ):
+            return {"routing": "rejected_policy", "error": "A2A endpoint requires HTTPS"}
         if not self._bearer_token:
             return {"routing": "rejected_policy", "error": "A2A outbound bearer token is not configured"}
         if classification in {DataClassification.RESTRICTED, DataClassification.REGULATED}:
@@ -144,6 +177,11 @@ class TrustedA2AClient:
         return {"routing": "remote_selected", "agent_url": endpoint, **result}
 
     def _read_card(self, endpoint: str) -> RemoteAgentCard:
+        if not is_allowed_a2a_transport(
+            endpoint, allow_insecure_http=self._allow_insecure_http,
+        ):
+            msg = "A2A endpoint requires HTTPS"
+            raise ValueError(msg)
         request = Request(
             urljoin(endpoint + "/", ".well-known/agent.json"),
             headers=self._headers(),

@@ -239,7 +239,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 62 Architecture Decision Record (0001–0062)
+├─ Docs/adr/                          # 63 Architecture Decision Record (0001–0063)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -486,7 +486,9 @@ với các specialist logic**. Cách này giữownership rõ ràng và các bư�
   bearer **bắt buộc** trên mọi bề mặt đặc quyền. A2A inbound dùng
   `AI_A2A_TOKEN` (single-tenant) hoặc `AI_A2A_TENANTS`; discovery/dispatch
   outbound dùng `AI_A2A_OUTBOUND_TOKEN` (fallback tường minh sang token
-  single-tenant). Thiếu credential thì adapter từ chối trước khi chạm mạng.
+  single-tenant). Outbound mặc định bắt buộc HTTPS; HTTP chỉ được phép khi
+  development đặt rõ `AI_A2A_ALLOW_INSECURE_HTTP=1`. Thiếu credential hoặc
+  transport an toàn thì adapter từ chối trước khi chạm mạng.
   ADR 0009 — phê duyệt là capability dùng một lần, gắn với đúng
   lời gọi (`approval_fingerprint` + grant store). ADR 0010 — domain sở hữu một
   chính sách redaction duy nhất. ADR 0011 — sandbox lệnh từ chối code interpreter
@@ -687,11 +689,11 @@ python evals/run_rag_framework_eval.py
 Các cổng là **cấu hình**, không phải cờ dòng lệnh: `pyproject.toml` sở hữu breadth
 lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy strict và
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
-một thứ. Theo lần đo ngày 2026-11-16 (các con số đo được được ghi lại trong
+một thứ. Theo lần đo ngày 2026-11-17 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 850 statement / 3 284 branch, 2 678 test);
-inventory mutation hiện có **344/344** killed, 0 survived, 0 stale trong sandbox
-biệt lập của ADR 0056/0058/0059/0060/0061/0062.
+branch toàn package (11 939 statement / 3 320 branch, 2 688 test);
+inventory mutation hiện có **357/357** killed, 0 survived, 0 stale trong sandbox
+biệt lập của ADR 0056/0058/0059/0060/0061/0062/0063.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
 quyết định *nhìn thấy được*. Từ 2026-10-28, cổng còn có sàn **theo từng file**
@@ -866,7 +868,7 @@ accuracy tổng 0.9, accuracy từng slice 0.75 và freshness 0.9. Lần đo
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 62 Architecture Decision Record (0001–0062) |
+| [`Docs/adr/`](Docs/adr/) | 63 Architecture Decision Record (0001–0063) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -937,6 +939,7 @@ Các quyết định trọng yếu, theo thứ tự:
 [0060](Docs/adr/0060-bounded-lsp-and-durable-worker-handoff.md) deadline LSP thật, correlation JSON-RPC, teardown process đầy đủ và handoff durable từ task sang worker,
 [0061](Docs/adr/0061-windows-dpapi-storage-key-custody.md) custody khóa local Windows bằng DPAPI, migration plaintext nguyên tử và fail-closed,
 [0062](Docs/adr/0062-verified-write-handles-and-ambient-container-sandbox.md) commit write/create qua handle đã xác minh và sandbox compose dùng chính container hiện tại làm OS boundary.
+[0063](Docs/adr/0063-transactional-bootstrap-secure-egress-and-release-artifact-gates.md) bootstrap giao dịch có rollback, A2A HTTPS mặc định, image đủ contract và CI audit dependency/container.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

@@ -39,6 +39,9 @@ Pillow>=10.0.0
 # Real (not faked) integration deps — see the note above.
 huggingface_hub>=0.23.0
 mcp>=1.0.0
+# mcp/fastapi pull this transitively. The explicit floor prevents a lock
+# regeneration from restoring the ReDoS-affected 1.45.1 release.
+opentelemetry-api>=1.45.2
 # At-rest encryption is exercised with the real AES-GCM provider.
 cryptography>=42.0.0
 coverage>=7.0
@@ -49,3 +52,6 @@ import-linter>=2.0.0
 # semantics of a build without anyone reviewing the change (ADR 0032).
 # The pin is exact because the recorded lint result was measured with it.
 ruff==0.16.0
+# Dependency auditing is a local/CI gate, so its implementation is pinned and
+# hash-verified exactly like ruff, mypy and coverage.
+pip-audit==2.10.1

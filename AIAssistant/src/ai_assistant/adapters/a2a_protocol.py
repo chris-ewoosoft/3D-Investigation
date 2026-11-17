@@ -29,7 +29,7 @@ from ai_assistant.settings import (
     a2a_trusted_endpoints,
 )
 
-from .a2a_client import TrustedA2AClient
+from .a2a_client import TrustedA2AClient, is_allowed_a2a_transport
 from .a2a_client import urlopen as _no_redirect_urlopen
 from .a2a_payloads import build_agent_card as _build_agent_card_payload
 
@@ -60,10 +60,6 @@ _DISCOVERY_TIMEOUT = 5.0
 _DISCOVERY_MAX_BYTES = 1_048_576
 
 
-def _is_http_url(value: str) -> bool:
-    return value.startswith("http://") or value.startswith("https://")
-
-
 @dataclass
 class RemoteAgent:
     """A discovered remote agent with its capabilities."""
@@ -83,10 +79,11 @@ class RemoteAgentRegistry:
     request threads resolve specialists.
     """
 
-    def __init__(self, bearer_token: str = "") -> None:
+    def __init__(self, bearer_token: str = "", *, allow_insecure_http: bool = False) -> None:
         self._agents: dict[str, RemoteAgent] = {}
         self._lock = threading.RLock()
         self._bearer_token = bearer_token.strip()
+        self._allow_insecure_http = allow_insecure_http
 
     def find(self, specialist_id: str) -> RemoteAgent | None:
         """Return the first agent advertising ``specialist_id``."""
@@ -136,8 +133,10 @@ class RemoteAgentRegistry:
             return self.snapshot()
 
         for base_url in targets:
-            if not isinstance(base_url, str) or not _is_http_url(base_url):
-                logger.warning("Refusing to discover non-HTTP agent URL: %r", base_url)
+            if not isinstance(base_url, str) or not is_allowed_a2a_transport(
+                base_url, allow_insecure_http=self._allow_insecure_http,
+            ):
+                logger.warning("Refusing insecure or invalid agent URL: %r", base_url)
                 continue
             card_url = (base_url if base_url.rstrip("/").endswith(".well-known/agent.json")
                         else base_url.rstrip("/") + "/.well-known/agent.json")
@@ -256,15 +255,19 @@ class A2ARouter:
 
     def __init__(self, client: Any | None = None,
                  registry: "RemoteAgentRegistry | None" = None,
-                 bearer_token: str = "") -> None:
+                 bearer_token: str = "", *, allow_insecure_http: bool = False) -> None:
         # Injectable for tests; otherwise a per-agent allowlist client is built.
         self._client = client
         self._bearer_token = bearer_token.strip()
+        self._allow_insecure_http = allow_insecure_http
         # The composition root passes its registry; a bare router stays
         # local-only with an empty one instead of reaching for module state.
         self._registry = (
             registry if registry is not None
-            else RemoteAgentRegistry(bearer_token=self._bearer_token)
+            else RemoteAgentRegistry(
+                bearer_token=self._bearer_token,
+                allow_insecure_http=self._allow_insecure_http,
+            )
         )
 
     def find_remote(self, specialist_id: str) -> Any | None:
@@ -311,6 +314,7 @@ class A2ARouter:
         client = self._client or TrustedA2AClient(
             trusted_endpoints=a2a_trusted_endpoints(),
             bearer_token=self._bearer_token,
+            allow_insecure_http=self._allow_insecure_http,
         )
         # The client's "sensitive data cannot leave the trust boundary" rule is
         # only real if the caller declares what it is sending: a payload holding

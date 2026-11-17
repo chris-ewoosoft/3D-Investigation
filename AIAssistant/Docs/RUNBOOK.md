@@ -15,6 +15,7 @@ báo rõ các ngoại lệ (ADR 0048/0051).
 | `AI_AGENT_TOKEN` | Secret khác admin token | Bắt buộc cho chat, agent và `/v1/models` |
 | `AI_A2A_TOKEN` hoặc `AI_A2A_TENANTS` | Credential inbound | Không có tenant A2A ẩn danh |
 | `AI_A2A_OUTBOUND_TOKEN` | Credential peer cấp cho instance này | Discovery/dispatch A2A có bearer; có thể dùng chung `AI_A2A_TOKEN` chỉ trong single-tenant |
+| `AI_A2A_ALLOW_INSECURE_HTTP` | `0`/không đặt | Bearer outbound chỉ đi qua HTTPS; `1` chỉ là ngoại lệ development có chủ ý |
 | `AI_MCP_TOKEN` | Secret riêng cho MCP | Thiếu token thì `/mcp` không được mount |
 | `AGENT_SANDBOX_RUNTIME` | `docker` + `AGENT_SANDBOX_IMAGE=<image đã duyệt>` | OS boundary cho tool execution |
 | `AGENT_SANDBOX_REQUIRE_ISOLATION` | `1` (mặc định) | Từ chối chạy nếu container runtime không bật (fail closed) |
@@ -251,6 +252,7 @@ cd AIAssistant
 uv pip compile requirements.txt --python-version 3.11 --universal --generate-hashes -o requirements.lock
 uv pip compile requirements-test.txt --python-version 3.11 --universal --generate-hashes -o requirements-test.lock
 uv pip compile requirements-eval.txt --python-version 3.11 --universal --generate-hashes -o requirements-eval.lock
+python scripts/dependency_audit.py
 python scripts/generate_sbom.py --output sbom.json
 git diff requirements.lock requirements-test.lock requirements-eval.lock   # review version nhảy có chủ đích
 ```
@@ -268,6 +270,20 @@ bật, ghi nhận thay vì giả vờ có.
 SBOM (171 distribution kèm hash + 6 artifact model) cũng được CI ghi thành
 artifact `aiassistant-sbom` mỗi lần chạy `agent-evals.yml`; diff SBOM giữa
 hai release là cách kiểm tra dependency trôi.
+
+`dependency_audit.py` là entry point dùng chung cho local và GitHub Actions;
+nó quét cả 5 lock và dùng đúng danh sách ngoại lệ có lý do trong source. Để
+bắt CVE mới trước khi push, cài cả hai hook một lần tại repository root:
+
+```powershell
+pip install --require-hashes -r AIAssistant/requirements-test.lock
+pre-commit install --hook-type pre-commit --hook-type pre-push
+pre-commit run --hook-stage pre-push ai-assistant-dependency-audit
+```
+
+Audit cần mạng để đọc vulnerability database. Không dùng `SKIP` cho hook này;
+nếu advisory mới làm hook đỏ, nâng dependency hoặc ghi nhận ngoại lệ theo mã
+cụ thể, điều kiện khai thác và kiểm soát bù trong `dependency_audit.py`.
 
 ### 4.7 Eval & regression
 

@@ -17,6 +17,8 @@ on:
     branches: [main]
     paths:
       - "AIAssistant/**"
+      - "Config/agent_tools.json"
+      - "Config/agent_action_manifest.json"
       # The at-rest envelope is a contract between the C++ client and the
       # Python service. A change on either side must re-run the contract test
       # that pins the other side's vector (ADR 0032).
@@ -27,6 +29,8 @@ on:
     branches: [main]
     paths:
       - "AIAssistant/**"
+      - "Config/agent_tools.json"
+      - "Config/agent_action_manifest.json"
       - "src/core/AtRestCipher.cpp"
       - "src/core/AtRestCipher.h"
       - "tests/TestAtRestCipher.cpp"
@@ -39,6 +43,64 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: AIAssistant/requirements-test.lock
+
+      - name: Install hash-pinned audit tool
+        run: pip install --require-hashes -r AIAssistant/requirements-test.lock
+
+      - name: Audit every hash-pinned Python dependency lock
+        working-directory: AIAssistant
+        run: python scripts/dependency_audit.py
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build release image
+        run: docker build -f AIAssistant/Dockerfile -t ai-assistant-smoke .
+
+      - name: Verify packaged runtime contracts
+        run: >-
+          docker run --rm --entrypoint python ai-assistant-smoke -c
+          "from importlib.metadata import version;
+          from ai_assistant.tools.action_manifest import action_ids;
+          from ai_assistant.tools.factory import create_tool_registry;
+          assert version('nltk') == '3.10.4', version('nltk');
+          assert version('setuptools') == '84.2.1', version('setuptools');
+          assert action_ids(), 'agent action manifest is empty';
+          assert create_tool_registry(include_web_search=False).get_all(), 'tool catalogue is empty'"
+
+      - name: Reject high or critical image vulnerabilities
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ai-assistant-smoke
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10

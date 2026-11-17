@@ -170,12 +170,67 @@ class OperationalDocsTests(unittest.TestCase):
         )
 
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (ROOT / "Dockerfile.dockerignore").read_text(encoding="utf-8")
         llama_lock = (ROOT / "requirements-llama-cpu.lock").read_text(encoding="utf-8")
         self.assertIn("requirements-llama-cpu.lock", dockerfile)
         self.assertIn("--require-hashes", dockerfile)
+        base_digest = (
+            "python:3.11-slim@sha256:"
+            "07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535"
+        )
+        self.assertEqual(dockerfile.count(base_digest), 2)
+        self.assertIn("apt libapt-pkg7.0 zlib1g", dockerfile)
+        self.assertIn("dpkg --compare-versions", dockerfile)
+        self.assertIn("site-packages/setuptools-*.dist-info", dockerfile)
+        self.assertLess(
+            dockerfile.index("site-packages/setuptools-*.dist-info"),
+            dockerfile.index("COPY --from=builder /install /usr/local"),
+        )
         self.assertIn("diskcache==5.6.3", llama_lock)
+        for dependency in ("jinja2", "markupsafe", "numpy", "typing-extensions"):
+            self.assertIn(f"{dependency}==", llama_lock)
         self.assertIn("llama-cpp-python @ https://github.com/abetlen/", llama_lock)
         self.assertIn("--hash=sha256:", llama_lock)
+        for contract_file in ("agent_tools.json", "agent_action_manifest.json"):
+            self.assertIn(f"Config/{contract_file}", dockerfile)
+            self.assertIn(f"!Config/{contract_file}", dockerignore)
+
+        workflow = (ROOT.parent / ".github" / "workflows" / "Build-Python-ci.yml").read_text(
+            encoding="utf-8",
+        )
+        audit_script = (ROOT / "scripts" / "dependency_audit.py").read_text(
+            encoding="utf-8",
+        )
+        hooks = (ROOT.parent / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        self.assertIn("Verify packaged runtime contracts", workflow)
+        self.assertIn("version('nltk') == '3.10.4'", workflow)
+        self.assertIn("version('setuptools') == '84.2.1'", workflow)
+        self.assertIn("python scripts/dependency_audit.py", workflow)
+        self.assertIn("pip-audit==2.10.1", (ROOT / "requirements-test.txt").read_text())
+        for lock_name in (
+            "requirements.lock",
+            "requirements-test.lock",
+            "requirements-docker.lock",
+            "requirements-eval.lock",
+            "requirements-llama-cpu.lock",
+        ):
+            self.assertIn(lock_name, audit_script)
+        self.assertIn("PYSEC-2026-2447", audit_script)
+        self.assertIn("PYSEC-2026-3046", audit_script)
+        self.assertIn("LLAMA_URL_PATTERN", audit_script)
+        self.assertIn("llama_version_projection()", audit_script)
+        self.assertIn("ai-assistant-dependency-audit", hooks)
+        self.assertIn("always_run: true", hooks)
+        self.assertIn("aquasecurity/trivy-action@a9c7b0f", workflow)
+        self.assertIn("severity: HIGH,CRITICAL", workflow)
+
+        eval_workflow = (ROOT.parent / ".github" / "workflows" / "agent-evals.yml").read_text(
+            encoding="utf-8",
+        )
+        model_job = eval_workflow.split("model-eval:", 1)[1]
+        self.assertIn("pip install --require-hashes", model_job)
+        self.assertIn("AIAssistant/requirements-llama-cpu.lock", model_job)
+        self.assertNotIn("--extra-index-url", model_job)
 
     def test_container_model_mount_matches_runtime_data_layout(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")

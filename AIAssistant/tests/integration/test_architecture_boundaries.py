@@ -86,6 +86,16 @@ def _legacy(module: str) -> bool:
     return module == "modules" or module.startswith("modules.")
 
 
+def _is_bootstrap_layer(path: Path) -> bool:
+    """Exactly the composition-root package is exempt from its import ban."""
+    return path.relative_to(PACKAGE).parts[0] == "bootstrap"
+
+
+def _internal_import_is_allowed(module: str) -> bool:
+    """The framework wrapper may import SDK/stdlib modules, never this app."""
+    return not module.startswith("ai_assistant")
+
+
 def _call_targets(path: Path) -> set[str]:
     """Dotted targets of the calls in ``path`` (``obj.attr``/``name``).
 
@@ -303,18 +313,22 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         ``orchestration.state.AgentState``, which tied the wrapper back to the
         layer that consumes it (``orchestration → internal → orchestration``).
         The state schema is a constructor argument now, so the wrapper names no
-        ``ai_assistant`` module except the pure domain. This test pins the
-        removal of that reverse edge.
+        ``ai_assistant`` module at all. This test pins the removal of that
+        reverse edge and keeps ``internal`` a replaceable framework boundary.
         """
         violations: list[tuple[str, str, str]] = []
         for path in _iter_python("internal"):
             for module in _imports(path):
-                if module.startswith("ai_assistant") and not module.startswith(
-                    "ai_assistant.domain"
-                ):
+                if not _internal_import_is_allowed(module):
                     reason = "internal imports a layer it is supposed to serve"
                     violations.append((path.relative_to(PACKAGE).as_posix(), module, reason))
         self.assertEqual(violations, [], _format(violations))
+
+    def test_internal_allowlist_rejects_every_ai_assistant_layer(self):
+        """Self-test the policy so a clean tree cannot make the guard vacuous."""
+        self.assertFalse(_internal_import_is_allowed("ai_assistant.domain"))
+        self.assertFalse(_internal_import_is_allowed("ai_assistant.ports"))
+        self.assertTrue(_internal_import_is_allowed("langgraph.graph"))
 
     def test_the_llm_layer_does_not_import_rag(self):
         """``rag`` may reach ``llm``, never the other way round.
@@ -524,14 +538,22 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         # ToolRegistry.execute is a bypass: the registry defines no execute method.
         self.assertNotIn("execute", _defined_names(PACKAGE / "tools" / "registry.py"))
 
-    def test_agents_do_not_import_the_composition_root(self):
-        """The tool gateway is injected; agent code never reaches bootstrap (ADR 0003)."""
+    def test_no_layer_imports_the_composition_root(self):
+        """Bootstrap is outermost: every non-bootstrap module receives dependencies."""
         violations: list[str] = []
-        for path in _iter_python("agents"):
+        for path in _iter_python():
+            if _is_bootstrap_layer(path):
+                continue
             for module in _imports(path):
                 if module == "ai_assistant.bootstrap" or module.startswith("ai_assistant.bootstrap."):
                     violations.append(str(path.relative_to(PACKAGE)))
         self.assertEqual(violations, [], "\n".join(violations))
+
+    def test_composition_root_exemption_is_exact(self):
+        """Self-test the scan scope: no peer package may become exempt."""
+        self.assertTrue(_is_bootstrap_layer(PACKAGE / "bootstrap" / "server.py"))
+        self.assertFalse(_is_bootstrap_layer(PACKAGE / "tools" / "factory.py"))
+        self.assertFalse(_is_bootstrap_layer(PACKAGE / "rag" / "index.py"))
 
     def test_no_global_tool_service_locator_remains(self):
         """The mutable ``_tool_service`` locator was replaced by injected gateways."""

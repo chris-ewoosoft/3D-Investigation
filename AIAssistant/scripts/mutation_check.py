@@ -199,7 +199,13 @@ class Mutant:
 #: containment.
 #: ADR 0062 adds five more: detected ambient isolation, descriptor-anchored
 #: write/create commits, reparse-point refusal and opened-directory identity.
-MIN_MUTANTS = 344
+#: ADR 0063 adds nine more: HTTPS-only A2A egress, transactional composition
+#: commit/rollback, re-entry refusal, and release of every allocated owner.
+#: The 10/10 follow-up adds two more: object-graph publication happens only
+#: after construction, and failed composition releases its owned log handlers.
+#: The final architecture-closure pass adds two self-testing policy mutants:
+#: no peer layer may import bootstrap, and internal may import no app layer.
+MIN_MUTANTS = 357
 
 MUTANTS: tuple[Mutant, ...] = (
     # ── Local storage-key custody (ADR 0061) ─────────────────────────────────
@@ -771,6 +777,13 @@ MUTANTS: tuple[Mutant, ...] = (
     # ── Transport hardening: bounded, redirect-free A2A egress ───────────────
     Mutant(
         "src/ai_assistant/adapters/a2a_client.py",
+        'parsed.scheme.casefold() == "https" or (',
+        'parsed.scheme.casefold() in {"http", "https"} or (',
+        ("tests.unit.test_a2a_client",),
+        "A2A bearer credentials may leave over plaintext HTTP by default",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/a2a_client.py",
         "if len(body) > _MAX_RESPONSE_BYTES:",
         "if False:",
         ("tests.unit.test_a2a_client",),
@@ -855,10 +868,12 @@ MUTANTS: tuple[Mutant, ...] = (
     ),
     Mutant(
         "src/ai_assistant/adapters/a2a_protocol.py",
-        "if not isinstance(base_url, str) or not _is_http_url(base_url):",
+        "if not isinstance(base_url, str) or not is_allowed_a2a_transport(\n"
+        "                base_url, allow_insecure_http=self._allow_insecure_http,\n"
+        "            ):",
         "if False:",
         ("tests.unit.test_a2a_protocol_guards",),
-        "non-HTTP discovery URL fetched (SSRF via discovery)",
+        "insecure or invalid discovery URL fetched (SSRF/plaintext bearer)",
     ),
     Mutant(
         "src/ai_assistant/adapters/a2a_protocol.py",
@@ -944,32 +959,94 @@ MUTANTS: tuple[Mutant, ...] = (
         ("tests.integration.test_composition_root_bootstrap",),
         "unknown bootstrap attribute returns None instead of raising",
     ),
-    # Without the early return, the compose() → _register_optional_protocols()
-    # → compose() back-edge never terminates: every cycle re-opens logs and
-    # stores (~1.6s of IO), so the owning suite hangs instead of failing
-    # (observed >600s unmutated-vs-mutated). The file runs ~25s unmutated, so
-    # a 180s budget with kill_on_timeout cannot fake a kill on a slow
-    # machine — a timeout here IS the guard being load-bearing.
     Mutant(
         "src/ai_assistant/bootstrap/server.py",
-        "if _COMPOSED:\n"
-        "            return\n"
-        "        # Set before the body so the compose() → _register_optional_protocols()\n"
-        "        # → compose() back-edge terminates instead of rebuilding. The public\n"
-        "        # wrapper resets it if the body raises.\n"
-        "        _COMPOSED = True",
-        "_COMPOSED = True",
+        "if _COMPOSED:\n            return",
+        "if False:\n            return",
         ("tests.integration.test_composition_root_bootstrap",),
         "second compose() rebuilds the graph (duplicate handlers and routers)",
-        timeout_seconds=180,
-        kill_on_timeout=True,
     ),
     Mutant(
         "src/ai_assistant/bootstrap/server.py",
-        "except BaseException:\n        _COMPOSED = False\n        raise",
-        "except BaseException:\n        raise",
+        "if _COMPOSING:\n"
+        "            msg = \"Composition re-entered before the graph was ready\"\n"
+        "            raise RuntimeError(msg)",
+        "if False:\n"
+        "            msg = \"Composition re-entered before the graph was ready\"\n"
+        "            raise RuntimeError(msg)",
         ("tests.integration.test_composition_root_bootstrap",),
-        "a failed compose leaves the flag set (half-built graph looks ready)",
+        "same-thread composition re-entry observes a partial object graph",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "            _rollback_failed_composition(previous, attempt)",
+        "            previous.clear()",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "a failed compose leaks resources and leaves partial globals published",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "            composed_state = _compose_once(attempt)",
+        "            globals()[\"app\"] = object()\n"
+        "            composed_state = _compose_once(attempt)",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "composition publishes an app object before the complete graph is built",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "            _COMPOSED = True",
+        "            _COMPOSED = False",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "a successful compose is never committed and every caller rebuilds it",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "        _close_rollback_resource(stream_workers)",
+        "        pass",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves the stream worker owner open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        '        _close_rollback_resource(getattr(current_platform, "tasks", None))',
+        "        pass",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves the task owner open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        '        _close_rollback_resource(getattr(current_platform, "tools", None))',
+        "        pass",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves the tool worker owner open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "        _close_rollback_resource(checkpoint)",
+        "        pass",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves the checkpoint handle open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "        _close_rollback_resource(long_term_memory)",
+        "        pass",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves the long-term memory store open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "    if attempt is not None:\n        _restore_logging_handlers(attempt.previous_log_handlers)",
+        "    if False:\n        _restore_logging_handlers(attempt.previous_log_handlers)",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "failed composition leaves its owned root log handlers open",
+    ),
+    Mutant(
+        "src/ai_assistant/bootstrap/server.py",
+        "    except BaseException:\n        logging.getLogger(__name__).exception(\"Composition rollback close failed\")",
+        "    except Exception:\n        logging.getLogger(__name__).exception(\"Composition rollback close failed\")",
+        ("tests.integration.test_composition_root_bootstrap",),
+        "a BaseException during one rollback close skips every remaining resource",
     ),
     # ── A2A per-tenant task ownership ─────────────────────────────────────────
     Mutant(
@@ -2911,9 +2988,9 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant(
         "src/ai_assistant/bootstrap/server.py",
         "        _paths = resolve_paths(PACKAGE_ROOT)\n"
-        "        logger, LOG_FILE_PATH = setup_logging(str(_paths.logs_dir))",
+        "        logger, log_file_path = setup_logging(str(_paths.logs_dir))",
         "        _paths = resolve_paths(PACKAGE_ROOT)\n"
-        '        logger, LOG_FILE_PATH = setup_logging(str(PACKAGE_ROOT / "logs"))',
+        '        logger, log_file_path = setup_logging(str(PACKAGE_ROOT / "logs"))',
         ("tests.integration.test_composition_root_bootstrap",),
         "composition root ignores APP_DATA_DIR for server logs",
     ),
@@ -3232,6 +3309,27 @@ MUTANTS: tuple[Mutant, ...] = (
         ("tests.unit.test_a2a_http_router",),
         "a second legacy availability switch disables the built-in A2A transport",
     ),
+    Mutant(
+        "tests/integration/test_architecture_boundaries.py",
+        '    return path.relative_to(PACKAGE).parts[0] == "bootstrap"',
+        '    return path.relative_to(PACKAGE).parts[0] == "agents"',
+        (
+            "tests.integration.test_architecture_boundaries."
+            "ArchitectureBoundaryTests.test_composition_root_exemption_is_exact",
+        ),
+        "a peer layer is exempted from the composition-root reverse-dependency ban",
+    ),
+    Mutant(
+        "tests/integration/test_architecture_boundaries.py",
+        '    return not module.startswith("ai_assistant")',
+        '    return (not module.startswith("ai_assistant") or '
+        'module.startswith("ai_assistant.domain"))',
+        (
+            "tests.integration.test_architecture_boundaries."
+            "ArchitectureBoundaryTests.test_internal_allowlist_rejects_every_ai_assistant_layer",
+        ),
+        "the internal framework wrapper is allowed to depend on the domain layer",
+    ),
 )
 
 
@@ -3448,6 +3546,7 @@ PINNED_DECISION_FILES: tuple[str, ...] = (
     "src/ai_assistant/tools/verified_write.py",
     "src/ai_assistant/tools/tool_contract.py",
     "src/ai_assistant/tools/builtin/web_tools.py",
+    "tests/integration/test_architecture_boundaries.py",
     "tests/run_suite.py",
 )
 

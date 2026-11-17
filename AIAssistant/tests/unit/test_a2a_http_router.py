@@ -192,6 +192,10 @@ class AuthenticatedPeerIntegrationTests(unittest.TestCase):
         client = TrustedA2AClient(
             trusted_endpoints=frozenset({endpoint}),
             bearer_token="shared-peer-token",
+            # TestClient is an in-process HTTP bridge with no TLS socket. The
+            # explicit development override keeps this contract test honest;
+            # production remains HTTPS-only by default.
+            allow_insecure_http=True,
         )
         with patch("ai_assistant.adapters.a2a_client.urlopen", side_effect=_bridge):
             cards = client.discover()

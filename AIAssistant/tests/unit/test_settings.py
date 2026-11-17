@@ -19,6 +19,7 @@ from ai_assistant.settings import (
     DEFAULT_PORT,
     AgentRuntimeSettings,
     ArchitectureSettings,
+    a2a_allow_insecure_http,
     a2a_card_name,
     a2a_card_url,
     a2a_max_subscribers,
@@ -484,6 +485,11 @@ class EnvironmentOwnerAccessorTests(unittest.TestCase):
         )
         self.assertEqual(a2a_outbound_token({"AI_A2A_TOKEN": " shared "}), "shared")
         self.assertEqual(a2a_outbound_token({}), "")
+
+    def test_plaintext_a2a_transport_requires_an_explicit_override(self) -> None:
+        self.assertFalse(a2a_allow_insecure_http({}))
+        self.assertFalse(a2a_allow_insecure_http({"AI_A2A_ALLOW_INSECURE_HTTP": "0"}))
+        self.assertTrue(a2a_allow_insecure_http({"AI_A2A_ALLOW_INSECURE_HTTP": "true"}))
 
     def test_a2a_tenants_parses_the_json_mapping(self) -> None:
         self.assertEqual(

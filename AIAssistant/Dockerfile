@@ -13,7 +13,7 @@
 #   * the health probe checks liveness, not readiness — the image ships no
 #     model weights, so ``/readyz`` answers 503 forever and the container
 #     would be permanently "unhealthy" while actually serving fine.
-FROM python:3.11-slim@sha256:e529028263dbe6910a2d96f7d2b8f5266385e917fd45d286ef166977c094a51e AS builder
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS builder
 
 WORKDIR /build
 
@@ -35,6 +35,10 @@ RUN pip install --no-cache-dir --prefix=/install --no-deps --require-hashes \
     -r requirements-llama-cpu.lock
 
 COPY AIAssistant ./AIAssistant
+# The runtime tool catalogue and desktop-action contract live at repository
+# scope because the Qt client consumes them too. Package both explicitly: a
+# source-only image builds green but cannot compose the tool registry.
+COPY Config/agent_tools.json Config/agent_action_manifest.json ./Config/
 # Editable install keeps ``__file__`` inside /app/AIAssistant, so config/ and
 # logs/ resolve exactly as they do in a source checkout (a plain install would
 # relocate them into site-packages and drop config/*.toml on the floor).
@@ -42,12 +46,33 @@ COPY AIAssistant ./AIAssistant
 RUN pip install --no-cache-dir --prefix=/install -e ./AIAssistant
 
 
-FROM python:3.11-slim@sha256:e529028263dbe6910a2d96f7d2b8f5266385e917fd45d286ef166977c094a51e AS runtime
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS runtime
 
 WORKDIR /app
 
+# The digest above already carries apt 3.0.4. Debian published the zlib fix
+# after that image was assembled, so upgrade the three scanner-visible OS
+# packages and assert their minimum fixed versions before deleting apt state.
+RUN apt-get update \
+    && apt-get install --no-install-recommends --only-upgrade -y \
+        apt libapt-pkg7.0 zlib1g \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' apt)" ge 3.0.4 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' zlib1g)" \
+        ge 1:1.3.dfsg+really1.3.1-1+deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The base image's setuptools 79.0.1 vendors jaraco.context 5.3.0 and wheel
+# 0.45.1. COPY overlays files but does not delete stale vendor metadata, so a
+# newer setuptools alone still leaves both vulnerable distributions visible to
+# Trivy. Remove that exact base installation first; requirements-docker.lock
+# then restores hash-pinned setuptools 84.2.1 (jaraco.context 6.1.0 / wheel
+# 0.46.3) from the builder prefix.
+RUN rm -rf /usr/local/lib/python3.11/site-packages/setuptools \
+    /usr/local/lib/python3.11/site-packages/setuptools-*.dist-info
+
 COPY --from=builder /install /usr/local
 COPY --from=builder /build/AIAssistant ./AIAssistant
+COPY --from=builder /build/Config ./Config
 # The editable-install finder points back at /build/AIAssistant; re-install
 # the pointer against the runtime path (no network, no deps re-resolve).
 RUN pip install --no-cache-dir -e ./AIAssistant --no-deps

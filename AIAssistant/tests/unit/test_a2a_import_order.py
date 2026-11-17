@@ -162,9 +162,10 @@ class CompositionRootWiresTheRemoteLookupTest(unittest.TestCase):
         self.assertIn("registry=a2a_registry,", self.source)
         self.assertIn("bearer_token=outbound_a2a_token,", self.source)
         self.assertIn(
-            "a2a_registry = RemoteAgentRegistry(bearer_token=outbound_a2a_token)",
+            "a2a_registry = RemoteAgentRegistry(",
             self.source,
         )
+        self.assertIn("allow_insecure_http=allow_insecure_a2a,", self.source)
 
     def test_no_process_wide_lookup_remains(self) -> None:
         self.assertNotIn("set_remote_specialist_lookup", self.source)

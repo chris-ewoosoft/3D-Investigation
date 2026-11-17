@@ -22,8 +22,6 @@ line-length = 120
 select = ["E", "W", "F", "I", "BLE", "S", "RUF", "C90", "N", "TRY"]
 
 ignore = [
-    "BLE001", "S110", "RUF012",
-    "S603", "S602", "S607", "S310",
     "W291", "W293", "RUF001",
     "E501",   # long lines acceptable in this codebase
     "E402",   # module-level imports after code (post-install, post-init patterns)
@@ -38,8 +36,48 @@ max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 # Test fixtures intentionally embed sample secrets and grant tokens; S104 is
-# for the bind-address assertions, which assert policy rather than bind a socket.
-"tests/**" = ["S105", "S106", "S104"]
+# for the bind-address assertions.  Process launches, broad exception probes,
+# mutable fixture attributes and silent cleanup are test mechanics.  Production
+# exceptions below are confined to the named, independently tested boundary
+# modules; a new occurrence anywhere else fails lint.
+"tests/**" = ["BLE001", "RUF012", "S104", "S105", "S106", "S110", "S603", "S607"]
+"evals/run_agentic_eval.py" = ["BLE001"]
+"scripts/dependency_audit.py" = ["S603"]
+"scripts/mutation_check.py" = ["S603"]
+"src/ai_assistant/adapters/a2a_client.py" = ["S310"]
+"src/ai_assistant/adapters/a2a_protocol.py" = ["BLE001", "S310"]
+"src/ai_assistant/adapters/http/agent_routes.py" = ["BLE001", "S110"]
+"src/ai_assistant/adapters/http/chat_routes.py" = ["BLE001"]
+"src/ai_assistant/adapters/persistence/checkpointing.py" = ["BLE001"]
+"src/ai_assistant/adapters/web_search.py" = ["S310"]
+"src/ai_assistant/application/coordination.py" = ["RUF012"]
+"src/ai_assistant/application/memory.py" = ["BLE001"]
+"src/ai_assistant/application/tasks.py" = ["BLE001"]
+"src/ai_assistant/application/tools.py" = ["BLE001"]
+"src/ai_assistant/bootstrap/cli.py" = ["BLE001"]
+"src/ai_assistant/bootstrap/lifecycle.py" = ["BLE001"]
+"src/ai_assistant/bootstrap/server_manager.py" = ["BLE001", "S110", "S310", "S603", "S607"]
+"src/ai_assistant/config/logging.py" = ["BLE001", "S110"]
+"src/ai_assistant/image_utils.py" = ["BLE001"]
+"src/ai_assistant/llm/hardware.py" = ["BLE001", "S110"]
+"src/ai_assistant/llm/inference.py" = ["S310"]
+"src/ai_assistant/llm/llama_cpp_backend.py" = ["BLE001"]
+"src/ai_assistant/observability/langsmith_integration.py" = ["BLE001", "S110"]
+"src/ai_assistant/observability/tracing.py" = ["BLE001"]
+"src/ai_assistant/orchestration/graph.py" = ["BLE001"]
+"src/ai_assistant/orchestration/specialists/chatbot.py" = ["BLE001"]
+"src/ai_assistant/orchestration/supervisor.py" = ["BLE001"]
+"src/ai_assistant/rag/index.py" = ["BLE001", "S110"]
+"src/ai_assistant/rag/loaders.py" = ["BLE001", "RUF012"]
+"src/ai_assistant/rag/retrieval.py" = ["BLE001"]
+"src/ai_assistant/tools/builtin/code_tools.py" = ["BLE001"]
+"src/ai_assistant/tools/builtin/file_tools.py" = ["BLE001"]
+"src/ai_assistant/tools/builtin/rag_tools.py" = ["BLE001"]
+"src/ai_assistant/tools/builtin/search_tools.py" = ["BLE001"]
+"src/ai_assistant/tools/builtin/vcs_tools.py" = ["S603"]
+"src/ai_assistant/tools/builtin/web_tools.py" = ["BLE001"]
+"src/ai_assistant/tools/lsp_client.py" = ["BLE001", "S110", "S603"]
+"src/ai_assistant/tools/sandbox.py" = ["S603", "S607"]
 
 [tool.coverage.run]
 # Branch coverage is enabled so every conditional in the ReAct loop, the
@@ -58,8 +96,8 @@ source = ["ai_assistant"]
 exclude_also = [
     "if __name__ == .__main__.:",
 ]
-# Measured, not aspirational (ADR 0015): 100.00% of 11 850 statements and
-# 3 284 branches (2 678 tests) on Python 3.11
+# Measured, not aspirational (ADR 0015): 100.00% of 11 939 statements and
+# 3 320 branches (2 688 tests) on Python 3.11
 # with ``faiss``/``sentence-transformers`` installed. The number is recorded in
 # README.md (section ``## Kiểm thử``) together with the excluded entry
 # points; a stripped-down environment (no optional RAG stack) reports less
@@ -165,20 +203,38 @@ forbidden_modules = ["ai_assistant.rag"]
 # so both packages now import the same neutral module.
 
 [[tool.importlinter.contracts]]
-name = "The internal engine wrapper imports no application layer"
+name = "The internal engine wrapper imports no ai_assistant layer"
 type = "forbidden"
 source_modules = ["ai_assistant.internal"]
 forbidden_modules = [
     "ai_assistant.adapters", "ai_assistant.agents", "ai_assistant.application",
-    "ai_assistant.bootstrap", "ai_assistant.config", "ai_assistant.image_utils",
-    "ai_assistant.legacy", "ai_assistant.llm", "ai_assistant.observability",
-    "ai_assistant.orchestration", "ai_assistant.ports", "ai_assistant.rag",
-    "ai_assistant.settings", "ai_assistant.tools",
+    "ai_assistant.bootstrap", "ai_assistant.config", "ai_assistant.domain",
+    "ai_assistant.exec_policy", "ai_assistant.image_utils", "ai_assistant.legacy",
+    "ai_assistant.llm", "ai_assistant.observability", "ai_assistant.orchestration",
+    "ai_assistant.path_policy", "ai_assistant.plugins", "ai_assistant.ports",
+    "ai_assistant.rag", "ai_assistant.settings", "ai_assistant.tools",
 ]
 # internal/ owns the LangGraph wrapper and imports the framework — that is its
 # job — but no ai_assistant layer: orchestration/graph.py passes the state
 # schema into LangGraphEngine instead of the wrapper importing AgentState, so
 # the old orchestration → internal → orchestration package cycle is gone.
+
+[[tool.importlinter.contracts]]
+name = "Only bootstrap imports the composition root"
+type = "forbidden"
+source_modules = [
+    "ai_assistant.adapters", "ai_assistant.agents", "ai_assistant.application",
+    "ai_assistant.config", "ai_assistant.domain", "ai_assistant.exec_policy",
+    "ai_assistant.image_utils", "ai_assistant.internal", "ai_assistant.llm",
+    "ai_assistant.observability", "ai_assistant.orchestration",
+    "ai_assistant.path_policy", "ai_assistant.plugins", "ai_assistant.ports",
+    "ai_assistant.rag", "ai_assistant.settings", "ai_assistant.tools",
+]
+forbidden_modules = ["ai_assistant.bootstrap"]
+# The composition root is the outermost owner.  Every other package/module is
+# named explicitly so adding a reverse dependency cannot pass simply because
+# it originated outside agents/application/orchestration.  The AST twin scans
+# the whole tree and therefore also covers a newly added top-level module.
 
 [[tool.importlinter.contracts]]
 name = "Agents never import an adapter (persistence is injected)"

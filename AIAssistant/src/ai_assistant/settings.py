@@ -390,6 +390,11 @@ def a2a_outbound_token(env: Mapping[str, str] | None = None) -> str:
     )
 
 
+def a2a_allow_insecure_http(env: Mapping[str, str] | None = None) -> bool:
+    """Explicit local-development escape hatch for plaintext A2A transport."""
+    return _env_flag("AI_A2A_ALLOW_INSECURE_HTTP", env=env)
+
+
 def a2a_tenants(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Read the A2A bearer-token → tenant mapping from ``env``.
 

@@ -1,7 +1,7 @@
 # AIAssistant Scorecard
 
 > Measured signals, each produced by a command in this repository — nothing
-> here is an estimate. **Last measured: 2026-11-16**, Windows, Python 3.11,
+> here is an estimate. **Last measured: 2026-11-17**, Windows, Python 3.11,
 > dependencies per `requirements-test.lock` (hash-pinned: `faiss-cpu`, `rank-bm25`, `mcp`).
 > A stripped environment measures less: the optional-dependency branches flip
 > with it (ADR 0014).
@@ -12,25 +12,76 @@
 
 ## Quality gates
 
-| Gate | Command | Measured 2026-11-16 |
+| Gate | Command | Measured 2026-11-17 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 155 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
-| Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 9/9 contracts kept (ADR 0032: the application layer may no longer import the plugin package — the catalogue is a port) |
+| Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 10/10 contracts kept; no peer layer imports bootstrap and `internal` imports no `ai_assistant` layer |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 678 tests**, 0 failures, 6 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062) |
-| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 850 statements, 3 284 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **344/344** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 344` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 688 tests**, 0 failures, 8 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062/0063) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 939 statements, 3 320 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062/0063 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **357/357** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062/0063; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 357` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062/0063); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
 | Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
 | Model pins | `python scripts/verify_models.py --require-all` | **6/6 artifact local khớp pin**, 0 missing, **0 mismatched** (ADR 0023; measured 2026-11-12) |
 | Supply chain | `python scripts/generate_sbom.py` | CycloneDX 1.5: 171 distribution (kèm **3 941 SHA-256**) + 6 artifact GGUF kèm commit/SHA-256 (ADR 0023) |
-| Lock verify | `pip install --require-hashes --dry-run -r requirements.lock` + `pip download --require-hashes -r requirements-test.lock` | runtime lock: exit 0, 0 ERROR; test lock: **83/83 artifact tải về, SHA-256 khớp** (CI job `test` cài đúng lock này bằng `--require-hashes`); runtime mẫu 6/6 (ADR 0023) |
+| Dependency audit | `python scripts/dependency_audit.py` | 5/5 hash-pinned lock sạch + direct-URL llama wheel được ánh xạ và audit theo version, 0 advisory chưa xử lý; 2 ngoại lệ không có bản vá được giới hạn phạm vi và ghi mã cụ thể (`PYSEC-2026-2447`, `PYSEC-2026-3046`) |
+| Lock verify | `pip install --require-hashes --dry-run -r requirements.lock` + `pip download --require-hashes -r requirements-test.lock` | runtime lock: exit 0, 0 ERROR; test lock: **103/103 artifact tải về, SHA-256 khớp** (CI job `test` cài đúng lock này bằng `--require-hashes`); runtime mẫu 6/6 (ADR 0023) |
 | Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
 | Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
 | Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
+
+## Final architecture enforcement closure (2026-11-17)
+
+The two documentation-strength claims that were still weaker than their
+enforcement are now executable contracts.  Every non-bootstrap package and
+top-level module is forbidden from importing the composition root, while the
+framework wrapper under `internal/` may import SDK/stdlib modules but no
+`ai_assistant` layer.  The AST twins scan the complete source tree and include
+synthetic self-tests, so a clean tree cannot make either policy vacuously
+green.  Two decision mutants pin those self-tests and raise the floor to
+**357/357 killed**.
+
+The model-in-loop workflow no longer performs a version-only install from an
+extra index.  `requirements-llama-cpu.lock` now contains the Linux/amd64 wheel
+and its complete minimal dependency closure, all SHA-256 pinned, and the job
+installs it with `--require-hashes`.  Ruff security exceptions are no longer
+repository-wide: they are confined to named, independently tested boundary
+modules, so a new subprocess, URL opener, silent cleanup, broad exception or
+mutable class default elsewhere fails lint.
+
+## Atomic composition follow-up (2026-11-17)
+
+Composition now builds every public binding in local state and publishes the
+complete graph through one `globals().update()` only after the last router is
+mounted. A concurrent direct attribute reader can no longer observe a staged
+`app` while `_COMPOSED` is false. The transaction also snapshots root logging
+handlers: on failure it removes and closes only handlers owned by this service,
+restores foreign handlers, and still contains a failing handler close.
+
+The RAG framework import test is now enabled explicitly by eval CI instead of
+by ambient package discovery. A developer environment containing packages
+from both the unit and eval locks therefore cannot silently change the unit
+suite's test selection. Two new decision mutants raise the floor from 353 to
+**355/355 killed**.
+
+## Transactional release boundary hardening (2026-11-17, ADR 0063)
+
+The shipped image now contains the repository-level tool and desktop-action
+contracts and CI executes both from inside that image. Composition publishes
+the object graph only after a complete build; failure drains every allocated
+worker/store and restores the preceding complete state. Authenticated A2A
+egress is HTTPS-only unless development opts into plaintext explicitly.
+Python locks and the built image now have blocking vulnerability audits.
+The image refreshes its digest-pinned Debian base, upgrades the scanner-visible
+APT/zlib packages to their fixed versions, and removes stale vulnerable
+setuptools vendor metadata before overlaying the hash-pinned runtime prefix.
+
+Nine decision mutants raise the floor from 344 to **353/353 killed**. The
+changed A2A and composition owners were re-swept independently with 0 survived
+and 0 stale; the full gate row above records the repository-wide sweep.
 
 ## Windows DPAPI storage-key custody (2026-11-16, ADR 0061)
 
@@ -1351,11 +1402,6 @@ repository deliberately does not make, with the reason written down):
   state is protected by the database's own encryption rather than by the
   platform key. The SQLite backend — the one that lands in the app's own
   data directory — is sealed (ADR 0032).
-- **The two third-party C++ actions** (`jurplel/install-qt-action`,
-  `lukka/run-vcpkg`) are still referenced by tag in the C++ workflow. They
-  are outside this package's scope and were not pinned in ADR 0032; the
-  Python workflows are fully SHA-pinned.
-
 ## Numbered signals
 
 The `SCORECARD #N` labels below are the historical identifiers used in code

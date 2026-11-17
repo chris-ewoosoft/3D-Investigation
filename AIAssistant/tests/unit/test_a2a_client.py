@@ -10,7 +10,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from ai_assistant.adapters.a2a_client import RemoteAgentCard, TrustedA2AClient
+from ai_assistant.adapters.a2a_client import (
+    RemoteAgentCard,
+    TrustedA2AClient,
+    is_allowed_a2a_transport,
+)
 from ai_assistant.domain.security import DataClassification
 
 _TOKEN = "peer-token"
@@ -37,6 +41,50 @@ class TrustedA2AClientTests(unittest.TestCase):
             bearer_token=_TOKEN,
         )
         self.assertIsNotNone(client)
+
+    def test_plain_http_is_rejected_before_bearer_credentials_touch_the_network(self) -> None:
+        client = TrustedA2AClient(
+            trusted_endpoints=frozenset({"http://trusted.example.com"}),
+            bearer_token=_TOKEN,
+        )
+        with patch("ai_assistant.adapters.a2a_client.urlopen") as mock_urlopen:
+            result = client.submit("http://trusted.example.com", "supervisor", "test")
+            cards = client.discover()
+            with self.assertRaisesRegex(ValueError, "requires HTTPS"):
+                client._read_card("http://trusted.example.com")
+        self.assertEqual(result["routing"], "rejected_policy")
+        self.assertIn("HTTPS", result["error"])
+        self.assertEqual(cards, {})
+        mock_urlopen.assert_not_called()
+
+    def test_explicit_development_override_allows_an_allowlisted_http_peer(self) -> None:
+        client = TrustedA2AClient(
+            trusted_endpoints=frozenset({"http://dev-peer.local"}),
+            bearer_token=_TOKEN,
+            allow_insecure_http=True,
+        )
+        card = RemoteAgentCard(
+            endpoint="http://dev-peer.local", name="Dev", version="1",
+            skills=frozenset({"supervisor"}), streaming=False,
+        )
+        with patch.object(client, "_read_card", return_value=card) as read_card:
+            self.assertEqual(client.discover(), {"http://dev-peer.local": card})
+        read_card.assert_called_once_with("http://dev-peer.local")
+
+    def test_a2a_transport_identity_refuses_ambiguous_urls(self) -> None:
+        self.assertTrue(is_allowed_a2a_transport("https://peer.example/a2a"))
+        self.assertFalse(is_allowed_a2a_transport("http://peer.example/a2a"))
+        self.assertTrue(is_allowed_a2a_transport(
+            "http://peer.example/a2a", allow_insecure_http=True,
+        ))
+        for endpoint in (
+            "https://user:password@peer.example",
+            "https://peer.example/a2a?next=evil",
+            "https://peer.example/a2a#fragment",
+            "https://peer.example:99999",
+            "not-a-url",
+        ):
+            self.assertFalse(is_allowed_a2a_transport(endpoint), endpoint)
 
     def test_client_discover_returns_empty_on_network_failure(self) -> None:
         """discover returns empty dict when network fails."""

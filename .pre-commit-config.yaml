@@ -9,9 +9,10 @@
 #   - Python: Ruff check (AIAssistant & AIComputerVision)
 #   - Python: Import-Linter clean architecture contracts (AIAssistant)
 #
-# Stage: pre-push (runs before push, ~5-15s)
+# Stage: pre-push (network audit can take ~30-60s)
 #   - Mypy: Full static type analysis for AIAssistant & AIComputerVision
 #   - Smoke tests: Python architecture boundaries contract test
+#   - Security: Audit every hash-pinned AIAssistant dependency lock
 # ──────────────────────────────────────────────────────────────────────────────
 repos:
   # ─── PRE-COMMIT: Git Hygiene & Branch Protection ──────────────────────────
@@ -114,4 +115,15 @@ repos:
         language: system
         files: ^AIAssistant/
         pass_filenames: false
+        stages: [pre-push]
+
+  # ─── PRE-PUSH: Dependency Vulnerability Audit ─────────────────────────────
+  - repo: local
+    hooks:
+      - id: ai-assistant-dependency-audit
+        name: Dependency vulnerability audit (AIAssistant)
+        entry: powershell -NoProfile -Command "Set-Location AIAssistant; python scripts/dependency_audit.py"
+        language: system
+        pass_filenames: false
+        always_run: true
         stages: [pre-push]

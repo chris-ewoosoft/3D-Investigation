@@ -45,6 +45,7 @@ jobs:
       - name: RAG framework unit and deprecation-boundary tests
         env:
           DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+          AI_RUN_RAG_FRAMEWORK_TESTS: "1"
         run: python AIAssistant/tests/unit/test_rag_framework_eval.py -v
       - run: python AIAssistant/tests/unit/test_action_manifest.py
       - name: Software bill of materials (lockfile + model artifacts)
@@ -100,18 +101,14 @@ jobs:
         with:
           path: ~/.cache/pip
           key: pip-llamacpp-python-0.3.36-${{ runner.os }}-py311
-      # PyPI ships sdist only, which would compile llama.cpp on the runner;
-      # the project's own index has py3-none manylinux wheels. Pinned so a
-      # future release cannot silently move the numbers this gate reads.
+      # The Linux CPU wheel and its complete minimal dependency closure live
+      # in one hash-pinned lock.  The previous version-only install from an
+      # extra index could execute a republished wheel while the gate still
+      # claimed to be reproducible.
       - name: Install llama-cpp-python (prebuilt CPU wheel)
-        run: |
-          for i in 1 2 3 4 5; do
-            pip install --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu/ "llama-cpp-python==0.3.36" && break || {
-              if [ "$i" -eq 5 ]; then exit 1; fi
-              echo "pip install failed (attempt $i/5), retrying in 10s..."
-              sleep 10
-            }
-          done
+        run: >-
+          pip install --require-hashes
+          -r AIAssistant/requirements-llama-cpu.lock
       - name: Cache the eval model
         id: model-cache
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3

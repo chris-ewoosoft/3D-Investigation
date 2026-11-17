@@ -25,6 +25,7 @@ import logging
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,7 @@ from ai_assistant.bootstrap.platform_patch import (
 # lets the split modules read the process-wide binding through this module —
 # the single patch point the lifespan/entry-point tests use.
 from ai_assistant.settings import (
+    a2a_allow_insecure_http,
     a2a_outbound_token,
     apply_startup_environment_defaults,
     load_agent_runtime_settings,
@@ -168,6 +170,8 @@ async def _discover_a2a_peers(registry: Any) -> None:
     fetch runs in a worker thread. With no configured endpoints — the default
     — this is a no-op, so a stock desktop install never touches the network.
     """
+    global logger
+
     import asyncio
 
     from ai_assistant.settings import a2a_trusted_endpoints
@@ -185,6 +189,8 @@ async def _discover_a2a_peers(registry: Any) -> None:
 
 def _refresh_agent_routes() -> None:
     """Reset agent state and schema cache on reload without modifying route table."""
+    global agent_service, app
+
     compose()
     agent_service.reset_state()
     app.openapi_schema = None
@@ -195,6 +201,8 @@ def _register_optional_protocols(
     platform: PlatformContainer,
     mcp_server: McpToolServer,
     transport_policy: TransportPolicy,
+    *,
+    logger_instance: logging.Logger | None = None,
 ) -> None:
     """Wire the A2A and MCP surfaces according to the deployment profile.
 
@@ -202,7 +210,8 @@ def _register_optional_protocols(
     :func:`compose`; this function only mounts the HTTP surface, so enabling or
     disabling A2A can never leave a stale process-wide lookup behind.
     """
-    compose()
+    global logger
+
     from ai_assistant.adapters.a2a import build_a2a_router
     from ai_assistant.adapters.http.security import (
         mcp_exposed_without_token,
@@ -219,7 +228,8 @@ def _register_optional_protocols(
         if mcp_exposed_without_token(agent_bind_host(), transport_policy):
             # Fail closed (ADR 0048): loopback is not authentication. The
             # surface stays unmounted until its owner supplies a token.
-            logger.warning(
+            active_logger = logger_instance if logger_instance is not None else logger
+            active_logger.warning(
                 "MCP endpoint disabled: AI_MCP_TOKEN is unset (bind host: %s)",
                 agent_bind_host(),
             )
@@ -284,7 +294,25 @@ memory_store: Any
 checkpointer_handle: Any
 
 _COMPOSED = False
+_COMPOSING = False
 _COMPOSE_LOCK = threading.RLock()
+
+
+@dataclass(slots=True)
+class _CompositionAttempt:
+    """Resources staged by one composition transaction.
+
+    The object graph itself stays in local variables until ``compose()``
+    commits it with one ``globals().update``.  Only resource owners are
+    recorded here so a failure can close them without publishing a partial
+    graph through the module namespace.
+    """
+
+    previous_log_handlers: tuple[logging.Handler, ...]
+    platform: Any = None
+    checkpoint: Any = None
+    memory_store: Any = None
+    stream_workers: Any = None
 
 # The names compose() creates. Module __getattr__ composes on the first access
 # of any of them, so ``server.app`` behaves exactly like an eager import while
@@ -343,17 +371,104 @@ def _memory_store_path() -> str:
 def compose() -> None:
     """Build the object graph exactly once, in dependency order.
 
-    Idempotent and re-entrant (``RLock``): entry points call it
-    unconditionally and internal helpers guard their first use of composed
-    state with it. A failed build rolls the ``_COMPOSED`` flag back, so the
-    next access retries instead of treating a half-built graph as ready.
+    Idempotent and transactional: one thread builds while every other caller
+    waits on ``_COMPOSE_LOCK``. The graph is marked ready only after the last
+    router is mounted. A failed build releases newly-created resources,
+    restores the previous module state, and leaves the next access free to
+    retry.
     """
-    global _COMPOSED
+    global _COMPOSED, _COMPOSING
+    with _COMPOSE_LOCK:
+        if _COMPOSED:
+            return
+        if _COMPOSING:
+            msg = "Composition re-entered before the graph was ready"
+            raise RuntimeError(msg)
+        previous = {
+            name: globals()[name]
+            for name in _COMPOSED_NAMES
+            if name in globals()
+        }
+        attempt = _CompositionAttempt(tuple(logging.getLogger().handlers))
+        _COMPOSING = True
+        try:
+            composed_state = _compose_once(attempt)
+        except BaseException:
+            _rollback_failed_composition(previous, attempt)
+            _COMPOSED = False
+            raise
+        else:
+            # The graph is built entirely in local variables.  ``dict.update``
+            # is the single publication point, so a direct module-attribute
+            # reader can observe either the preceding complete graph or this
+            # complete graph, never the middle of construction.
+            if composed_state is not None:
+                globals().update(composed_state)
+            _COMPOSED = True
+        finally:
+            _COMPOSING = False
+
+
+def _close_rollback_resource(resource: Any) -> None:
+    """Best-effort close without hiding the composition error being handled."""
+    if resource is None:
+        return
     try:
-        _compose_once()
+        resource.close()
     except BaseException:
-        _COMPOSED = False
-        raise
+        logging.getLogger(__name__).exception("Composition rollback close failed")
+
+
+def _restore_logging_handlers(previous: tuple[logging.Handler, ...]) -> None:
+    """Remove handlers created by the failed attempt and restore outsiders."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler in previous:
+            continue
+        root.removeHandler(handler)
+        if getattr(handler, "_ai_assistant_owned", False):
+            try:
+                handler.close()
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "Composition rollback logging close failed",
+                )
+    for handler in previous:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+
+
+def _rollback_failed_composition(
+    previous: dict[str, Any],
+    attempt: _CompositionAttempt | None = None,
+) -> None:
+    """Release this attempt's resources and restore the last complete graph."""
+    current = globals()
+
+    stream_workers = attempt.stream_workers if attempt is not None else current.get("agent_stream_workers")
+    if stream_workers is not previous.get("agent_stream_workers"):
+        _close_rollback_resource(stream_workers)
+
+    current_platform = attempt.platform if attempt is not None else current.get("platform")
+    if current_platform is not previous.get("platform") and current_platform is not None:
+        _close_rollback_resource(getattr(current_platform, "tasks", None))
+        _close_rollback_resource(getattr(current_platform, "tools", None))
+
+    checkpoint = attempt.checkpoint if attempt is not None else current.get("checkpointer_handle")
+    if checkpoint is not previous.get("checkpointer_handle"):
+        _close_rollback_resource(checkpoint)
+    long_term_memory = attempt.memory_store if attempt is not None else current.get("memory_store")
+    if long_term_memory is not previous.get("memory_store"):
+        _close_rollback_resource(long_term_memory)
+
+    if attempt is not None:
+        _restore_logging_handlers(attempt.previous_log_handlers)
+
+    for name in _COMPOSED_NAMES:
+        if name in previous:
+            current[name] = previous[name]
+        else:
+            current.pop(name, None)
 
 
 def _create_web_search_client(settings: Any) -> Any | None:
@@ -365,22 +480,9 @@ def _create_web_search_client(settings: Any) -> Any | None:
     return HtmlWebSearchClient(settings)
 
 
-def _compose_once() -> None:
-    """The actual build; the public wrapper owns failure rollback."""
-    global _COMPOSED, logger, LOG_FILE_PATH, _paths, _registry, MODELS
-    global FALLBACK_TEXT_MODEL, MODEL_IDX, active_model_desc, _rag_settings
-    global EMBED_MODEL_NAME, USE_VISION_LLM
-    global _tool_registry, platform, agent_service, mcp_server
-    global runtime_modules, app, transport_policy, memory_store, agent_stream_workers
-    global checkpointer_handle
+def _compose_once(attempt: _CompositionAttempt) -> dict[str, Any]:
+    """Build the graph; :func:`compose` owns commit and failure rollback."""
     with _COMPOSE_LOCK:
-        if _COMPOSED:
-            return
-        # Set before the body so the compose() → _register_optional_protocols()
-        # → compose() back-edge terminates instead of rebuilding. The public
-        # wrapper resets it if the body raises.
-        _COMPOSED = True
-
         # Environment first (ADR 0001): the modules imported below snapshot
         # A2A/transport settings at import time, so ``.env`` must be merged
         # before the first of those imports.
@@ -431,12 +533,12 @@ def _compose_once() -> None:
         # read-only root and Qt installed bundles write logs into the same
         # writable root as memory/task stores.
         _paths = resolve_paths(PACKAGE_ROOT)
-        logger, LOG_FILE_PATH = setup_logging(str(_paths.logs_dir))
+        logger, log_file_path = setup_logging(str(_paths.logs_dir))
         _patch_proactor_transport()
 
         # Model registry → model list, selector index and RAG settings.
         _registry = load_model_registry(settings_config_dir())
-        MODELS = [
+        models = [
             {
                 "repo_id": m.repo_id,
                 "filename": m.filename,
@@ -447,20 +549,20 @@ def _compose_once() -> None:
             }
             for m in _registry.models
         ]
-        FALLBACK_TEXT_MODEL = {
+        fallback_text_model = {
             "repo_id": _registry.fallback.repo_id,
             "filename": _registry.fallback.filename,
             "desc": _registry.fallback.desc,
         }
-        MODEL_IDX = _resolve_model_idx(sys.argv, MODELS)
-        active_model_desc = str(MODELS[MODEL_IDX]["desc"])
+        model_idx = _resolve_model_idx(sys.argv, models)
+        active_model_desc = str(models[model_idx]["desc"])
         _rag_settings = RAGSettings.from_env_and_dict({})
-        EMBED_MODEL_NAME = _rag_settings.embed_model_name
+        embed_model_name = _rag_settings.embed_model_name
         # Vision path for the local model. A deployment toggle (ADR 0001: env
         # is read through a settings accessor), not a constant — hard-coding
         # ``False`` silently disabled the vision branch while
         # ``vision_llm_enabled()`` reported the operator's choice.
-        USE_VISION_LLM = vision_llm_enabled()
+        use_vision_llm = vision_llm_enabled()
 
         # At-rest key loading is fail-closed: a malformed environment key, a
         # missing AI_STORAGE_KEY_FILE or an unreadable key file aborts compose
@@ -486,8 +588,8 @@ def _compose_once() -> None:
             llm=LlmModule(
                 registry=_registry,
                 paths=_paths,
-                model_idx=MODEL_IDX,
-                use_vision_llm=USE_VISION_LLM,
+                model_idx=model_idx,
+                use_vision_llm=use_vision_llm,
             ),
             rag=RagModule(cipher=storage_cipher),
             prompt_builder=DefaultPromptBuilder(
@@ -513,6 +615,7 @@ def _compose_once() -> None:
             runtime_modules.execute_a2a_task,
             storage_cipher=storage_cipher,
         )
+        attempt.platform = platform
         # Third-party plugins register into the same catalogue the agent sees.
         # The returned names form the live ``Specialist.PLUGIN`` row; without
         # this bridge a plugin tool was executable by a direct gateway caller
@@ -529,7 +632,11 @@ def _compose_once() -> None:
         from ai_assistant.orchestration.supervisor import authorise as supervisor_authorise
 
         outbound_a2a_token = a2a_outbound_token()
-        a2a_registry = RemoteAgentRegistry(bearer_token=outbound_a2a_token)
+        allow_insecure_a2a = a2a_allow_insecure_http()
+        a2a_registry = RemoteAgentRegistry(
+            bearer_token=outbound_a2a_token,
+            allow_insecure_http=allow_insecure_a2a,
+        )
         # Always inject the bound delegate: with neither A2A nor plugin tools
         # it behaves exactly like the module default, and composition no
         # longer has a second (None) shape for the graph to reason about.
@@ -560,6 +667,7 @@ def _compose_once() -> None:
             MemoryStore(_memory_store_path(), cipher=platform.storage_cipher)
             if runtime_settings.memory_enabled else None
         )
+        attempt.memory_store = memory_store
         if memory_store is not None:
             memory_store.prune(
                 runtime_settings.memory_retention_days,
@@ -570,6 +678,7 @@ def _compose_once() -> None:
         # connection) alive and is closed by the lifespan. The agent layer
         # receives only the saver LangGraph compiles the graph with.
         checkpointer_handle = build_checkpointer(platform.storage_cipher)
+        attempt.checkpoint = checkpointer_handle
         agent_service = AgentService(
             tool_gateway=platform.gateway,
             llm_runtime=runtime_modules.llm,
@@ -578,6 +687,7 @@ def _compose_once() -> None:
             a2a_router=A2ARouter(
                 registry=a2a_registry,
                 bearer_token=outbound_a2a_token,
+                allow_insecure_http=allow_insecure_a2a,
             ),
             task_coordinator=platform.coordinator,
             pending_actions=PendingActionStore(
@@ -631,14 +741,15 @@ def _compose_once() -> None:
             allow_remote_a2a=platform.settings.allow_remote_a2a,
         )
         agent_stream_workers = AgentStreamWorkerTracker()
+        attempt.stream_workers = agent_stream_workers
         app.include_router(build_health_router(
             llm_module=runtime_modules.llm,
             rag_module=runtime_modules.rag,
             platform=platform,
             server_start_time=_SERVER_START_TIME,
-            embed_model_name=EMBED_MODEL_NAME,
+            embed_model_name=embed_model_name,
             chars_per_token=CHARS_PER_TOKEN,
-            model_idx=MODEL_IDX,
+            model_idx=model_idx,
             app=app,
             policy=transport_policy,
         ))
@@ -656,8 +767,8 @@ def _compose_once() -> None:
             rag_module=runtime_modules.rag,
             action_manifest_module=action_manifest,
             reset_agent_state_fn=agent_service.reset_state,
-            models=MODELS,
-            model_idx=MODEL_IDX,
+            models=models,
+            model_idx=model_idx,
             refresh_agent_routes_fn=_refresh_agent_routes,
             rebuild_chatbot_agent_fn=runtime_modules.chatbot_agent.rebuild,
             logger=logger,
@@ -669,7 +780,28 @@ def _compose_once() -> None:
             policy=transport_policy,
             worker_tracker=agent_stream_workers,
         ))
-        _register_optional_protocols(app, platform, mcp_server, transport_policy)
+        _register_optional_protocols(
+            app,
+            platform,
+            mcp_server,
+            transport_policy,
+            logger_instance=logger,
+        )
+        local_state = locals()
+        composed_state = {
+            name: local_state[name]
+            for name in _COMPOSED_NAMES
+            if name in local_state
+        }
+        composed_state.update({
+            "LOG_FILE_PATH": log_file_path,
+            "MODELS": models,
+            "FALLBACK_TEXT_MODEL": fallback_text_model,
+            "MODEL_IDX": model_idx,
+            "EMBED_MODEL_NAME": embed_model_name,
+            "USE_VISION_LLM": use_vision_llm,
+        })
+        return composed_state
 
 
 def __getattr__(name: str) -> Any:
@@ -689,6 +821,8 @@ def __getattr__(name: str) -> Any:
 # ── Runtime Bootstrap ─────────────────────────────────────────────────────────
 def bootstrap_runtime() -> None:
     """Initialize RAG and LLM once before Uvicorn accepts requests."""
+    global logger, LOG_FILE_PATH, MODELS, MODEL_IDX, runtime_modules
+
     compose()
     from ai_assistant.config import safe_relpath
 

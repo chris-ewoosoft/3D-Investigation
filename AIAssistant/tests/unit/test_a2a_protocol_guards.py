@@ -113,6 +113,13 @@ class RemoteDiscoveryTests(unittest.TestCase):
         self.assertEqual(result, {})
         mock_urlopen.assert_not_called()
 
+    def test_discovery_refuses_plain_http_before_sending_the_bearer(self) -> None:
+        registry = RemoteAgentRegistry(bearer_token="peer-token")
+        with patch("ai_assistant.adapters.a2a_protocol.urlopen") as mock_urlopen:
+            result = registry.discover(["http://remote.example.com"])
+        self.assertEqual(result, {})
+        mock_urlopen.assert_not_called()
+
     def test_discover_no_urls_returns_snapshot(self) -> None:
         registry = RemoteAgentRegistry(bearer_token="peer-token")
         with patch.object(

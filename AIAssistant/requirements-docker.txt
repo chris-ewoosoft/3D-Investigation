@@ -31,6 +31,11 @@ llama-index-core>=0.11.0
 llama-index-vector-stores-faiss>=0.3.0
 llama-index-embeddings-huggingface>=0.3.0
 llama-index-retrievers-bm25>=0.3.0
+# Security floors for transitive dependencies pulled by llama-index/torch.
+# Keep these explicit: regenerating the lock must not re-introduce versions
+# rejected by the dependency-audit gate.
+nltk>=3.10.4
+setuptools>=84.1.0
 
 # ── Document loaders ───────────────────────────────────────────────────────────
 python-docx>=1.1.0
@@ -48,7 +53,7 @@ pydantic>=2.7.0
 mcp>=1.0.0
 langgraph>=1.0.0
 prometheus-client>=0.20.0
-opentelemetry-api>=1.27.0
-opentelemetry-sdk>=1.27.0
-opentelemetry-exporter-otlp-proto-http>=1.27.0
+opentelemetry-api>=1.45.2
+opentelemetry-sdk>=1.45.2
+opentelemetry-exporter-otlp-proto-http>=1.45.2
 langgraph-checkpoint-sqlite>=2.0.0

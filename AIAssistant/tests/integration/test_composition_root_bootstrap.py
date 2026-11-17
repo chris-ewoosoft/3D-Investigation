@@ -15,11 +15,13 @@ and the document scan are replaced with doubles.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -371,12 +373,176 @@ class LazyCompositionTests(unittest.TestCase):
 
         original = server_module._COMPOSED
         try:
+            server_module._COMPOSED = False
             with patch.object(server_module, "_compose_once", side_effect=RuntimeError("boom")):
                 with self.assertRaises(RuntimeError):
                     server_module.compose()
                 self.assertFalse(server_module._COMPOSED)
         finally:
             server_module._COMPOSED = original
+
+    def test_failed_composition_closes_new_resources_and_restores_previous_graph(self) -> None:
+        from ai_assistant.bootstrap import server as server_module
+
+        original_composed = server_module._COMPOSED
+        original_composing = server_module._COMPOSING
+        previous = {
+            name: vars(server_module)[name]
+            for name in server_module._COMPOSED_NAMES
+            if name in vars(server_module)
+        }
+        calls: list[str] = []
+
+        def resource(label: str, *, fails: bool = False) -> MagicMock:
+            handle = MagicMock()
+
+            def close() -> None:
+                calls.append(label)
+                if fails:
+                    raise KeyboardInterrupt(label)
+
+            handle.close.side_effect = close
+            return handle
+
+        stream = resource("stream")
+        tasks = resource("tasks", fails=True)
+        tools = resource("tools")
+        checkpoint = resource("checkpoint")
+        memory = resource("memory")
+        failed_platform = MagicMock(tasks=tasks, tools=tools)
+        root_logger = logging.getLogger()
+        previous_handler = logging.NullHandler()
+        root_logger.addHandler(previous_handler)
+        owned_handler = logging.NullHandler()
+        setattr(owned_handler, "_ai_assistant_owned", True)
+        owned_handler.close = MagicMock(side_effect=KeyboardInterrupt("logging"))
+        foreign_handler = logging.NullHandler()
+        foreign_handler.close = MagicMock()
+
+        def fail_after_allocating_resources(attempt) -> None:
+            attempt.stream_workers = stream
+            attempt.platform = failed_platform
+            attempt.checkpoint = checkpoint
+            attempt.memory_store = memory
+            root_logger.removeHandler(previous_handler)
+            root_logger.addHandler(owned_handler)
+            root_logger.addHandler(foreign_handler)
+            msg = "router construction failed"
+            raise RuntimeError(msg)
+
+        try:
+            server_module._COMPOSED = False
+            server_module._COMPOSING = False
+            with patch.object(
+                server_module, "_compose_once", side_effect=fail_after_allocating_resources,
+            ), self.assertRaisesRegex(RuntimeError, "router construction failed"):
+                server_module.compose()
+        finally:
+            server_module._COMPOSED = original_composed
+            server_module._COMPOSING = original_composing
+
+        self.assertEqual(calls, ["stream", "tasks", "tools", "checkpoint", "memory"])
+        self.assertNotIn(owned_handler, root_logger.handlers)
+        self.assertNotIn(foreign_handler, root_logger.handlers)
+        self.assertIn(previous_handler, root_logger.handlers)
+        owned_handler.close.assert_called_once_with()
+        # ``logging`` keeps weak references to every constructed handler and
+        # closes them again at interpreter shutdown. The injected first-close
+        # failure belongs only to this rollback attempt.
+        owned_handler.close.side_effect = None
+        foreign_handler.close.assert_not_called()
+        root_logger.removeHandler(previous_handler)
+        previous_handler.close()
+        for name, value in previous.items():
+            self.assertIs(vars(server_module)[name], value)
+        server_module._close_rollback_resource(None)
+
+        # A name that did not exist before this attempt must not survive it.
+        saved_description = server_module.active_model_desc
+        state_without_description = dict(previous)
+        state_without_description.pop("active_model_desc")
+        server_module._rollback_failed_composition(state_without_description)
+        self.assertNotIn("active_model_desc", vars(server_module))
+        server_module.active_model_desc = saved_description
+
+    def test_compose_serializes_callers_and_rejects_same_thread_reentry(self) -> None:
+        from ai_assistant.bootstrap import server as server_module
+
+        original_composed = server_module._COMPOSED
+        original_composing = server_module._COMPOSING
+        entered = threading.Event()
+        release = threading.Event()
+        build_count = 0
+
+        def build(_attempt) -> None:
+            nonlocal build_count
+            build_count += 1
+            entered.set()
+            self.assertTrue(release.wait(timeout=2))
+
+        try:
+            server_module._COMPOSED = False
+            server_module._COMPOSING = False
+            with patch.object(server_module, "_compose_once", side_effect=build):
+                first = threading.Thread(target=server_module.compose)
+                second = threading.Thread(target=server_module.compose)
+                first.start()
+                self.assertTrue(entered.wait(timeout=2))
+                second.start()
+                release.set()
+                first.join(timeout=2)
+                second.join(timeout=2)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+                self.assertEqual(build_count, 1)
+
+            server_module._COMPOSED = False
+            server_module._COMPOSING = True
+            with self.assertRaisesRegex(RuntimeError, "re-entered"):
+                server_module.compose()
+        finally:
+            server_module._COMPOSED = original_composed
+            server_module._COMPOSING = original_composing
+
+    def test_compose_publishes_the_complete_graph_only_after_build(self) -> None:
+        from ai_assistant.bootstrap import server as server_module
+
+        original_composed = server_module._COMPOSED
+        original_composing = server_module._COMPOSING
+        had_app = "app" in vars(server_module)
+        original_app = vars(server_module).get("app")
+        entered = threading.Event()
+        release = threading.Event()
+        complete_app = object()
+
+        def build(_attempt) -> dict[str, object]:
+            entered.set()
+            self.assertTrue(release.wait(timeout=2))
+            return {"app": complete_app}
+
+        try:
+            server_module._COMPOSED = False
+            server_module._COMPOSING = False
+            vars(server_module).pop("app", None)
+            with patch.object(server_module, "_compose_once", side_effect=build):
+                worker = threading.Thread(target=server_module.compose)
+                worker.start()
+                self.assertTrue(entered.wait(timeout=2))
+                self.assertNotIn("app", vars(server_module))
+                self.assertFalse(server_module._COMPOSED)
+                release.set()
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+            self.assertIs(server_module.app, complete_app)
+            self.assertTrue(server_module._COMPOSED)
+        finally:
+            release.set()
+            server_module._COMPOSED = original_composed
+            server_module._COMPOSING = original_composing
+            if had_app:
+                server_module.app = original_app
+            else:
+                vars(server_module).pop("app", None)
 
     def test_unknown_attribute_still_raises_attribute_error(self) -> None:
         """``__getattr__`` composes known names only; typos stay AttributeErrors."""
