@@ -1,7 +1,7 @@
 """RAG (Retrieval-Augmented Generation) package."""
 
 from ..image_utils import IMAGE_EXTS, image_to_data_uri, is_image_file, load_image_for_embedding
-from .domain import ChunkResult
+from .domain import ChunkResult, RagHit, RetrievalResult
 from .embeddings import E5LlamaEmbedding
 from .index import build_index_from_scratch, is_cache_valid, load_cache, load_or_build_index, save_cache, scan_documents
 from .loaders import BaseDocumentLoader, DocumentLoaderRegistry
@@ -25,7 +25,9 @@ __all__ = [
     "DocumentLoaderRegistry",
     "E5LlamaEmbedding",
     "FaissVectorRetriever",
+    "RagHit",
     "RetrievalPipeline",
+    "RetrievalResult",
     "build_index_from_scratch",
     "build_retrievers",
     "dedup_by_source",

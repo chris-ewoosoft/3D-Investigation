@@ -18,6 +18,10 @@ from ..state import AgentState, Completion, ReflectResult, Step, has_step_type
 
 logger = get_agent_logger("reflect")
 
+_REFLECT_DECISIONS = {
+    "continue", "revise", "retry", "replan", "ask_user", "reconcile", "stop",
+}
+
 
 @dataclass
 class ReflectContext:
@@ -86,7 +90,7 @@ def reflect_node(state: AgentState, ctx: ReflectContext) -> dict[str, Any]:
 
     if reflection and (
         not isinstance(reflection.get("passed"), bool)
-        or reflection.get("decision") not in {"continue", "revise"}
+        or reflection.get("decision") not in _REFLECT_DECISIONS
         or not isinstance(reflection.get("reason"), str)
     ):
         reflection = None
@@ -134,6 +138,9 @@ def _record_reflection(state: AgentState, call: Step,
                        reflection: dict[str, Any]) -> dict[str, Any]:
     """Persist critic output and feed a failed review back to the reasoner."""
     steps = list(state["steps"])
+    decision = str(reflection.get("decision", "continue"))
+    workflow_decision = "retry" if decision == "revise" else decision
+    reflection = {**reflection, "workflow_decision": workflow_decision}
     reflection_step: Step = {"type": "reflection", "tool": call["tool"], "result": reflection,
                              "iteration": state["iteration"]}
     if isinstance(call.get("plan_step_index"), int):
@@ -154,7 +161,28 @@ def _record_reflection(state: AgentState, call: Step,
             " Do not repeat the same failing call; inspect evidence, follow the current plan step, "
             "and choose a different valid tool or parameters when needed." + recovery)})
             
-    return {"steps": steps, "messages": messages}
+    update: dict[str, Any] = {"steps": steps, "messages": messages}
+    if workflow_decision == "replan":
+        replan_count = state.get("replan_count", 0) + 1
+        update.update({
+            "replan_requested": True,
+            "replan_count": replan_count,
+            "plan_verified": False,
+            "plan_feedback": str(reflection.get("reason", "Execution evidence invalidated the plan.")),
+        })
+        if replan_count > state.get("max_replans", 2):
+            steps.append({
+                "type": "final_answer",
+                "content": "Đã đạt giới hạn lập lại kế hoạch; dừng để tránh thực thi sai.",
+            })
+            update.update({"steps": steps, "done": True, "replan_requested": False})
+    elif workflow_decision in {"ask_user", "reconcile", "stop"}:
+        steps.append({
+            "type": "final_answer",
+            "content": str(reflection.get("reason", "Không thể tiếp tục an toàn.")),
+        })
+        update.update({"steps": steps, "done": True})
+    return update
 
 
 def after_reflect(state: AgentState) -> str:
@@ -162,5 +190,8 @@ def after_reflect(state: AgentState) -> str:
     if state["done"] or state["pending_tool"] is not None:
         logger.info("[ROUTER: after_reflect] → END")
         return "end"
+    if state.get("replan_requested"):
+        logger.info("[ROUTER: after_reflect] → PLAN (runtime evidence invalidated plan)")
+        return "plan"
     logger.info("[ROUTER: after_reflect] → REASON")
     return "reason"

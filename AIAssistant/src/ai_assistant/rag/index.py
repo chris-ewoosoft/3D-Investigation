@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ai_assistant.config.paths import AppPaths
+from ai_assistant.config.paths import AppPaths, safe_relpath
 from ai_assistant.config.rag_config import RAGSettings
 from ai_assistant.image_utils import load_image_for_embedding
 from ai_assistant.llm.hardware import release_ml_memory
@@ -467,6 +467,12 @@ def load_or_build_index(chunks: list[ChunkResult], embed_model: Any, paths: AppP
     return index, chunks_loaded, bm25
 
 
+def _attach_relative_path(chunk: Any, file_path: str, project_root: str) -> None:
+    metadata = getattr(chunk, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata.setdefault("relative_path", safe_relpath(file_path, project_root))
+
+
 def scan_documents(paths: AppPaths, registry: Any) -> list[ChunkResult]:
     """Scan all project paths and return chunked documents."""
     all_chunks: list[ChunkResult] = []
@@ -483,6 +489,7 @@ def scan_documents(paths: AppPaths, registry: Any) -> list[ChunkResult]:
                     stats["errors"] += 1
                     continue
                 for r in results:
+                    _attach_relative_path(r, fp, str(paths.project_root))
                     all_chunks.append(r)
                     ext = os.path.splitext(fp)[1].lower().lstrip(".")
                     if ext in stats:
@@ -497,6 +504,7 @@ def scan_documents(paths: AppPaths, registry: Any) -> list[ChunkResult]:
             continue
         stats["files"] += 1
         for r in registry.load_file(fp, str(paths.project_root)):
+            _attach_relative_path(r, fp, str(paths.project_root))
             all_chunks.append(r)
             stats["md" if r.loader_type == "md" else "source"] += 1
 

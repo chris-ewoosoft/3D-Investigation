@@ -239,7 +239,7 @@ AIAssistant/
 │  ├─ unit/                           # Hành vi từng module (concurrency, approval, streaming…)
 │  ├─ integration/                    # Composition root, orchestration, A2A e2e, guard ranh giới AST
 │  └─ contract/                       # Hợp đồng Qt ↔ server và multi-agent
-├─ Docs/adr/                          # 63 Architecture Decision Record (0001–0063)
+├─ Docs/adr/                          # 64 Architecture Decision Record (0001–0064)
 ├─ Docs/archive/                      # Tài liệu đã hạ cấp (giữ để tham chiếu)
 ├─ Docs/RUNBOOK.md                    # SLO, cảnh báo, quy trình production (ADR 0024)
 ├─ Dockerfile                         # Image non-root (không kèm trọng số; mount Models/ + data)
@@ -691,8 +691,8 @@ lint (`E/W/F/I/BLE/S/RUF/C90/N/TRY`, complexity ≤ 15), thiết lập mypy stri
 sàn coverage theo branch (`fail_under = 100`), nên lần chạy cục bộ và CI đo cùng
 một thứ. Theo lần đo ngày 2026-11-17 (các con số đo được được ghi lại trong
 `Docs/SCORECARD.md` — **đã theo git** từ ADR 0032): **100.00%** statement *và*
-branch toàn package (11 939 statement / 3 320 branch, 2 688 test);
-inventory mutation hiện có **357/357** killed, 0 survived, 0 stale trong sandbox
+branch toàn package (12 206 statement / 3 404 branch, 2 712 test);
+inventory mutation hiện có **363/363** killed, 0 survived, 0 stale trong sandbox
 biệt lập của ADR 0056/0058/0059/0060/0061/0062/0063.
 Số mutant tối thiểu cũng là một cổng
 (`MIN_MUTANTS`): xoá một mutant là một quyết định, và cổng biến nó thành
@@ -868,7 +868,7 @@ accuracy tổng 0.9, accuracy từng slice 0.75 và freshness 0.9. Lần đo
 | `README.md` (file này) | Điểm vào duy nhất: layout, kiến trúc, API, cài đặt, kiểm thử |
 | `Docs/SCORECARD.md` | Các metric đo được (coverage, mutation, lint, type, eval) — **đã theo git** từ ADR 0032 |
 | [`Docs/RUNBOOK.md`](Docs/RUNBOOK.md) | Vận hành production: SLO, cảnh báo, quota, checkpoint, luân chuyển pin model |
-| [`Docs/adr/`](Docs/adr/) | 63 Architecture Decision Record (0001–0063) |
+| [`Docs/adr/`](Docs/adr/) | 64 Architecture Decision Record (0001–0064) |
 | [`Docs/archive/`](Docs/archive/) | Tài liệu đã hạ cấp, giữ lại để tham chiếu lịch sử |
 
 > `Docs/` chỉ chứa `adr/`, `archive/`, `RUNBOOK.md` và `SCORECARD.md`. Các bản
@@ -939,7 +939,8 @@ Các quyết định trọng yếu, theo thứ tự:
 [0060](Docs/adr/0060-bounded-lsp-and-durable-worker-handoff.md) deadline LSP thật, correlation JSON-RPC, teardown process đầy đủ và handoff durable từ task sang worker,
 [0061](Docs/adr/0061-windows-dpapi-storage-key-custody.md) custody khóa local Windows bằng DPAPI, migration plaintext nguyên tử và fail-closed,
 [0062](Docs/adr/0062-verified-write-handles-and-ambient-container-sandbox.md) commit write/create qua handle đã xác minh và sandbox compose dùng chính container hiện tại làm OS boundary.
-[0063](Docs/adr/0063-transactional-bootstrap-secure-egress-and-release-artifact-gates.md) bootstrap giao dịch có rollback, A2A HTTPS mặc định, image đủ contract và CI audit dependency/container.
+[0063](Docs/adr/0063-transactional-bootstrap-secure-egress-and-release-artifact-gates.md) bootstrap giao dịch có rollback, A2A HTTPS mặc định, image đủ contract và CI audit dependency/container,
+[0064](Docs/adr/0064-verified-rag-bounded-replanning-and-selective-token-streaming.md) RAG có provenance/answerability, workflow replan có budget và token streaming chỉ cho prose hiển thị.
 
 Cài đặt trong lúc phát triển: `pip install -e AIAssistant`. Cấu hình triển khai
 nằm trong `config/*.toml`; các ADR ràng buộc nằm trong `Docs/adr/`.

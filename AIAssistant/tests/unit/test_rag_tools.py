@@ -12,6 +12,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from ai_assistant.rag.domain import RagHit, RetrievalResult
 from ai_assistant.tools.builtin import rag_search_tool
 from ai_assistant.tools.factory import create_tool_registry
 
@@ -69,6 +70,31 @@ class RagSearchToolTests(unittest.TestCase):
         registry = create_tool_registry()
         spec = registry.get("rag_search")
         self.assertIn("chưa sẵn sàng", spec.handler({"query": "q"})["error"])
+
+    def test_structured_hits_are_exposed_without_removing_legacy_results(self):
+        hit = RagHit(
+            chunk_id=4, text="evidence", source_path="src/a.py", loader_type="source",
+            rank=1, fusion_score=0.01, confidence=0.9, symbol="answer",
+        )
+        result = RetrievalResult("q", (hit,), 0.9, True, "evidence_found")
+        provider = SimpleNamespace(
+            search=lambda query, result_k: result,
+            get_context=lambda query, result_k: ("", "code ctx", []),
+        )
+        payload = rag_search_tool(provider)({"query": "q"})
+        self.assertTrue(payload["found"])
+        self.assertEqual(payload["hits"][0]["symbol"], "answer")
+        self.assertEqual(payload["results"][0]["source"], "source_code")
+
+    def test_low_confidence_structured_result_is_an_explicit_miss(self):
+        result = RetrievalResult.empty("q", "low_confidence")
+        provider = SimpleNamespace(
+            search=lambda query, result_k: result,
+            get_context=lambda query, result_k: ("stale", "", []),
+        )
+        payload = rag_search_tool(provider)({"query": "q"})
+        self.assertFalse(payload["found"])
+        self.assertEqual(payload["reason"], "low_confidence")
 
 
 if __name__ == "__main__":

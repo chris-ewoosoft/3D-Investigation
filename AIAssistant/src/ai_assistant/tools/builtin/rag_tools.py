@@ -28,9 +28,19 @@ def rag_search_tool(provider: RagContextPort | None) -> Handler:
         if provider is None:
             return {"error": "RAG index chưa sẵn sàng."}
         try:
+            search = getattr(provider, "search", None)
+            structured = search(query, result_k=top_k) if callable(search) else None
             doc_ctx, code_ctx, _ = provider.get_context(query, result_k=top_k)
         except Exception as e:
             return {"error": f"Lỗi RAG search: {e}"}
+        if structured is not None and not structured.answerable:
+            return {
+                "query": query,
+                "found": False,
+                "confidence": structured.confidence,
+                "reason": structured.reason,
+                "message": "Không tìm thấy bằng chứng đủ tin cậy.",
+            }
         results = []
         if doc_ctx:
             results.append({"source": "documentation", "content": doc_ctx[:3000]})
@@ -38,6 +48,13 @@ def rag_search_tool(provider: RagContextPort | None) -> Handler:
             results.append({"source": "source_code", "content": code_ctx[:3000]})
         if not results:
             return {"query": query, "found": False, "message": "Không tìm thấy kết quả phù hợp."}
-        return {"query": query, "found": True, "top_k": top_k, "results": results}
+        payload = {"query": query, "found": True, "top_k": top_k, "results": results}
+        if structured is not None:
+            payload.update({
+                "confidence": structured.confidence,
+                "reason": structured.reason,
+                "hits": [hit.to_dict() for hit in structured.hits],
+            })
+        return payload
 
     return tool_rag_search

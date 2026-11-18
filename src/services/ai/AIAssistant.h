@@ -109,6 +109,8 @@ private:
     QHash<QNetworkReply *, QString> m_streamErrors;
     QHash<QNetworkReply *, QJsonArray> m_agentStreamSteps;
     QHash<QNetworkReply *, QJsonObject> m_agentStreamResults;
+    QHash<QNetworkReply *, QString> m_agentStreamTexts;
+    QHash<QNetworkReply *, QString> m_agentStreamStatuses;
 
     ChatSession* currentSession();
     ChatSession* getSession(const QString &sessionId);

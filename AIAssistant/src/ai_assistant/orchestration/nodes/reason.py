@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from ai_assistant.config.logging import get_agent_logger
 from ai_assistant.domain.approvals import (
@@ -49,6 +49,7 @@ from ..state import (
     Parser,
     SelectSpecialist,
     Step,
+    StreamingCompletion,
     has_step_type,
     is_context_exhausted,
 )
@@ -78,6 +79,7 @@ class ReasonContext:
     #: node back to the user instead of letting the loop retry a tool the
     #: gateway will refuse.
     approval_covers: ApprovalCovers | None = None
+    stream_complete: StreamingCompletion | None = None
 
 
 @dataclass
@@ -473,6 +475,17 @@ def _dispatch_tool_call(turn: _Turn) -> dict[str, Any]:
     tool_name = turn.tool_name
     if tool_name is None:  # pragma: no cover — _handle_final_answer catches None first
         return turn.continue_update()
+    if turn.tool_call_count >= turn.state.get("max_tool_calls", turn.ctx.max_iterations):
+        turn.steps.append({
+            "type": "final_answer",
+            "content": "Đã đạt giới hạn số lần gọi công cụ; dừng để tránh vòng lặp.",
+            "iteration": turn.iteration,
+        })
+        return {
+            "iteration": turn.iteration,
+            "steps": turn.steps,
+            "done": True,
+        }
     params = turn.tool_params or {}
     idempotency_key = ""
     if turn.ctx.select_specialist:
@@ -554,10 +567,32 @@ def reason_node(state: AgentState, ctx: ReasonContext) -> dict[str, Any]:
     if prepared.early_final is not None:
         return prepared.early_final
 
+    stream_complete = ctx.stream_complete
+    can_stream_answer = (
+        prepared.forced_envelope is None
+        and stream_complete is not None
+        and (
+            prepared.step_contract["mode"] == "direct_answer"
+            or bool(state.get("synthesize_after_rag"))
+            or (
+                prepared.step_contract["mode"] == "rag_search"
+                and has_rag_evidence_for_step(steps, done_count)
+            )
+            or (
+                prepared.step_contract["mode"] == "web_search"
+                and has_web_evidence_for_step(steps, done_count)
+            )
+        )
+    )
     if prepared.forced_envelope is not None:
         answer = json.dumps(prepared.forced_envelope, ensure_ascii=False)
         logger.info("[NODE: reason] Enforcing execution contract for step/request '%s': %s",
                     prepared.current_plan_step or _user_request(state), prepared.forced_envelope)
+    elif can_stream_answer:
+        logger.debug("[AGENT TRACE] ── Reason: streaming user-visible response...")
+        answer = cast(StreamingCompletion, stream_complete)(
+            prepared.messages, state["temperature"],
+        ).strip()
     else:
         logger.debug("[AGENT TRACE] ── Reason: đang gọi LLM...")
         answer = ctx.complete(prepared.messages, state["temperature"]).strip()

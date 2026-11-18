@@ -474,8 +474,10 @@ void TestAIAssistant::streamedAgentUpdatesTraceFromSseSteps()
     auto &assistant = *f.assistant;
     f.network.replyContentType = "text/event-stream; charset=utf-8";
     f.network.replyBody =
-        "event: status\ndata: {\"status\":\"running\"}\n\n"
+        "event: status\ndata: {\"node\":\"reason\",\"phase\":\"started\"}\n\n"
         "event: step\ndata: {\"type\":\"thinking\",\"content\":\"Checking\"}\n\n"
+        "event: delta\ndata: {\"message_id\":\"m1\",\"content\":\"Do\"}\n\n"
+        "event: delta\ndata: {\"message_id\":\"m1\",\"content\":\"ne\"}\n\n"
         "event: step\ndata: {\"type\":\"final_answer\",\"content\":\"Done\"}\n\n"
         "event: done\ndata: {\"status\":\"completed\",\"steps\":["
         "{\"type\":\"thinking\",\"content\":\"Checking\"},"
@@ -494,7 +496,7 @@ void TestAIAssistant::streamedAgentUpdatesTraceFromSseSteps()
     QCOMPARE(trace.agentTrace().value("status").toString(),
              QStringLiteral("completed"));
     QCOMPARE(trace.agentTrace().value("steps").toArray().size(), 2);
-    QVERIFY(historyChanged.count() >= 4);
+    QVERIFY(historyChanged.count() >= 7);
     QVERIFY(!assistant.isThinking());
 }
 

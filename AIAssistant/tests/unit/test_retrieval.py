@@ -224,6 +224,77 @@ class RetrievalPipelineTests(unittest.TestCase):
         doc_ctx, code_ctx, _images = pipeline.get_context("q")
         self.assertEqual((doc_ctx, code_ctx), ("", ""))
 
+    def test_structured_search_preserves_provenance_and_scores(self):
+        chunk = _chunk(
+            "def reconstruct():\n    pass",
+            "C:/project/src/reconstruct.py",
+            metadata={
+                "relative_path": "src/reconstruct.py",
+                "symbol": "reconstruct",
+                "line_start": 10,
+                "line_end": 11,
+            },
+        )
+        dense = [_Item(_Node({"chunk_index": 0}), 0.9)]
+        sparse = [_Item(_Node({"chunk_index": 0}), 2.0)]
+        pipeline = RetrievalPipeline(
+            _FakeRetriever(dense), _FakeRetriever(sparse), None, [chunk],
+            use_reranker=False,
+        )
+        result = pipeline.search("reconstruct")
+        self.assertTrue(result.answerable)
+        self.assertGreater(result.confidence, 0.9)
+        self.assertEqual(result.hits[0].source_path, "src/reconstruct.py")
+        self.assertEqual(result.hits[0].symbol, "reconstruct")
+        self.assertEqual(result.hits[0].line_start, 10)
+        self.assertEqual(result.hits[0].to_dict(text_limit=3)["text"], "def")
+
+    def test_structured_search_fails_closed_below_confidence_threshold(self):
+        chunk = _chunk("only sparse", "docs/a.md")
+        sparse = [_Item(_Node({"chunk_index": 0}), 1.0)]
+        pipeline = RetrievalPipeline(
+            _FakeRetriever([]), _FakeRetriever(sparse), None, [chunk],
+            use_reranker=False, answerability_threshold=0.8,
+        )
+        result = pipeline.search("weak")
+        self.assertFalse(result.answerable)
+        self.assertEqual(result.reason, "low_confidence")
+
+    def test_structured_search_reranks_and_honours_an_explicit_limit(self):
+        chunks = [_chunk("a", "src/a.py"), _chunk("b", "src/b.py")]
+        dense = [
+            _Item(_Node({"chunk_index": 0}), 0.9),
+            _Item(_Node({"chunk_index": 1}), 0.9),
+        ]
+        pipeline = RetrievalPipeline(
+            _FakeRetriever(dense), _FakeRetriever([]), _FakeReranker([0.1, 0.9]), chunks,
+            use_reranker=True, reranker_top_k=8,
+        )
+        result = pipeline.search("query", result_k=1)
+        self.assertEqual(result.hits[0].chunk_id, 1)
+        self.assertEqual(result.hits[0].rerank_score, 0.9)
+
+    def test_structured_search_contains_reranker_failure_and_deduplicates_sources(self):
+        chunks = [
+            _chunk("a", "src/same.py"),
+            _chunk("b", "src/same.py"),
+            _chunk("c", "src/same.py"),
+            _chunk("d", "src/other.py"),
+        ]
+        dense = [_Item(_Node({"chunk_index": index}), 0.9) for index in range(4)]
+        pipeline = RetrievalPipeline(
+            _FakeRetriever(dense), _FakeRetriever([]), _FakeReranker(error=True), chunks,
+            use_reranker=True, reranker_top_k=8,
+        )
+        result = pipeline.search("query", result_k=3)
+        self.assertEqual([hit.chunk_id for hit in result.hits], [0, 1, 3])
+        self.assertIsNone(result.hits[0].rerank_score)
+
+    def test_structured_search_reports_empty_query_and_missing_index(self):
+        pipeline = RetrievalPipeline(None, None, None, [])
+        self.assertEqual(pipeline.search(" ").reason, "empty_query")
+        self.assertEqual(pipeline.search("query").reason, "index_unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()

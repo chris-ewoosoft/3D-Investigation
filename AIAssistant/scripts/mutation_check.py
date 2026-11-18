@@ -205,7 +205,11 @@ class Mutant:
 #: after construction, and failed composition releases its owned log handlers.
 #: The final architecture-closure pass adds two self-testing policy mutants:
 #: no peer layer may import bootstrap, and internal may import no app layer.
-MIN_MUTANTS = 357
+#: ADR 0064 adds six more: RAG answerability fails closed, re-planning and tool
+#: calls are budgeted, only user-visible prose takes the streaming path,
+#: hidden reasoning never reaches a delta, and unknown stream kinds degrade to
+#: an ordinary step.
+MIN_MUTANTS = 363
 
 MUTANTS: tuple[Mutant, ...] = (
     # ── Local storage-key custody (ADR 0061) ─────────────────────────────────
@@ -2718,6 +2722,48 @@ MUTANTS: tuple[Mutant, ...] = (
         "the planner grammar drops step_kinds again (the constrained decoder "
         "cannot emit the classification the prompt asks for)",
     ),
+    Mutant(
+        "src/ai_assistant/rag/retrieval.py",
+        "        answerable = bool(hits) and confidence >= self.answerability_threshold",
+        "        answerable = bool(hits) and confidence < self.answerability_threshold",
+        ("tests.unit.test_retrieval",),
+        "low-confidence retrieval is accepted while strong evidence is rejected",
+    ),
+    Mutant(
+        "src/ai_assistant/orchestration/nodes/reflect.py",
+        '        if replan_count > state.get("max_replans", 2):',
+        "        if False:",
+        ("tests.unit.test_reflect_node",),
+        "the critic can re-plan forever after the configured budget is exhausted",
+    ),
+    Mutant(
+        "src/ai_assistant/orchestration/nodes/reason.py",
+        '    if turn.tool_call_count >= turn.state.get("max_tool_calls", turn.ctx.max_iterations):',
+        '    if turn.tool_call_count > turn.state.get("max_tool_calls", turn.ctx.max_iterations):',
+        ("tests.unit.test_reason_node_guards",),
+        "one tool call beyond the declared budget is dispatched",
+    ),
+    Mutant(
+        "src/ai_assistant/orchestration/nodes/reason.py",
+        "        and stream_complete is not None",
+        "        and False",
+        ("tests.unit.test_reason_node_guards",),
+        "a known user-visible response waits for an atomic completion instead of streaming",
+    ),
+    Mutant(
+        "src/ai_assistant/agents/completion.py",
+        "            if self._inside:",
+        "            if False:",
+        ("tests.unit.test_completion_envelopes",),
+        "hidden reasoning inside split think tags is emitted as a user-visible delta",
+    ),
+    Mutant(
+        "src/ai_assistant/adapters/http/agent_routes.py",
+        '        if kind not in {"status", "delta", "step"}:',
+        "        if False:",
+        ("tests.unit.test_http_agent_routes",),
+        "an unknown internal event becomes an unsupported SSE event type",
+    ),
     # ── The lazy encoder load (ADR 0044 §9) ─────────────────────────────────
     Mutant(
         "src/ai_assistant/rag/embeddings.py",
@@ -3537,9 +3583,12 @@ PINNED_DECISION_FILES: tuple[str, ...] = (
     "src/ai_assistant/observability/metrics.py",
     "src/ai_assistant/observability/tracing.py",
     "src/ai_assistant/path_policy.py",
+    "src/ai_assistant/orchestration/nodes/reason.py",
+    "src/ai_assistant/orchestration/nodes/reflect.py",
     "src/ai_assistant/orchestration/nodes/tool.py",
     "src/ai_assistant/orchestration/specialists/chatbot.py",
     "src/ai_assistant/rag/embeddings.py",
+    "src/ai_assistant/rag/retrieval.py",
     "src/ai_assistant/settings.py",
     "src/ai_assistant/tools/factory.py",
     "src/ai_assistant/tools/sandbox.py",

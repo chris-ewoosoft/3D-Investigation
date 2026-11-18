@@ -53,6 +53,21 @@ def _state(**over: Any) -> dict[str, Any]:
 
 
 class PlanReuseTests(unittest.TestCase):
+    def test_replan_request_bypasses_an_existing_plan(self):
+        planner = MagicMock(return_value=json.dumps({
+            "steps": ["New step"], "requires_plan": True,
+        }))
+        state = _state(
+            replan_requested=True,
+            steps=[{"type": "plan", "steps": ["Stale step"], "spec": {}}],
+        )
+
+        outcome = plan_node(state, planner)
+
+        self.assertEqual(outcome["plan"], ["New step"])
+        self.assertFalse(outcome["replan_requested"])
+        planner.assert_called_once()
+
     def test_a_verified_plan_is_reused_without_calling_the_planner(self):
         """A passed reflection means the plan step below it is authoritative."""
         planner = MagicMock()

@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -19,6 +20,11 @@ from ai_assistant.settings import load_agent_runtime_settings
 from ai_assistant.tools.aliases import TOOL_NAME_ALIASES, canonical_tool_name
 
 logger = logging.getLogger("ai_assistant.agents.completion")
+
+_PLAIN_RESPONSE_DIRECTIVE = (
+    "You are now in response mode. Return only the natural-language answer for the user. "
+    "Do not emit JSON, a tool call, hidden reasoning, or planning commentary."
+)
 
 # JSON schemas for planner and critic calls
 PLANNER_JSON_SCHEMA = {
@@ -50,7 +56,9 @@ CRITIC_JSON_SCHEMA = {
     "type": "object",
     "properties": {
         "passed": {"type": "boolean"},
-        "decision": {"type": "string", "enum": ["continue", "revise"]},
+        "decision": {"type": "string", "enum": [
+            "continue", "revise", "retry", "replan", "ask_user", "reconcile", "stop",
+        ]},
         "reason": {"type": "string"},
     },
     "required": ["passed", "decision", "reason"],
@@ -254,6 +262,143 @@ def constrained_completion(messages: list[dict[str, Any]], max_tokens: int, temp
 
     logger.warning("Constrained decoder returned unsupported envelope, treating as text.")
     return content
+
+
+class _VisibleTextFilter:
+    """Remove ``<think>`` blocks even when their tags cross stream chunks."""
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    @staticmethod
+    def _partial_suffix(text: str, marker: str) -> int:
+        for size in range(min(len(text), len(marker) - 1), 0, -1):
+            if text.endswith(marker[:size]):
+                return size
+        return 0
+
+    def feed(self, text: str) -> str:
+        self._buffer += text
+        visible: list[str] = []
+        while self._buffer:
+            if self._inside:
+                end = self._buffer.find(self._CLOSE)
+                if end < 0:
+                    keep = self._partial_suffix(self._buffer, self._CLOSE)
+                    self._buffer = self._buffer[-keep:] if keep else ""
+                    break
+                self._buffer = self._buffer[end + len(self._CLOSE):]
+                self._inside = False
+                continue
+            start = self._buffer.find(self._OPEN)
+            if start >= 0:
+                visible.append(self._buffer[:start])
+                self._buffer = self._buffer[start + len(self._OPEN):]
+                self._inside = True
+                continue
+            keep = self._partial_suffix(self._buffer, self._OPEN)
+            if keep:
+                visible.append(self._buffer[:-keep])
+                self._buffer = self._buffer[-keep:]
+            else:
+                visible.append(self._buffer)
+                self._buffer = ""
+            break
+        return "".join(visible)
+
+    def finish(self) -> str:
+        if self._inside:
+            self._buffer = ""
+            return ""
+        tail, self._buffer = self._buffer, ""
+        return tail
+
+
+def streaming_text_completion(
+    messages: list[dict[str, Any]],
+    max_tokens: int,
+    temperature: float,
+    llm_runtime: LLMRuntime,
+    backend_mode_fn: Callable[[], str],
+    openai_compatible_fn: Callable[..., dict[str, Any]],
+    record_token_usage_fn: Callable[[int, int], None],
+    delta_sink: Callable[[str], None],
+    cancel_checker: Callable[[], bool],
+) -> str:
+    """Generate user-visible prose and emit bounded deltas as it is produced.
+
+    Structured planner/tool/critic completions deliberately do not use this
+    path.  Routing has already established that the next model output is an
+    answer, so streaming plain prose replaces (rather than adds) an LLM call.
+    """
+    response_messages = [*messages, {"role": "system", "content": _PLAIN_RESPONSE_DIRECTIVE}]
+    remote_backend = _remote_leg_allowed(backend_mode_fn)
+    if remote_backend:
+        response = openai_compatible_fn(
+            response_messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        content = _record_and_decode_content(response, record_token_usage_fn, "remote-response")
+        content = _strip_think_tags(content)
+        if content and not cancel_checker():
+            delta_sink(content)
+        return content
+
+    backend = cast(LLMBackend, llm_runtime.llm)
+    stream = backend.generate(
+        messages=response_messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        repeat_penalty=1.1,
+        stream=True,
+    )
+    text_filter = _VisibleTextFilter()
+    parts: list[str] = []
+    pending: list[str] = []
+    pending_chars = 0
+    last_flush = time.monotonic()
+
+    def flush() -> None:
+        nonlocal pending_chars, last_flush
+        if not pending:
+            return
+        delta = "".join(pending)
+        pending.clear()
+        pending_chars = 0
+        last_flush = time.monotonic()
+        parts.append(delta)
+        delta_sink(delta)
+
+    try:
+        for chunk in stream:
+            if cancel_checker():
+                break
+            choices = chunk.get("choices", []) if isinstance(chunk, dict) else []
+            choice = choices[0] if choices else {}
+            delta = choice.get("delta", {}).get("content") or choice.get("text", "")
+            if not isinstance(delta, str) or not delta:
+                continue
+            visible = text_filter.feed(delta)
+            if not visible:
+                continue
+            pending.append(visible)
+            pending_chars += len(visible)
+            if pending_chars >= 32 or time.monotonic() - last_flush >= 0.03:
+                flush()
+        tail = text_filter.finish()
+        if tail:
+            pending.append(tail)
+        flush()
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    return "".join(parts)
 
 
 def structured_completion(messages: list[dict[str, Any]], max_tokens: int, temperature: float,

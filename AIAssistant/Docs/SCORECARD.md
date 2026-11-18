@@ -1,7 +1,7 @@
 # AIAssistant Scorecard
 
 > Measured signals, each produced by a command in this repository — nothing
-> here is an estimate. **Last measured: 2026-11-17**, Windows, Python 3.11,
+> here is an estimate. **Last measured: 2026-11-18**, Windows, Python 3.11,
 > dependencies per `requirements-test.lock` (hash-pinned: `faiss-cpu`, `rank-bm25`, `mcp`).
 > A stripped environment measures less: the optional-dependency branches flip
 > with it (ADR 0014).
@@ -12,16 +12,16 @@
 
 ## Quality gates
 
-| Gate | Command | Measured 2026-11-17 |
+| Gate | Command | Measured 2026-11-18 |
 |------|---------|---------------------|
 | Lint | `python -m ruff check .` | 0 issues |
 | Types | `python -m mypy src/ai_assistant` | 0 issues, 155 files, `strict = true` (3 SDK-boundary modules relax 2 flags, ADR 0022) |
 | Layer contracts | `PYTHONPATH=src lint-imports --no-logo` | 10/10 contracts kept; no peer layer imports bootstrap and `internal` imports no `ai_assistant` layer |
 | Byte-compile | `python -m compileall -q evals src` | clean |
-| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 688 tests**, 0 failures, 8 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062/0063) |
-| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 11 939 statements, 3 320 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062/0063 full baseline) |
-| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **357/357** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062/0063; CI uses 2 workers) |
-| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 357` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062/0063); `PINNED_DECISION_FILES` adds a per-file floor |
+| Tests | `PYTHONPATH=src python -m tests.run_suite` | **2 712 tests**, 0 failures, 8 skipped; executable `ResourceWarning`/unraisable leak gate (ADR 0056/0058/0060/0061/0062/0063/0064) |
+| Coverage | `PYTHONPATH=src python -m coverage run -m tests.run_suite && python -m coverage report` | **100.00%** — 12 206 statements, 3 404 branches, 0 missed, 0 partial (ADR 0058/0059/0060/0061/0062/0063/0064 full baseline) |
+| Mutation | `PYTHONPATH=src python scripts/mutation_check.py --jobs 4` | **363/363** killed, 0 survived, 0 stale; isolated workers with green owning-suite preflight (ADR 0056/0058/0059/0060/0061/0062/0063/0064; CI uses 2 workers) |
+| Mutation floor | `scripts/mutation_check.py` | `MIN_MUTANTS = 363` — deleting a mutant now fails the gate (ADR 0032/0052/0053/0054/0055/0056/0057/0058/0059/0060/0061/0062/0063/0064); `PINNED_DECISION_FILES` adds a per-file floor |
 | Policy evals | `python evals/run_tool_eval.py`, `python evals/run_agentic_eval.py` | exit 0; tool: 16/16 (adversarial included); agentic: 136 cases / 27 scenarios, 0 failed, **0 skipped** (ADR 0025/0052) |
 | RAG framework eval | `python evals/run_rag_framework_eval.py` | **4/4 pass**; RAGAS 0.4.3 mean context precision **0.9375**, recall **1.0**; DeepEval 4.3.3 mean retrieval-F1 **0.9643**; offline/non-LLM (`requirements-eval.lock` / CI env) |
 | Pinned model-in-loop | `python evals/run_model_in_loop_eval.py --model-path … --min-model-coverage 0.9 --min-accuracy 0.9 --min-slice-accuracy 0.75 --min-freshness-accuracy 0.9` | Verified pinned 3B (SHA-256 `9c9f56…3f94`), measured 2026-11-12: planner **32/32 (100%)**, model coverage **100%**, all 8 language × kind slices **4/4**, p95 **3.109 s**; production freshness **16/16 (100%)**, coverage **100%**, p95 **0.203 s**. |
@@ -32,6 +32,23 @@
 | Lock sync | `PYTHONPATH=src python -m unittest tests.unit.test_lockfile_sync` | 9 case OK; mọi direct requirement của `requirements.txt`, `requirements-test.txt` **và `requirements-docker.txt`** được lock tương ứng thỏa mãn; checker tự bị test bằng ca drift giả (range vượt lock / thiếu pin) nên không thể là no-op |
 | Container lock | `pip install --require-hashes --dry-run -r requirements-docker.lock` | exit 0; CPU-only (`faiss-cpu`, **không** `faiss-gpu`/CUDA) — ADR 0032 |
 | Cross-language contract | `PYTHONPATH=src python -m unittest tests.unit.test_at_rest_cipher_contract` | 6 case OK: hằng số format đọc từ `src/core/AtRestCipher.cpp` và vector đọc từ `tests/TestAtRestCipher.cpp` phải khớp bên Python — ADR 0032 |
+
+## Verified RAG, bounded re-planning and selective token streaming (2026-11-17, ADR 0064)
+
+RAG now returns typed hits with repository-relative provenance, rank, fusion,
+rerank and confidence signals. The agent-facing path rejects missing or weak
+evidence instead of presenting it as an answer, and retrieved text is treated
+as untrusted data rather than executable instruction.
+
+The workflow critic emits closed decisions (`continue`, `retry`, `replan`,
+`ask_user`, `reconcile`, `stop`). Re-plans and tool calls have explicit
+budgets. Only a response already classified as user-visible prose streams
+tokens; planner, tool-selection and critic JSON stay atomic. SSE carries
+ordered `status`, `delta`, `step` and terminal events through a bounded queue,
+while Qt renders a draft and replaces it with the canonical final envelope.
+
+Six decision mutants pin the new fail-closed boundaries and raise the floor
+from 357 to **363/363 killed**.
 
 ## Final architecture enforcement closure (2026-11-17)
 

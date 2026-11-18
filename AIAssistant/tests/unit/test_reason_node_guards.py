@@ -266,6 +266,33 @@ class ToolCallLogRedactionTests(unittest.TestCase):
         self.assertIn("[redacted]", joined)
 
 
+class StreamingAndToolBudgetTests(unittest.TestCase):
+    def test_direct_answer_uses_the_streaming_completion_path(self) -> None:
+        streamed: list[str] = []
+        ctx = _ctx(parse=(None, None))
+        ctx.stream_complete = lambda _messages, _temperature: streamed.append("yes") or "streamed"
+        ctx.complete = lambda _messages, _temperature: self.fail("atomic completion was used")
+
+        out = reason_node(
+            _state(plan=["Explain the concept"], plan_spec={"step_kinds": ["direct_answer"]},
+                   synthesize_after_rag=True),
+            ctx,
+        )
+
+        self.assertEqual(streamed, ["yes"])
+        answers = [step for step in out["steps"] if step["type"] == "step_answer"]
+        self.assertEqual(answers[0]["content"], "streamed")
+
+    def test_tool_call_budget_stops_at_the_configured_limit(self) -> None:
+        out = reason_node(
+            _state(tool_call_count=2, max_tool_calls=2),
+            _ctx(parse=("read_file", {"path": "README.md"})),
+        )
+
+        self.assertTrue(out["done"])
+        self.assertEqual(out["steps"][-1]["type"], "final_answer")
+
+
 class ValidationErrorResponseTests(unittest.TestCase):
     def test_a_malformed_tool_call_bounces_back_with_the_error_detail(self) -> None:
         out = reason_node(

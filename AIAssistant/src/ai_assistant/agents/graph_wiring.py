@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
 from ..domain.context_budget import (
@@ -27,6 +28,59 @@ from ..tools.tool_contract import RUNTIME_UNCONFIGURED_RESULT
 from .deps import RunDeps
 
 logger = logging.getLogger("ai_assistant.agents.graph_wiring")
+
+
+def _streaming_response(
+    messages: list[dict[str, Any]],
+    current_temp: float,
+    *,
+    deps: RunDeps,
+    session_id: str,
+    event_sink: Callable[[dict[str, Any]], None] | None,
+) -> str:
+    """Generate one routed user response while publishing bounded deltas."""
+    total_chars = sum(len(message.get("content", "")) for message in messages)
+    estimated_tokens = int(total_chars / deps.chars_per_token)
+    if context_exhausted(estimated_tokens, deps.llm_n_ctx):
+        return CONTEXT_EXHAUSTED_MESSAGE
+    max_tokens = min(
+        CONTEXT_COMPLETION_CAP,
+        completion_token_budget(deps.llm_n_ctx, estimated_tokens),
+    )
+    from .completion import streaming_text_completion
+
+    def emit_delta(delta: str) -> None:
+        if event_sink is not None and delta:
+            event_sink({
+                "_stream_event": "delta",
+                "message_id": session_id,
+                "content": delta,
+            })
+
+    llm_runtime = cast(LLMRuntime, deps.llm_runtime)
+    with deps.span_fn(
+        "agent.llm.response_stream",
+        run_type="llm",
+        trace_inputs={
+            "estimated_tokens": estimated_tokens,
+            "temperature": current_temp,
+            "messages_count": len(messages),
+        },
+        trace_metadata={"max_tokens": max_tokens, "temperature": current_temp},
+    ) as trace_context:
+        answer = streaming_text_completion(
+            messages,
+            max_tokens,
+            current_temp,
+            llm_runtime,
+            deps.backend_mode_fn,
+            deps.openai_compatible_fn,
+            deps.record_token_usage_fn,
+            emit_delta,
+            lambda: deps.task_coordinator.is_cancelled(session_id),
+        )
+        trace_context["outputs"] = {"answer_chars": len(answer), "streamed": True}
+    return answer
 
 
 def _resolve_action_id(generate_action_id_fn: Callable[[], str] | None) -> str:
@@ -314,6 +368,7 @@ def build_run_graph(
         requires_approval=frozenset(tools_requiring_approval),
         warm_delegations=warm_delegations,
         emit=event_sink,
+        stream_event_sink=event_sink,
         select_specialist=select_specialist,
         approval_covers=_approval_cover_probe(deps.tool_gateway, approval_token),
         verify_result=verify_tool_result,
@@ -327,6 +382,12 @@ def build_run_graph(
         plan_reflect_complete=lambda msgs, temp: structured_completion(
             msgs, 512, temp, CRITIC_JSON_SCHEMA, llm_runtime,
             deps.backend_mode_fn, deps.openai_compatible_fn),
+        response_stream_complete=partial(
+            _streaming_response,
+            deps=deps,
+            session_id=session_id,
+            event_sink=event_sink,
+        ),
         cancel_checker=lambda: deps.task_coordinator.is_cancelled(session_id),
         checkpointer=deps.checkpointer,
     )

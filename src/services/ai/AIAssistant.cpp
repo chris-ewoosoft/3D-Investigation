@@ -708,6 +708,32 @@ void AIAssistant::consumeCompletionStream(
                     envelope["status"] = QStringLiteral("running");
                     envelope["steps"] = steps;
                     updateAgentStreamDraft(reply, request, envelope);
+                } else if (eventName == "status") {
+                    const QString node = chunk.value("node").toString();
+                    const QString phase = chunk.value("phase").toString();
+                    const QString status = node.isEmpty()
+                        ? chunk.value("status").toString()
+                        : node + QStringLiteral(": ") + phase;
+                    m_agentStreamStatuses.insert(reply, status);
+                    QJsonObject envelope;
+                    envelope["status"] = QStringLiteral("running");
+                    envelope["stream_status"] = status;
+                    envelope["steps"] = m_agentStreamSteps.value(reply);
+                    updateAgentStreamDraft(reply, request, envelope);
+                } else if (eventName == "delta") {
+                    QString &answer = m_agentStreamTexts[reply];
+                    answer += chunk.value("content").toString();
+                    QJsonArray visibleSteps = m_agentStreamSteps.value(reply);
+                    QJsonObject draftAnswer;
+                    draftAnswer["type"] = QStringLiteral("final_answer");
+                    draftAnswer["content"] = answer;
+                    draftAnswer["streaming"] = true;
+                    visibleSteps.append(draftAnswer);
+                    QJsonObject envelope;
+                    envelope["status"] = QStringLiteral("running");
+                    envelope["stream_status"] = m_agentStreamStatuses.value(reply);
+                    envelope["steps"] = visibleSteps;
+                    updateAgentStreamDraft(reply, request, envelope);
                 } else if (eventName == "done") {
                     m_agentStreamResults.insert(reply, chunk);
                     updateAgentStreamDraft(reply, request, chunk);
@@ -753,6 +779,8 @@ void AIAssistant::clearStreamState(QNetworkReply *reply) {
     m_streamErrors.remove(reply);
     m_agentStreamSteps.remove(reply);
     m_agentStreamResults.remove(reply);
+    m_agentStreamTexts.remove(reply);
+    m_agentStreamStatuses.remove(reply);
 }
 
 void AIAssistant::onServerFinished(int exitCode, bool crashed) {

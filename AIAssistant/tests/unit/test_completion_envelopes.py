@@ -21,7 +21,9 @@ from unittest.mock import MagicMock, patch
 from ai_assistant.agents import completion as _completion
 from ai_assistant.agents.completion import (
     _get_precompiled_grammar,
+    _VisibleTextFilter,
     constrained_completion,
+    streaming_text_completion,
     structured_completion,
 )
 
@@ -197,6 +199,115 @@ class ConstrainedCompletionEnvelopeTests(unittest.TestCase):
                 openai_compatible_fn=lambda *a, **kw: (_ for _ in ()).throw(OSError("boom")),
                 openai_tools=[], grammar_schema="", record_token_usage_fn=lambda *a, **kw: None,
             )
+
+
+class StreamingTextCompletionTests(unittest.TestCase):
+    def test_local_stream_emits_plain_deltas_and_filters_split_think_tags(self) -> None:
+        runtime = _FakeRuntime()
+
+        def chunks():
+            yield {"choices": [{"delta": {"content": "<thi"}}]}
+            yield {"choices": [{"delta": {"content": "nk>secret"}}]}
+            yield {"choices": [{"delta": {"content": "</think>Visible "}}]}
+            yield {"choices": [{"delta": {"content": "answer"}}]}
+
+        runtime.llm.generate.return_value = chunks()
+        deltas: list[str] = []
+        answer = streaming_text_completion(
+            [{"role": "user", "content": "hi"}],
+            64,
+            0.1,
+            runtime,
+            lambda: "llama_cpp",
+            MagicMock(),
+            lambda *_args: None,
+            deltas.append,
+            lambda: False,
+        )
+        self.assertEqual(answer, "Visible answer")
+        self.assertEqual("".join(deltas), answer)
+        self.assertTrue(runtime.llm.generate.call_args.kwargs["stream"])
+        sent_messages = runtime.llm.generate.call_args.kwargs["messages"]
+        self.assertIn("response mode", sent_messages[-1]["content"])
+
+    def test_remote_response_falls_back_to_one_complete_delta(self) -> None:
+        response = {
+            "choices": [{"message": {"content": "remote answer"}}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
+        }
+        deltas: list[str] = []
+        usage: list[tuple[int, int]] = []
+        with patch.dict(os.environ, {"AGENT_HYBRID_POLICY": "cloud_allowed"}):
+            answer = streaming_text_completion(
+                [], 64, 0.1, _FakeRuntime(None, has_llm=False),
+                lambda: "openai", lambda *args, **kwargs: response,
+                lambda first, second: usage.append((first, second)),
+                deltas.append, lambda: False,
+            )
+        self.assertEqual(answer, "remote answer")
+        self.assertEqual(deltas, ["remote answer"])
+        self.assertEqual(usage, [(2, 3)])
+
+    def test_cancelled_remote_response_does_not_emit_a_delta(self) -> None:
+        response = {"choices": [{"message": {"content": "late"}}], "usage": {}}
+        deltas: list[str] = []
+        with patch.dict(os.environ, {"AGENT_HYBRID_POLICY": "cloud_allowed"}):
+            answer = streaming_text_completion(
+                [], 64, 0.1, _FakeRuntime(None, has_llm=False),
+                lambda: "openai", lambda *args, **kwargs: response,
+                lambda *_args: None, deltas.append, lambda: True,
+            )
+        self.assertEqual(answer, "late")
+        self.assertEqual(deltas, [])
+
+    def test_cancel_stops_before_later_chunks(self) -> None:
+        runtime = _FakeRuntime()
+        runtime.llm.generate.return_value = iter([
+            {"choices": [{"delta": {"content": "first"}}]},
+            {"choices": [{"delta": {"content": "second"}}]},
+        ])
+        checks = iter([False, True])
+        answer = streaming_text_completion(
+            [], 64, 0.1, runtime, lambda: "llama_cpp", MagicMock(),
+            lambda *_args: None, lambda _delta: None,
+            lambda: next(checks, True),
+        )
+        self.assertEqual(answer, "first")
+
+    def test_visible_filter_flushes_partial_non_tag_suffix(self) -> None:
+        filter_ = _VisibleTextFilter()
+        self.assertEqual(filter_.feed(""), "")
+        self.assertEqual(filter_.feed("hello <th"), "hello ")
+        self.assertEqual(filter_.feed("ere"), "<there")
+        self.assertEqual(filter_.finish(), "")
+
+    def test_local_stream_handles_empty_chunks_threshold_flush_and_partial_tag_tail(self) -> None:
+        runtime = _FakeRuntime()
+        runtime.llm.generate.return_value = iter([
+            {"choices": []},
+            {"choices": [{"delta": {"content": "x" * 40}}]},
+            {"choices": [{"delta": {"content": "<thi"}}]},
+        ])
+        deltas: list[str] = []
+        answer = streaming_text_completion(
+            [], 64, 0.1, runtime, lambda: "llama_cpp", MagicMock(),
+            lambda *_args: None, deltas.append, lambda: False,
+        )
+        self.assertEqual(answer, "x" * 40 + "<thi")
+        self.assertEqual("".join(deltas), answer)
+
+    def test_unclosed_think_block_emits_nothing(self) -> None:
+        runtime = _FakeRuntime()
+        runtime.llm.generate.return_value = iter([
+            {"choices": [{"delta": {"content": "<think>secret"}}]},
+        ])
+        deltas: list[str] = []
+        answer = streaming_text_completion(
+            [], 64, 0.1, runtime, lambda: "llama_cpp", MagicMock(),
+            lambda *_args: None, deltas.append, lambda: False,
+        )
+        self.assertEqual(answer, "")
+        self.assertEqual(deltas, [])
 
 
 class StructuredCompletionTests(unittest.TestCase):

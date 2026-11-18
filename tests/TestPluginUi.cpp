@@ -762,6 +762,8 @@ void TestPluginUi::theAgentTraceRendersItsSteps()
     QJsonObject envelope;
     envelope["steps"] = steps;
     envelope["prior_step_count"] = 0;
+    envelope["status"] = QStringLiteral("running");
+    envelope["stream_status"] = QStringLiteral("reason: started");
 
     QList<ChatMessage> history;
     history.append(makeMessage(ChatRole::AgentTrace,
@@ -775,6 +777,8 @@ void TestPluginUi::theAgentTraceRendersItsSteps()
              "the agent's final answer is missing");
     QVERIFY2(html.contains(QStringLiteral("đang suy nghĩ")),
              "the agent's thinking step is missing");
+    QVERIFY2(html.contains(QStringLiteral("reason: started")),
+             "the live graph-node status is missing");
 }
 
 /// One agent step of the given type with the given fields.

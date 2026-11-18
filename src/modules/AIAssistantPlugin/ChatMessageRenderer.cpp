@@ -172,6 +172,11 @@ QString ChatMessageRenderer::buildMessageHtml(const QString &role, const QString
         QJsonArray steps = res["steps"].toArray();
         const int priorStepCount = skipSteps >= 0 ? skipSteps : res["prior_step_count"].toInt();
         QString html;
+        const QString streamStatus = res.value("stream_status").toString();
+        if (res.value("status").toString() == "running" && !streamStatus.isEmpty()) {
+            html += ChatTemplates::AGENT_THINKING.arg(
+                ctx->translate("ai.thinking"), streamStatus.toHtmlEscaped());
+        }
         bool transferredToChatbot = false;
         for (const QJsonValue& value : steps) {
             const QJsonObject step = value.toObject();

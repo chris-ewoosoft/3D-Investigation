@@ -25,6 +25,9 @@ def _reuse_prior_plan(state: AgentState) -> dict[str, Any] | None:
     Returns the state update when planning can be skipped, else ``None`` so
     the caller proceeds to the planner.
     """
+    if state.get("replan_requested"):
+        return None
+
     previous_review = next(
         (step.get("result", {}) for step in reversed(state.get("steps", []))
          if has_step_type(step, "plan_reflection")), None)
@@ -151,6 +154,7 @@ def plan_node(state: AgentState, plan_complete: Completion) -> dict[str, Any]:
         logger.info(f"[NODE: plan] Đã sinh kế hoạch: {plan}")
         return {"plan": plan, "steps": steps,
                 "plan_verified": False,
+                "replan_requested": False,
                 "plan_attempts": state.get("plan_attempts", 0) + 1,
                 "plan_spec": plan_spec,
                 "plan_feedback": ""}
@@ -166,4 +170,4 @@ def plan_node(state: AgentState, plan_complete: Completion) -> dict[str, Any]:
         logger.info("[NODE: plan] Planner xác nhận tác vụ một bước.")
     # Một yêu cầu duy nhất (requires_plan=false) không có "plan" nhưng vẫn cần
     # "plan_spec.step_kinds" để Reason biết dùng rag_search/direct/tool.
-    return {"plan": None, "plan_spec": plan_spec}
+    return {"plan": None, "plan_spec": plan_spec, "replan_requested": False}

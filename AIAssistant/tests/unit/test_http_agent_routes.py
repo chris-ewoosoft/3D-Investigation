@@ -102,6 +102,27 @@ class AgentRoutesTest(unittest.TestCase):
         self.assertEqual(owner, DEFAULT_MEMORY_OWNER)
         self.assertIsNotNone(event_sink)
 
+    def test_execute_streams_status_and_delta_events_with_sequences(self) -> None:
+        class _StreamingService(_FakeAgentService):
+            def execute(self, request, *, owner=None, event_sink=None, client_host=None):
+                event_sink({"_stream_event": "status", "node": "reason", "phase": "started"})
+                event_sink({"_stream_event": "delta", "message_id": "m1", "content": "hello"})
+                event_sink({"_stream_event": "invalid", "content": "fallback"})
+                return {"status": "completed"}
+
+        client, _ = _build_client(_StreamingService())
+        response = client.post(
+            "/v1/agent/execute",
+            json={"task": "answer"},
+            headers={"accept": "text/event-stream"},
+        )
+        self.assertIn("event: status", response.text)
+        self.assertIn("event: delta", response.text)
+        self.assertIn("event: step", response.text)
+        self.assertIn('"content": "hello"', response.text)
+        self.assertIn('"content": "fallback"', response.text)
+        self.assertIn('"seq": 3', response.text)
+
     def test_execute_streams_error_event_when_service_fails(self) -> None:
         failing = _FakeAgentService(execute_error=RuntimeError("boom"))
         client, _ = _build_client(failing)

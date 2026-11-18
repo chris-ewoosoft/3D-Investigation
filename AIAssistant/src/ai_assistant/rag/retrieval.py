@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from ..image_utils import image_to_data_uri
-from .domain import ChunkResult
+from .domain import ChunkResult, RagHit, RetrievalResult
 from .nlp_utils import expand_project_role_query
 
 logger = logging.getLogger("ai_assistant.rag.retrieval")
@@ -32,6 +32,24 @@ def hybrid_retrieve(
     final_k: int = 12
 ) -> list[ChunkResult]:
     """Hybrid semantic (text/image) + BM25 (text only) retrieval."""
+    ranked = hybrid_retrieve_scored(
+        query, query_image_b64, vector_retriever, bm25_retriever,
+        knowledge_chunks, similarity_threshold, k=k, final_k=final_k,
+    )
+    return [knowledge_chunks[chunk_id] for chunk_id, _score in ranked]
+
+
+def hybrid_retrieve_scored(
+    query: str,
+    query_image_b64: str | None,
+    vector_retriever: Any,
+    bm25_retriever: Any,
+    knowledge_chunks: list[ChunkResult],
+    similarity_threshold: float,
+    k: int = 30,
+    final_k: int = 12,
+) -> list[tuple[int, float]]:
+    """Return fused chunk identities without discarding their RRF score."""
     if vector_retriever is None or bm25_retriever is None or not knowledge_chunks or (not query.strip() and not query_image_b64):
         return []
 
@@ -48,7 +66,7 @@ def hybrid_retrieve(
     combined = rrf_fuse([dense_ids, sparse_ids], [0.55, 0.45])
 
     combined.sort(key=lambda x: x[1], reverse=True)
-    return [knowledge_chunks[cid] for cid, _ in combined[:final_k]]
+    return combined[:final_k]
 
 
 def rerank_chunks(query: str, chunks: list[ChunkResult], reranker: Any) -> list[ChunkResult]:
@@ -61,9 +79,37 @@ def rerank_chunks(query: str, chunks: list[ChunkResult], reranker: Any) -> list[
         ranked = sorted(zip(scores, chunks, strict=True), key=lambda x: x[0], reverse=True)
         logger.debug("Rerank scores: %s", [f"{s:.3f}" for s, _ in ranked])
         return [c for _, c in ranked]
-    except Exception as e:
-        logger.warning("Reranker failed, fallback: %s", e)
+    except Exception as error:
+        logger.warning("Reranker failed, fallback: %s", error)
         return chunks
+
+
+def _rerank_scored(
+    query: str,
+    candidates: list[tuple[int, float]],
+    chunks: list[ChunkResult],
+    reranker: Any,
+) -> list[tuple[int, float, float | None]]:
+    """Rerank while retaining chunk identity and both ranking signals."""
+    if reranker is None or not candidates:
+        return [(chunk_id, fusion_score, None) for chunk_id, fusion_score in candidates]
+    try:
+        pairs = [(query, chunks[chunk_id].text[:600]) for chunk_id, _ in candidates]
+        scores = reranker.predict(pairs, show_progress_bar=False)
+        ranked: list[tuple[int, float, float | None]] = sorted(
+            (
+                (chunk_id, fusion_score, float(rerank_score))
+                for rerank_score, (chunk_id, fusion_score) in zip(scores, candidates, strict=True)
+            ),
+            key=lambda item: item[2] if item[2] is not None else float("-inf"),
+            reverse=True,
+        )
+        logger.debug("Rerank scores: %s", [f"{score:.3f}" for _, _, score in ranked])
+    except Exception as error:
+        logger.warning("Reranker failed, fallback: %s", error)
+        return [(chunk_id, fusion_score, None) for chunk_id, fusion_score in candidates]
+    else:
+        return ranked
 
 
 def dedup_by_source(chunks: list[ChunkResult], max_per_source: int = 2) -> list[ChunkResult]:
@@ -133,6 +179,7 @@ class RetrievalPipeline:
         similarity_threshold: float = 0.30,
         use_reranker: bool = True,
         reranker_top_k: int = 8,
+        answerability_threshold: float = 0.40,
     ):
         self.vector_retriever = vector_retriever
         self.bm25_retriever = bm25_retriever
@@ -142,19 +189,108 @@ class RetrievalPipeline:
         self.similarity_threshold = similarity_threshold
         self.use_reranker = use_reranker
         self.reranker_top_k = reranker_top_k
+        self.answerability_threshold = max(0.0, min(float(answerability_threshold), 1.0))
 
-    def get_context(self, query: str, query_image_b64: str | None = None, result_k: int | None = None) -> tuple[str, str, list[str]]:
+    @staticmethod
+    def _confidence(fusion_score: float) -> float:
+        """Normalise RRF against the best possible rank-one two-channel hit."""
+        best_possible = 1.0 / 61.0
+        return max(0.0, min(1.0, fusion_score / best_possible))
+
+    def search(
+        self,
+        query: str,
+        query_image_b64: str | None = None,
+        result_k: int | None = None,
+    ) -> RetrievalResult:
+        """Retrieve structured, attributable evidence with a no-answer gate."""
+        if not query.strip() and not query_image_b64:
+            return RetrievalResult.empty(query, "empty_query")
+        if self.vector_retriever is None or self.bm25_retriever is None or not self.knowledge_chunks:
+            return RetrievalResult.empty(query, "index_unavailable")
         if result_k is None:
             result_k = self.reranker_top_k
 
         retrieval_query = expand_project_role_query(query)
         candidate_pool = min(30, max(12, int(result_k) * 3))
-        
+        fused = hybrid_retrieve_scored(
+            query,
+            query_image_b64,
+            self.vector_retriever,
+            self.bm25_retriever,
+            self.knowledge_chunks,
+            self.similarity_threshold,
+            k=candidate_pool,
+            final_k=candidate_pool,
+        )
+        ranked = _rerank_scored(
+            retrieval_query,
+            fused,
+            self.knowledge_chunks,
+            self.reranker if self.use_reranker and query else None,
+        )
+
+        selected: list[tuple[int, float, float | None]] = []
+        per_source: dict[str, int] = {}
+        limit = max(1, min(int(result_k), self.reranker_top_k))
+        for chunk_id, fusion_score, rerank_score in ranked:
+            chunk = self.knowledge_chunks[chunk_id]
+            source = chunk.source_path
+            if per_source.get(source, 0) >= 2:
+                continue
+            per_source[source] = per_source.get(source, 0) + 1
+            selected.append((chunk_id, fusion_score, rerank_score))
+            if len(selected) >= limit:
+                break
+
+        hits: list[RagHit] = []
+        for rank, (chunk_id, fusion_score, rerank_score) in enumerate(selected, 1):
+            chunk = self.knowledge_chunks[chunk_id]
+            metadata = chunk.metadata or {}
+            hits.append(RagHit(
+                chunk_id=chunk_id,
+                text=chunk.text,
+                source_path=str(metadata.get("relative_path") or chunk.source_path),
+                loader_type=chunk.loader_type,
+                rank=rank,
+                fusion_score=float(fusion_score),
+                confidence=self._confidence(float(fusion_score)),
+                rerank_score=rerank_score,
+                symbol=str(metadata["symbol"]) if metadata.get("symbol") else None,
+                heading=str(metadata["heading"]) if metadata.get("heading") else None,
+                line_start=int(metadata["line_start"]) if metadata.get("line_start") is not None else None,
+                line_end=int(metadata["line_end"]) if metadata.get("line_end") is not None else None,
+                is_image=chunk.is_image,
+            ))
+
+        confidence = hits[0].confidence if hits else 0.0
+        answerable = bool(hits) and confidence >= self.answerability_threshold
+        reason = "evidence_found" if answerable else ("low_confidence" if hits else "no_hits")
+        return RetrievalResult(
+            query=query,
+            hits=tuple(hits),
+            confidence=confidence,
+            answerable=answerable,
+            reason=reason,
+        )
+
+    def get_context(self, query: str, query_image_b64: str | None = None, result_k: int | None = None) -> tuple[str, str, list[str]]:
+        """Compatibility formatter for callers that still consume context blocks.
+
+        New agent/tool callers use :meth:`search` and its answerability gate.
+        Keeping this adapter on the legacy retrieval seam also preserves
+        injected/third-party retrievers that return chunk objects directly.
+        """
+        if result_k is None:
+            result_k = self.reranker_top_k
+
+        retrieval_query = expand_project_role_query(query)
+        candidate_pool = min(30, max(12, int(result_k) * 3))
         candidates = hybrid_retrieve(
             query, query_image_b64,
             self.vector_retriever, self.bm25_retriever,
             self.knowledge_chunks, self.similarity_threshold,
-            k=candidate_pool, final_k=candidate_pool
+            k=candidate_pool, final_k=candidate_pool,
         )
 
         if self.use_reranker and query:

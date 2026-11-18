@@ -126,8 +126,8 @@ def _sse_events(events: queue.Queue[tuple[str, object]],
         yield 'event: status\ndata: {"status": "running"}\n\n'
         while True:
             kind, value = events.get()
-            if kind == "step":
-                yield f"event: step\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
+            if kind in {"status", "delta", "step"}:
+                yield f"event: {kind}\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
             elif kind == "result":
                 finished = True
                 yield f"event: done\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
@@ -147,11 +147,26 @@ def _stream_langgraph_execution(
     worker_tracker: AgentStreamWorkerTracker | None = None,
 ) -> StreamingResponse:
     """Stream agent node/tool steps as they happen over SSE."""
-    events: queue.Queue[tuple[str, object]] = queue.Queue()
+    # Backpressure is part of the stream contract: a disconnected or slow UI
+    # must not let token deltas grow an unbounded in-memory queue.
+    events: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=256)
+    sequence = 0
+    sequence_lock = threading.Lock()
+
+    def publish(payload: dict[str, Any]) -> None:
+        nonlocal sequence
+        event_payload = dict(payload)
+        kind = str(event_payload.pop("_stream_event", "step"))
+        if kind not in {"status", "delta", "step"}:
+            kind = "step"
+        with sequence_lock:
+            sequence += 1
+            event_payload.setdefault("seq", sequence)
+        events.put((kind, event_payload))
 
     def worker() -> None:
         try:
-            events.put(("result", run(lambda step: events.put(("step", step)))))
+            events.put(("result", run(publish)))
         except BaseException as error:  # Stream worker boundary must always unblock _sse_events.
             events.put(("error", str(error) or type(error).__name__))
 

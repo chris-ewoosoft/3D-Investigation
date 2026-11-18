@@ -355,6 +355,19 @@ class RagModule:
             return ("", "", [])
         return doc_ctx, code_ctx, image_chunks
 
+    def search(self, query: str, result_k: int | None = None) -> Any:
+        """Return structured evidence without exposing mutable pipeline state."""
+        from ai_assistant.rag.domain import RetrievalResult
+
+        pipeline = getattr(self, "_pipeline", None)
+        if pipeline is None:
+            return RetrievalResult.empty(query, "index_unavailable")
+        try:
+            return pipeline.search(query, result_k=result_k)
+        except Exception:
+            logger.exception("Structured RAG retrieval failed")
+            return RetrievalResult.empty(query, "retrieval_error")
+
     @property
     def reranker_active(self) -> bool:
         """Whether a cross-encoder is wired into the current pipeline.

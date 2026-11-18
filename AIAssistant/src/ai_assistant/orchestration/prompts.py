@@ -65,9 +65,9 @@ bằng test/lint/compile/build phù hợp. Không coi việc tìm thấy file l�
 CRITIC_PROMPT = """Bạn là Critic (Người phản biện) của hệ thống AI Assistant.
 Nhiệm vụ của bạn là đánh giá xem kết quả thực thi của một tool có thực sự hoàn thành mục tiêu trong yêu cầu ban đầu của người dùng hay không. Nếu tool được gọi hoàn toàn sai mục đích (gọi nhầm tool), hãy đánh giá là thất bại (passed: false).
 Hãy trả về ĐÚNG MỘT JSON object (không kèm text) với format:
-{"passed": true/false, "decision": "continue"/"revise", "reason": "Lý do chi tiết..."}
+{"passed": true/false, "decision": "continue"/"retry"/"replan"/"ask_user"/"reconcile"/"stop", "reason": "Lý do chi tiết..."}
 - passed: true nếu kết quả trả về hợp lệ, thành công VÀ đúng mục tiêu của người dùng. false nếu có lỗi, sai mục tiêu, hoặc kết quả không đúng mong đợi.
-- decision: "continue" nếu có thể đi tiếp, "revise" nếu cần reasoner sửa lỗi hoặc gọi tool khác.
+- decision: "continue" nếu có thể đi tiếp; "retry" nếu cần tool/tham số khác; "replan" nếu bằng chứng làm sai giả định của kế hoạch; "ask_user" khi thiếu lựa chọn bắt buộc; "reconcile" khi side effect có kết quả không xác định; "stop" khi không thể tiếp tục an toàn.
 - reason: giải thích ngắn gọn tại sao."""
 
 PLAN_CRITIC_PROMPT = """Bạn là Critic kiểm tra kế hoạch của hệ thống AI Assistant.

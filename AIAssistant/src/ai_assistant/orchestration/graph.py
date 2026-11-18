@@ -367,6 +367,7 @@ class LocalAgentGraph:
         needs_approval: NeedsApproval,
         max_iterations: int,
         emit: Callable[[dict[str, Any]], None] | None = None,
+        stream_event_sink: Callable[[dict[str, Any]], None] | None = None,
         select_specialist: SelectSpecialist | None = None,
         approval_covers: ApprovalCovers | None = None,
         verify_result: VerifyResult | None = None,
@@ -374,6 +375,7 @@ class LocalAgentGraph:
         plan_complete: Completion | None = None,
         reflect_complete: Completion | None = None,
         plan_reflect_complete: Completion | None = None,
+        response_stream_complete: Completion | None = None,
         cancel_checker: Callable[[], bool] | None = None,
         # Parallel tool batches (ADR 0044): the width, the group-wide approval
         # refusal set and the sequential delegation precompute. Defaulted so a
@@ -392,6 +394,7 @@ class LocalAgentGraph:
         self._needs_approval = needs_approval
         self._max_iterations = max_iterations
         self._emit = emit
+        self._stream_event_sink = stream_event_sink
         self._select_specialist = select_specialist
         self._approval_covers = approval_covers
         self._verify_result = verify_result
@@ -399,6 +402,7 @@ class LocalAgentGraph:
         self._plan_complete = plan_complete or complete
         self._reflect_complete = reflect_complete or complete
         self._plan_reflect_complete = plan_reflect_complete
+        self._response_stream_complete = response_stream_complete
         self._cancel_checker = cancel_checker or (lambda: False)
         self._max_parallel = max_parallel
         self._requires_approval = requires_approval
@@ -443,7 +447,7 @@ class LocalAgentGraph:
         engine.add_conditional_edges(
             "reflect",
             self._after_reflect,
-            {"reason": "reason", "end": END},
+            {"reason": "reason", "plan": "plan", "end": END},
         )
 
         self._checkpointer = checkpointer
@@ -485,6 +489,14 @@ class LocalAgentGraph:
                 done_count=done_count, tool_name=tool_name, tool_params=tool_params,
             )
 
+            if self._stream_event_sink:
+                self._stream_event_sink({
+                    "_stream_event": "status",
+                    "node": name,
+                    "phase": "started",
+                    "iteration": iteration,
+                })
+
             with span(
                 f"agent.{name}",
                 trace_inputs=trace_inputs,
@@ -496,6 +508,13 @@ class LocalAgentGraph:
                     trace_context["outputs"] = _build_node_trace_outputs(
                         name=name, result=result, state=state, plan=plan,
                     )
+            if self._stream_event_sink:
+                self._stream_event_sink({
+                    "_stream_event": "status",
+                    "node": name,
+                    "phase": "completed",
+                    "iteration": result.get("iteration", iteration),
+                })
             if self._emit and result.get("steps"):
                 steps = result["steps"]
                 for step in steps[self._emitted_steps:]:
@@ -560,6 +579,10 @@ class LocalAgentGraph:
             "routing_plan": "supervisor",
             "enforce_plan_completion": enforce_plan_completion,
             "enforce_coding_workflow": is_coding_task(next((m.get("content", "") for m in messages if m.get("role") == "user"), "")),
+            "replan_requested": False,
+            "replan_count": 0,
+            "max_replans": 2,
+            "max_tool_calls": max(4, self._max_iterations),
         }
 
         if required_ui_actions is not None:
@@ -610,6 +633,7 @@ class LocalAgentGraph:
             cancel_checker=self._cancel_checker,
             select_specialist=self._select_specialist,
             approval_covers=self._approval_covers,
+            stream_complete=self._response_stream_complete,
         )
         return reason_node(state, ctx)
 

@@ -24,7 +24,8 @@ from ai_assistant.orchestration.graph import (
 )
 
 
-def _graph(emit=None, checkpointer: Any | None = None) -> LocalAgentGraph:
+def _graph(emit=None, checkpointer: Any | None = None,
+           stream_event_sink=None) -> LocalAgentGraph:
     if checkpointer is not None:
         # LangGraph refuses an arbitrary object; a real in-memory saver keeps
         # the compile() call honest while still exercising the resume path.
@@ -38,6 +39,7 @@ def _graph(emit=None, checkpointer: Any | None = None) -> LocalAgentGraph:
         needs_approval=lambda _tool, _params: False,
         max_iterations=3,
         emit=emit,
+        stream_event_sink=stream_event_sink,
         checkpointer=checkpointer,
     )
 
@@ -92,6 +94,16 @@ class StepStreamingTests(unittest.TestCase):
         node = graph._traced("reason", lambda _state: {"done": True})
         node({"iteration": 1, "routing_plan": "supervisor", "steps": []})
         self.assertEqual(seen, [])
+
+    def test_node_lifecycle_status_is_streamed_around_the_handler(self):
+        events: list[dict[str, Any]] = []
+        graph = _graph(stream_event_sink=events.append)
+        node = graph._traced("reason", lambda _state: {"done": True, "iteration": 2})
+
+        node({"iteration": 1, "routing_plan": "supervisor", "steps": []})
+
+        self.assertEqual([event["phase"] for event in events], ["started", "completed"])
+        self.assertEqual(events[-1]["iteration"], 2)
 
 
 class NodeTracePayloadTests(unittest.TestCase):

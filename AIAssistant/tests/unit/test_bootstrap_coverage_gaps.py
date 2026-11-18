@@ -318,6 +318,15 @@ class BootstrapServerCoverageGaps(unittest.TestCase):
         result = rag.get_context("test", None, None)
         self.assertIsInstance(result, tuple)
         self.assertEqual(result, ("", "", []))
+        self.assertEqual(rag.search("test").reason, "index_unavailable")
+        pipeline = MagicMock()
+        pipeline.search.return_value = "structured"
+        rag._pipeline = pipeline
+        self.assertEqual(rag.search("test", 3), "structured")
+        pipeline.search.assert_called_once_with("test", result_k=3)
+        pipeline.search.side_effect = RuntimeError("retrieval failed")
+        self.assertEqual(rag.search("test").reason, "retrieval_error")
+        rag._pipeline = None
         # Disabled branch (AI_ENABLE_RAG=0): no I/O, deterministic.
         with patch.dict(os.environ, {"AI_ENABLE_RAG": "0"}):
             self.assertEqual(rag.initialize_rag(enable_reranker=False, force_rebuild=False), 0)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 # The step vocabulary (``StepType``/``Step``/``has_step_type``) is a domain
 # contract — ``ai_assistant.domain.steps``, ADR 0019 — re-exported here
@@ -43,11 +43,21 @@ class AgentState(TypedDict):
     prior_plan:      list[str] | None
     enforce_plan_completion: bool              # coding tasks must complete plan steps
     enforce_coding_workflow: bool              # coding tasks need observable evidence
+    replan_requested: bool                     # reflection invalidated the active plan
+    replan_count: int                          # bounded number of runtime replans
+    max_replans: int                           # hard guard against critic/replan loops
+    max_tool_calls: int                        # run-wide tool budget
+
+
+WorkflowDecision = Literal[
+    "continue", "retry", "replan", "ask_user", "reconcile", "stop",
+]
 
 
 # ── Callback type aliases ──────────────────────────────────────────────────────
 
 Completion       = Callable[[list[dict[str, str]], float], str]
+StreamingCompletion = Callable[[list[dict[str, str]], float], str]
 Parser           = Callable[[str], tuple[str | None, dict[str, Any] | None]]
 Executor         = Callable[[str, dict[str, Any]], dict[str, Any]]
 NeedsApproval    = Callable[[str], bool]

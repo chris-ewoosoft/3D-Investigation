@@ -221,6 +221,40 @@ class AfterReflectRouterTests(unittest.TestCase):
     def test_an_ordinary_run_loops_back_to_reason(self):
         self.assertEqual(after_reflect(_state()), "reason")
 
+    def test_replan_decision_routes_to_plan_and_carries_feedback(self):
+        state = _state(
+            steps=_steps(), plan=["Read the wrong subsystem"],
+            replan_count=0, max_replans=2,
+        )
+        outcome = reflect_node(
+            state,
+            _ctx('{"passed": false, "decision": "replan", "reason": "wrong premise"}'),
+        )
+        self.assertTrue(outcome["replan_requested"])
+        self.assertEqual(outcome["replan_count"], 1)
+        routed = {**state, **outcome}
+        self.assertEqual(after_reflect(routed), "plan")
+        self.assertEqual(outcome["plan_feedback"], "wrong premise")
+
+    def test_replan_budget_stops_the_run(self):
+        state = _state(steps=_steps(), replan_count=2, max_replans=2)
+        outcome = reflect_node(
+            state,
+            _ctx('{"passed": false, "decision": "replan", "reason": "still wrong"}'),
+        )
+        self.assertTrue(outcome["done"])
+        self.assertFalse(outcome["replan_requested"])
+        self.assertEqual(outcome["steps"][-1]["type"], "final_answer")
+
+    def test_stop_decision_ends_with_a_user_visible_reason(self):
+        state = _state(steps=_steps())
+        outcome = reflect_node(
+            state,
+            _ctx('{"passed": false, "decision": "stop", "reason": "unsafe"}'),
+        )
+        self.assertTrue(outcome["done"])
+        self.assertEqual(outcome["steps"][-1]["content"], "unsafe")
+
 
 if __name__ == "__main__":
     unittest.main()
